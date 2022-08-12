@@ -5,7 +5,11 @@ program kraftsandbox;
 uses
 {$ifdef unix}
   cthreads,
-{$endif}  
+{$endif}
+{$ifdef Windows}
+  Windows,
+  MMSystem,
+{$endif}
   SysUtils,
   Forms, Interfaces,
   UnitFormMain in 'UnitFormMain.pas' {FormMain},
@@ -29,16 +33,22 @@ uses
   UnitDemoSceneDomino in 'UnitDemoSceneDomino.pas',
   UnitDemoSceneChairAndTable in 'UnitDemoSceneChairAndTable.pas',
   UnitDemoSceneConvexHull in 'UnitDemoSceneConvexHull.pas',
-  UnitDemoSceneCar in 'UnitDemoSceneCar.pas',
+  UnitDemoSceneConstraintVehicle,
   UnitDemoSceneRaycastVehicle in 'UnitDemoSceneRaycastVehicle.pas';
 
 {$R *.res}
 
 begin
+{$ifdef Windows}
+  timeBeginPeriod(1);
+{$endif}
   FormatSettings.DecimalSeparator:='.';
   FormatSettings.ThousandSeparator:=',';
   //Application.UpdateFormatSettings:=false;
   Application.Initialize;
   Application.CreateForm(TFormMain, FormMain);
   Application.Run;
+{$ifdef Windows}
+  timeEndPeriod(1);
+{$endif}
 end.
