@@ -80,6 +80,7 @@ unit KraftArcadeCarPhysics;
    {$define BIG_ENDIAN}
   {$endif}
  {$endif}
+ {$packset fixed}
 {$else}
  {$define LITTLE_ENDIAN}
  {$ifndef cpu64}
@@ -169,11 +170,13 @@ uses {$ifdef windows}
       {$endif}
      {$endif}
      {$ifdef DebugDraw}
-      {$ifdef fpc}
-       GL,
-       GLext,
-      {$else}
-       OpenGL,
+      {$ifndef NoOpenGL}
+       {$ifdef fpc}
+        GL,
+        GLext,
+       {$else}
+        OpenGL,
+       {$endif}
       {$endif}
      {$endif}
      SysUtils,
@@ -182,6 +185,9 @@ uses {$ifdef windows}
 {$ifdef KraftPasMP}
      PasMP,
 {$endif}
+{$ifdef KraftPasJSON}
+     PasJSON,
+{$endif}
      Math,
      Kraft;
 
@@ -189,9 +195,16 @@ type { TVehicle }
      TVehicle=class
       public
        const WheelWidth=0.085;
-       type { TEnvelope }
+       type TDebugDrawLine=procedure(const aP0,aP1:TKraftVector3;const aColor:TKraftVector4) of object;
+            { TEnvelope }
             TEnvelope=class
              public
+              type TMode=
+                    (
+                     Custom,
+                     Linear,
+                     EaseInOut
+                    );
               type TPoint=record
                     private
                      fTime:TKraftScalar;
@@ -203,22 +216,29 @@ type { TVehicle }
                    PPoint=^TPoint;
                    TPoints=array of TPoint;
              private
+              fMode:TMode;
               fPoints:TPoints;
-              fCount:Int32;
+              fCount:TKraftInt32;
              public
               constructor Create; reintroduce;
               constructor CreateLinear(const aTimeStart,aValueStart,aTimeEnd,aValueEnd:TKraftScalar);
-              constructor CreateEaseInOut(const aTimeStart,aValueStart,aTimeEnd,aValueEnd:TKraftScalar;const aSteps:Int32=16);
+              constructor CreateEaseInOut(const aTimeStart,aValueStart,aTimeEnd,aValueEnd:TKraftScalar;const aSteps:TKraftInt32=16);
               destructor Destroy; override;
               procedure Clear;
               procedure Assign(const aFrom:TEnvelope);
               procedure Insert(const aTime,aValue:TKraftScalar);
-              function GetTimeAtIndex(const aIndex:Int32):TKraftScalar;
-              function GetValueAtIndex(const aIndex:Int32):TKraftScalar;
-              function GetIndexFromTime(const aTime:TKraftScalar):Int32;
+              procedure FillLinear(const aTimeStart,aValueStart,aTimeEnd,aValueEnd:TKraftScalar);
+              procedure FillEaseInOut(const aTimeStart,aValueStart,aTimeEnd,aValueEnd:TKraftScalar;const aSteps:TKraftInt32=16);
+{$ifdef KraftPasJSON}
+              procedure LoadFromJSON(const aJSONItem:TPasJSONItem);
+              function SaveToJSON:TPasJSONItem;
+{$endif}
+              function GetTimeAtIndex(const aIndex:TKraftInt32):TKraftScalar;
+              function GetValueAtIndex(const aIndex:TKraftInt32):TKraftScalar;
+              function GetIndexFromTime(const aTime:TKraftScalar):TKraftInt32;
               function GetValueAtTime(const aTime:TKraftScalar):TKraftScalar;
              published
-              property Count:Int32 read fCount;
+              property Count:TKraftInt32 read fCount;
             end;
             { TAxle }
             TAxle=class
@@ -248,6 +268,12 @@ type { TVehicle }
                      fWorldTransform:TKraftMatrix4x4;
                      fLastWorldTransform:TKraftMatrix4x4;
                      fVisualWorldTransform:TKraftMatrix4x4;
+                     fLastLocalWheelPosition:TKraftVector3;
+                     fLastLocalWheelRotation:TKraftVector3;
+                     fLocalWheelPosition:TKraftVector3;
+                     fLocalWheelRotation:TKraftVector3;
+                     fVisualLocalWheelPosition:TKraftVector3;
+                     fVisualLocalWheelRotation:TKraftVector3;
 {$ifdef DebugDraw}
                      fDebugDrawLinePoints:array[0..1] of TKraftVector3;
                      fDebugSlidingVelocity:TKraftVector3;
@@ -275,11 +301,15 @@ type { TVehicle }
                      constructor Create(const aAxle:TAxle;const aOffset:TKraftScalar); reintroduce;
                      destructor Destroy; override;
                      procedure UpdateSuspensionLength;
-                     procedure Update(const aWorldSpacePosition:TKraftVector3;const aTotalWheelsCount,aCountPoweredWheels:Int32;const aLeft:boolean);
+                     procedure Update(const aWorldSpacePosition:TKraftVector3;const aTotalWheelsCount,aCountPoweredWheels:TKraftInt32;const aLeft:boolean);
                      procedure CalculateWheelRotationFromSpeed;
                      procedure UpdateVisual;
                      procedure StoreWorldTransforms;
                      procedure InterpolateWorldTransforms(const aAlpha:TKraftScalar);
+{$ifdef KraftPasJSON}
+                     procedure LoadFromJSON(const aJSONItem:TPasJSONItem);
+                     function SaveToJSON:TPasJSONItem;
+{$endif}
 {$ifdef DebugDraw}
                      procedure DebugDraw;
 {$endif}
@@ -303,6 +333,10 @@ type { TVehicle }
                     public
                      property WorldTransform:TKraftMatrix4x4 read fWorldTransform write fWorldTransform;
                      property VisualWorldTransform:TKraftMatrix4x4 read fVisualWorldTransform write fVisualWorldTransform;
+                     property LocalWheelPosition:TKraftVector3 read fLocalWheelPosition write fLocalWheelPosition;
+                     property LocalWheelRotation:TKraftVector3 read fLocalWheelRotation write fLocalWheelRotation;
+                     property VisualLocalWheelPosition:TKraftVector3 read fVisualLocalWheelPosition write fVisualLocalWheelPosition;
+                     property VisualLocalWheelRotation:TKraftVector3 read fVisualLocalWheelRotation write fVisualLocalWheelRotation;
                    end;
              private
               fVehicle:TVehicle;
@@ -341,10 +375,14 @@ type { TVehicle }
               destructor Destroy; override;
               procedure ApplyAntiRoll;
               procedure UpdateSuspensionLengths;
-              procedure Update(const aTotalWheelsCount,aCountPoweredWheels:Int32);
+              procedure Update(const aTotalWheelsCount,aCountPoweredWheels:TKraftInt32);
               procedure UpdateVisual;
               procedure StoreWorldTransforms;
               procedure InterpolateWorldTransforms(const aAlpha:TKraftScalar);
+{$ifdef KraftPasJSON}
+              procedure LoadFromJSON(const aJSONItem:TPasJSONItem);
+              function SaveToJSON:TPasJSONItem;
+{$endif}
 {$ifdef DebugDraw}
               procedure DebugDraw;
 {$endif}
@@ -376,7 +414,7 @@ type { TVehicle }
        fKraftPhysics:TKraft;
        fAccelerationCurveEnvelope:TEnvelope;
        fReverseAccelerationCurveEnvelope:TEnvelope;
-       fReverseEvaluationAccuracy:Int32;
+       fReverseEvaluationAccuracy:TKraftInt32;
        fSteerAngleLimitEnvelope:TEnvelope;
        fSteeringResetSpeedEnvelope:TEnvelope;
        fSteeringSpeedEnvelope:TEnvelope;
@@ -391,6 +429,7 @@ type { TVehicle }
        fAfterFlightSlipperyTiresTime:TKraftScalar;
        fBrakeSlipperyTiresTime:TKraftScalar;
        fHandBrakeSlipperyTiresTime:TKraftScalar;
+       fUseSphereCast:boolean;
        fIsBrake:boolean;
        fIsHandBrake:boolean;
        fIsAcceleration:boolean;
@@ -428,6 +467,7 @@ type { TVehicle }
        fInputHandBrake:Boolean;
        fSpeed:TKraftScalar;
        fSpeedKMH:TKraftScalar;
+       fDebugDrawLine:TDebugDrawLine;
       public
        constructor Create(const aKraftPhysics:TKraft); reintroduce;
        destructor Destroy; override;
@@ -445,13 +485,17 @@ type { TVehicle }
        procedure Update;
        procedure StoreWorldTransforms;
        procedure InterpolateWorldTransforms(const aAlpha:TKraftScalar);
+{$ifdef KraftPasJSON}
+       procedure LoadFromJSON(const aJSONItem:TPasJSONItem);
+       function SaveToJSON:TPasJSONItem;
+{$endif}
 {$ifdef DebugDraw}
        procedure DebugDraw;
 {$endif}
       published
        property AccelerationCurveEnvelope:TEnvelope read fAccelerationCurveEnvelope write fAccelerationCurveEnvelope;
        property ReverseAccelerationCurveEnvelope:TEnvelope read fReverseAccelerationCurveEnvelope write fReverseAccelerationCurveEnvelope;
-       property ReverseEvaluationAccuracy:Int32 read fReverseEvaluationAccuracy write fReverseEvaluationAccuracy;
+       property ReverseEvaluationAccuracy:TKraftInt32 read fReverseEvaluationAccuracy write fReverseEvaluationAccuracy;
        property SteerAngleLimitEnvelope:TEnvelope read fSteerAngleLimitEnvelope write fSteerAngleLimitEnvelope;
        property SteeringResetSpeedEnvelope:TEnvelope read fSteeringResetSpeedEnvelope write fSteeringResetSpeedEnvelope;
        property SteeringSpeedEnvelope:TEnvelope read fSteeringSpeedEnvelope write fSteeringSpeedEnvelope;
@@ -466,6 +510,7 @@ type { TVehicle }
        property AfterFlightSlipperyTiresTime:TKraftScalar read fAfterFlightSlipperyTiresTime write fAfterFlightSlipperyTiresTime;
        property BrakeSlipperyTiresTime:TKraftScalar read fBrakeSlipperyTiresTime write fBrakeSlipperyTiresTime;
        property HandBrakeSlipperyTiresTime:TKraftScalar read fHandBrakeSlipperyTiresTime write fHandBrakeSlipperyTiresTime;
+       property UseSphereCast:boolean read fUseSphereCast write fUseSphereCast;
        property IsBrake:boolean read fIsBrake write fIsBrake;
        property IsHandBrake:boolean read fIsHandBrake write fIsHandBrake;
        property IsAcceleration:boolean read fIsAcceleration write fIsAcceleration;
@@ -505,6 +550,7 @@ type { TVehicle }
        property InputHandBrake:Boolean read fInputHandBrake write fInputHandBrake;
        property Speed:TKraftScalar read fSpeed write fSpeed;
        property SpeedKMH:TKraftScalar read fSpeedKMH write fSpeedKMH;
+       property DebugDrawLine:TDebugDrawLine read fDebugDrawLine write fDebugDrawLine;
      end;
 
 implementation
@@ -543,10 +589,17 @@ begin
 end;
 
 {$ifdef DebugDraw}
-procedure DrawRay(const aRayOrigin,aRayDirection:TKraftVector3;const aR,aG,aB:TKraftScalar);
+procedure DrawRay(const aVehicle:TVehicle;const aRayOrigin,aRayDirection:TKraftVector3;const aR,aG,aB:TKraftScalar);
+{$ifndef NoOpenGL}
 var v:TKraftVector3;
+{$endif}
 begin
  if Vector3Length(aRayDirection)>0.0 then begin
+{$ifdef NoOpenGL}
+  if assigned(aVehicle.fDebugDrawLine) then begin
+   aVehicle.fDebugDrawLine(aRayOrigin,Vector3Add(aRayOrigin,aRayDirection),Vector4(aR,aG,aB,1.0));
+  end;
+{$else}
   glColor4f(aR,aG,aB,1.0);
   glBegin(GL_LINES);
   v:=aRayOrigin;
@@ -554,6 +607,7 @@ begin
   v:=Vector3Add(aRayOrigin,aRayDirection);
   glVertex3fv(@v);
   glEnd;
+{$endif}
  end;
 end;
 {$endif}
@@ -563,6 +617,7 @@ end;
 constructor TVehicle.TEnvelope.Create;
 begin
  inherited Create;
+ fMode:=TVehicle.TEnvelope.TMode.Custom;
  fPoints:=nil;
  fCount:=0;
 end;
@@ -570,27 +625,13 @@ end;
 constructor TVehicle.TEnvelope.CreateLinear(const aTimeStart,aValueStart,aTimeEnd,aValueEnd:TKraftScalar);
 begin
  Create;
- Insert(aTimeStart,aValueStart);
- Insert(aTimeEnd,aValueEnd);
+ FillLinear(aTimeStart,aValueStart,aTimeEnd,aValueEnd);
 end;
 
-constructor TVehicle.TEnvelope.CreateEaseInOut(const aTimeStart,aValueStart,aTimeEnd,aValueEnd:TKraftScalar;const aSteps:Int32=16);
-var Index,Last:Int32;
-    x,Time,Value:TKraftScalar;
+constructor TVehicle.TEnvelope.CreateEaseInOut(const aTimeStart,aValueStart,aTimeEnd,aValueEnd:TKraftScalar;const aSteps:TKraftInt32=16);
 begin
  Create;
- Last:=aSteps-1;
- for Index:=0 to Last do begin
-  x:=Index/Last;
-  Time:=(aTimeStart*(1.0-x))+(aTimeEnd*x);
-  if x<0.5 then begin
-   x:=(1-sqrt(1-sqr(2*x)))*0.5;
-  end else begin
-   x:=(sqrt(1-sqr((-2*x)+2))+1)*0.5;
-  end;
-  Value:=(aValueStart*(1.0-x))+(aValueEnd*x);
-  Insert(Time,Value);
- end;
+ FillEaseInOut(aTimeStart,aValueStart,aTimeEnd,aValueEnd,aSteps);
 end;
 
 destructor TVehicle.TEnvelope.Destroy;
@@ -601,18 +642,20 @@ end;
 
 procedure TVehicle.TEnvelope.Clear;
 begin
+ fMode:=TVehicle.TEnvelope.TMode.Custom;
  fPoints:=nil;
  fCount:=0;
 end;
 
 procedure TVehicle.TEnvelope.Assign(const aFrom:TEnvelope);
 begin
+ fMode:=aFrom.fMode;
  fPoints:=copy(aFrom.fPoints);
  fCount:=aFrom.fCount;
 end;
 
 procedure TVehicle.TEnvelope.Insert(const aTime,aValue:TKraftScalar);
-var Index,LowIndex,HighIndex,MidIndex:Int32;
+var Index,LowIndex,HighIndex,MidIndex:TKraftInt32;
     Point:PPoint;
 begin
  if fCount>0 then begin
@@ -653,12 +696,122 @@ begin
   SetLength(fPoints,1);
   Index:=0;
  end;
+ fMode:=TVehicle.TEnvelope.TMode.Custom;
  Point:=@fPoints[Index];
  Point^.fTime:=aTime;
  Point^.fValue:=aValue;
 end;
 
-function TVehicle.TEnvelope.GetTimeAtIndex(const aIndex:Int32):TKraftScalar;
+procedure TVehicle.TEnvelope.FillLinear(const aTimeStart,aValueStart,aTimeEnd,aValueEnd:TKraftScalar);
+begin
+ Clear;
+ Insert(aTimeStart,aValueStart);
+ Insert(aTimeEnd,aValueEnd);
+ fMode:=TVehicle.TEnvelope.TMode.Linear;
+end;
+
+procedure TVehicle.TEnvelope.FillEaseInOut(const aTimeStart,aValueStart,aTimeEnd,aValueEnd:TKraftScalar;const aSteps:TKraftInt32=16);
+var Index,Last:TKraftInt32;
+    x,Time,Value:TKraftScalar;
+begin
+ Clear;
+ Last:=aSteps-1;
+ for Index:=0 to Last do begin
+  x:=Index/Last;
+  Time:=(aTimeStart*(1.0-x))+(aTimeEnd*x);
+  if x<0.5 then begin
+   x:=(1-sqrt(1-sqr(2*x)))*0.5;
+  end else begin
+   x:=(sqrt(1-sqr((-2*x)+2))+1)*0.5;
+  end;
+  Value:=(aValueStart*(1.0-x))+(aValueEnd*x);
+  Insert(Time,Value);
+ end;
+ fMode:=TVehicle.TEnvelope.TMode.EaseInOut;
+end;
+
+{$ifdef KraftPasJSON}
+procedure TVehicle.TEnvelope.LoadFromJSON(const aJSONItem:TPasJSONItem);
+var RootJSONItemObject:TPasJSONItemObject;
+    Mode:TPasJSONUTF8String;
+    JSONItem:TPasJSONItem;
+    JSONItemArray:TPasJSONItemArray;
+    JSONItemObject:TPasJSONItemObject;
+begin
+ if assigned(aJSONItem) and (aJSONItem is TPasJSONItemObject) then begin
+  RootJSONItemObject:=TPasJSONItemObject(aJSONItem);
+  Mode:=TPasJSON.GetString(RootJSONItemObject.Properties['mode'],'');
+  if Mode='linear' then begin
+   FillLinear(TPasJSON.GetNumber(RootJSONItemObject.Properties['timestart'],0.0),
+              TPasJSON.GetNumber(RootJSONItemObject.Properties['valuestart'],0.0),
+              TPasJSON.GetNumber(RootJSONItemObject.Properties['timeend'],0.0),
+              TPasJSON.GetNumber(RootJSONItemObject.Properties['valueend'],0.0));
+  end else if Mode='easeinout' then begin
+   FillEaseInOut(TPasJSON.GetNumber(RootJSONItemObject.Properties['timestart'],0.0),
+                 TPasJSON.GetNumber(RootJSONItemObject.Properties['valuestart'],0.0),
+                 TPasJSON.GetNumber(RootJSONItemObject.Properties['timeend'],0.0),
+                 TPasJSON.GetNumber(RootJSONItemObject.Properties['valueend'],0.0),
+                 TPasJSON.GetInt64(RootJSONItemObject.Properties['steps'],16));
+  end else if Mode='custom' then begin
+   Clear;
+   JSONItem:=RootJSONItemObject.Properties['points'];
+   if assigned(JSONItem) and (JSONItem is TPasJSONItemArray) then begin
+    JSONItemArray:=TPasJSONItemArray(JSONItem);
+    for JSONItem in JSONItemArray do begin
+     if assigned(JSONItem) and (JSONItem is TPasJSONItemObject) then begin
+      JSONItemObject:=TPasJSONItemObject(JSONItem);
+      Insert(TPasJSON.GetNumber(JSONItemObject.Properties['time'],0.0),TPasJSON.GetNumber(JSONItemObject.Properties['value'],0.0));
+     end;
+    end;
+   end;
+  end;
+ end;
+end;
+
+function TVehicle.TEnvelope.SaveToJSON:TPasJSONItem;
+var Index:TKraftSizeInt;
+    JSONItemArray:TPasJSONItemArray;
+    JSONItemObject:TPasJSONItemObject;
+begin
+ result:=TPasJSONItemObject.Create;
+ case fMode of
+  TVehicle.TEnvelope.TMode.Linear:begin
+   TPasJSONItemObject(result).Add('mode',TPasJSONItemString.Create('linear'));
+   TPasJSONItemObject(result).Add('timestart',TPasJSONItemNumber.Create(fPoints[0].fTime));
+   TPasJSONItemObject(result).Add('valuestart',TPasJSONItemNumber.Create(fPoints[0].fValue));
+   TPasJSONItemObject(result).Add('timeend',TPasJSONItemNumber.Create(fPoints[1].fTime));
+   TPasJSONItemObject(result).Add('valueend',TPasJSONItemNumber.Create(fPoints[1].fValue));
+  end;
+  TVehicle.TEnvelope.TMode.EaseInOut:begin
+   TPasJSONItemObject(result).Add('mode',TPasJSONItemString.Create('easeinout'));
+   TPasJSONItemObject(result).Add('timestart',TPasJSONItemNumber.Create(fPoints[0].fTime));
+   TPasJSONItemObject(result).Add('valuestart',TPasJSONItemNumber.Create(fPoints[0].fValue));
+   TPasJSONItemObject(result).Add('timeend',TPasJSONItemNumber.Create(fPoints[fCount-1].fTime));
+   TPasJSONItemObject(result).Add('valueend',TPasJSONItemNumber.Create(fPoints[fCount-1].fValue));
+   TPasJSONItemObject(result).Add('steps',TPasJSONItemNumber.Create(fCount));
+  end;
+  else {TVehicle.TEnvelope.TMode.Custom:}begin
+   TPasJSONItemObject(result).Add('mode',TPasJSONItemString.Create('custom'));
+   JSONItemArray:=TPasJSONItemArray.Create;
+   try
+    for Index:=0 to length(fPoints)-1 do begin
+     JSONItemObject:=TPasJSONItemObject.Create;
+     try
+      JSONItemObject.Add('time',TPasJSONItemNumber.Create(fPoints[Index].fTime));
+      JSONItemObject.Add('value',TPasJSONItemNumber.Create(fPoints[Index].fValue));
+     finally
+      JSONItemArray.Add(JSONItemObject);
+     end;
+    end;
+   finally
+    TPasJSONItemObject(result).Add('points',JSONItemArray);
+   end;
+  end;
+ end;
+end;
+{$endif}
+
+function TVehicle.TEnvelope.GetTimeAtIndex(const aIndex:TKraftInt32):TKraftScalar;
 begin
  if (aIndex>=0) and (aIndex<fCount) then begin
   result:=fPoints[aIndex].fTime;
@@ -667,7 +820,7 @@ begin
  end;
 end;
 
-function TVehicle.TEnvelope.GetValueAtIndex(const aIndex:Int32):TKraftScalar;
+function TVehicle.TEnvelope.GetValueAtIndex(const aIndex:TKraftInt32):TKraftScalar;
 begin
  if (aIndex>=0) and (aIndex<fCount) then begin
   result:=fPoints[aIndex].fValue;
@@ -676,8 +829,8 @@ begin
  end;
 end;
 
-function TVehicle.TEnvelope.GetIndexFromTime(const aTime:TKraftScalar):Int32;
-var LowIndex,HighIndex,MidIndex:Int32;
+function TVehicle.TEnvelope.GetIndexFromTime(const aTime:TKraftScalar):TKraftInt32;
+var LowIndex,HighIndex,MidIndex:TKraftInt32;
     Point:PPoint;
 begin
  if fCount>0 then begin
@@ -728,7 +881,7 @@ begin
 end;
 
 function TVehicle.TEnvelope.GetValueAtTime(const aTime:TKraftScalar):TKraftScalar;
-var LowIndex,HighIndex,MidIndex:Int32;
+var LowIndex,HighIndex,MidIndex:TKraftInt32;
     Point:PPoint;
 begin
  if fCount>0 then begin
@@ -818,8 +971,7 @@ begin
  result:=Vector3Dot(aNormal,fRayCastFilterDirection)<=-0.5;
 end;
 
-procedure TVehicle.TAxle.TWheel.Update(const aWorldSpacePosition:TKraftVector3;const aTotalWheelsCount,aCountPoweredWheels:Int32;const aLeft:boolean);
-{$define SphereCastResult}
+procedure TVehicle.TAxle.TWheel.Update(const aWorldSpacePosition:TKraftVector3;const aTotalWheelsCount,aCountPoweredWheels:TKraftInt32;const aLeft:boolean);
 const RelaxSpeed=1.0;
 type TRayResult=record
       Valid:boolean;
@@ -829,7 +981,7 @@ type TRayResult=record
       Normal:TKraftVector3;
      end;
 var LocalWheelRotation,WorldSpaceWheelRotation:TKraftQuaternion;
-    WorldSpaceAxleLeft,RayOrigin,
+    WorldSpaceAxleLeft{,WorldSpaceAxleUp},RayOrigin,
     SuspensionForce,WheelVelocity,ContactUp,ContactLeft,ContactForward,LeftVelocity,ForwardVelocity,
     SlideVelocity,SlidingForce,FrictionForce,
     LongitudinalForce,AccForcePoint,
@@ -860,7 +1012,7 @@ var LocalWheelRotation,WorldSpaceWheelRotation:TKraftQuaternion;
  function WheelRayCast(const aRayOrigin,aRayDirection,aRayOtherDirection:TKraftVector3;const aFromAngle,aToAngle:TKraftScalar;const aRelaxedSuspensionLength,aWheelRadius:TKraftScalar):TRayResult;
  const CountRays=32; // +1 primary ray
        DivFactor=1.0/(CountRays-1);
- var Index,Count:Int32;
+ var Index,Count:TKraftInt32;
      Temporary:TRayResult;
      Time,Angle,Sinus,Cosinus,MaxTime:TKraftScalar;
      PointXSum,PointYSum,PointZSum,NormalXSum,NormalYSum,NormalZSum,TimeSum,WeightSum,Weight:Double;
@@ -970,6 +1122,7 @@ begin
 
  // Wheel axle left direction
  WorldSpaceAxleLeft:=Vector3Norm(Vector3TermQuaternionRotate(Vector3(-1.0,0.0,0.0),WorldSpaceWheelRotation));
+//WorldSpaceAxleUp:=Vector3Norm(Vector3TermQuaternionRotate(Vector3(0.0,1.0,0.0),WorldSpaceWheelRotation));
 
  fIsOnGround:=false;
 
@@ -981,20 +1134,20 @@ begin
  fRayCastFilterBidirection:=fVehicle.WorldForward;
 
  RayOrigin:=aWorldSpacePosition;
-{$ifdef SphereCastResult}
- RayResult:=SphereCast(RayOrigin,
-                       fVehicle.WorldDown,
-                       fAxle.fRelaxedSuspensionLength,
-                       fAxle.fRadius);
-{$else}
- RayResult:=WheelRayCast(RayOrigin,
-                         fVehicle.WorldDown,
-                         fVehicle.WorldForward,
-                         -PI*0.5,
-                         PI*0.5,
-                         fAxle.fRelaxedSuspensionLength,
-                         fAxle.fRadius);
-{$endif}
+ if fVehicle.fUseSphereCast then begin
+  RayResult:=SphereCast(RayOrigin,
+                        fVehicle.WorldDown,
+                        fAxle.fRelaxedSuspensionLength,
+                        fAxle.fRadius);
+ end else begin
+  RayResult:=WheelRayCast(RayOrigin,
+                          fVehicle.WorldDown,
+                          fVehicle.WorldForward,
+                          -PI*0.5,
+                          PI*0.5,
+                          fAxle.fRelaxedSuspensionLength,
+                          fAxle.fRadius);
+ end;
 
  if not RayResult.Valid then begin
   fCompressionPrev:=fCompression;
@@ -1059,14 +1212,17 @@ begin
  WheelVelocity:=fVehicle.fRigidBody.GetWorldLinearVelocityFromPoint(fHitPoint);
 
  ContactUp:=Vector3Norm(HitNormal);
- ContactLeft:=Vector3Norm(Vector3Sub(WorldSpaceAxleLeft,
+ ContactLeft:=Vector3Norm(Vector3Sub(WorldSpaceAxleLeft,Vector3Project(WorldSpaceAxleLeft,ContactUp)));
+{ContactLeft:=Vector3Norm(Vector3Sub(WorldSpaceAxleLeft,
                           Vector3ScalarMul(ContactUp,
-                                           Vector3Dot(WorldSpaceAxleLeft,ContactUp))));
+                                           Vector3Dot(WorldSpaceAxleLeft,ContactUp))));}
  ContactForward:=Vector3Norm(Vector3Cross(ContactUp,ContactLeft));
  ContactLeft:=Vector3Norm(Vector3Cross(ContactForward,ContactUp));
 
- LeftVelocity:=Vector3ScalarMul(ContactLeft,Vector3Dot(WheelVelocity,ContactLeft));
- ForwardVelocity:=Vector3ScalarMul(ContactForward,Vector3Dot(WheelVelocity,ContactForward));
+{LeftVelocity:=Vector3ScalarMul(ContactLeft,Vector3Dot(WheelVelocity,ContactLeft));
+ ForwardVelocity:=Vector3ScalarMul(ContactForward,Vector3Dot(WheelVelocity,ContactForward));}
+ LeftVelocity:=Vector3Project(WheelVelocity,ContactLeft);
+ ForwardVelocity:=Vector3Project(WheelVelocity,ContactForward);
  SlideVelocity:=Vector3Avg(LeftVelocity,ForwardVelocity);
 
 {if self=fVehicle.fAxleFront.fWheelLeft then begin
@@ -1123,7 +1279,8 @@ begin
  FrictionForce:=Vector3ScalarMul(SlidingForce,-LaterialFriction);
 
  // Remove friction along roll-direction of wheel
- LongitudinalForce:=Vector3ScalarMul(ContactForward,Vector3Dot(FrictionForce,ContactForward));
+//LongitudinalForce:=Vector3ScalarMul(ContactForward,Vector3Dot(FrictionForce,ContactForward));
+ LongitudinalForce:=Vector3Project(FrictionForce,ContactForward);
 
 {if self=fVehicle.fAxleFront.fWheelLeft then begin
   writeln(ContactLeft.x:10:5,' ',ContactLeft.y:10:5,' ',ContactLeft.z:10:5,' - ',ContactForward.x:10:5,' ',ContactForward.y:10:5,' ',ContactForward.z:10:5,' - ',ContactUp.x:10:5,' ',ContactUp.y:10:5,' ',ContactUp.z:10:5,' ');
@@ -1225,29 +1382,47 @@ begin
 end;
 
 procedure TVehicle.TAxle.TWheel.UpdateVisual;
-var LocalWheelPosition:TKraftVector3;
+var Scale:TKraftScalar;
+    LocalWheelPosition:TKraftVector3;
     LocalWheelRotation:TKraftQuaternion;
-    WorldSpacePosition:TKraftVector3;
-    WorldSpaceRotation:TKraftQuaternion;
+    WorldWheelPosition:TKraftVector3;
+    WorldWheelRotation:TKraftQuaternion;
 begin
+
+ fLocalWheelPosition:=Vector3(0.0,-fSuspensionLength,0.0);
+//fLocalWheelPosition:=Vector3(fAxle.fWidth*fOffset*0.5,fAxle.fOffset.y-fSuspensionLength,fAxle.fOffset.x);
+ fLocalWheelRotation:=Vector3(fYawRad+IfThen(fOffset<0.0,PI,0.0),0.0,fVisualRotationRad*fOffset);
 
  LocalWheelPosition:=Vector3(fAxle.fWidth*fOffset*0.5,fAxle.fOffset.y-fSuspensionLength,fAxle.fOffset.x);
  LocalWheelRotation:=QuaternionFromAngles(fYawRad+IfThen(fOffset<0.0,PI,0.0),0.0,fVisualRotationRad*fOffset);
 
- WorldSpacePosition:=Vector3TermMatrixMul(LocalWheelPosition,fVehicle.fWorldTransform);
- WorldSpaceRotation:=QuaternionMul(Vehicle.fRigidBody.Sweep.q,LocalWheelRotation);
+ WorldWheelPosition:=Vector3TermMatrixMul(LocalWheelPosition,fVehicle.fWorldTransform);
+ WorldWheelRotation:=QuaternionMul(Vehicle.fRigidBody.Sweep.q,LocalWheelRotation);
 
- fWorldTransform:=QuaternionToMatrix4x4(WorldSpaceRotation);
- Vector3Scale(PKraftVector3(@fWorldTransform[0,0])^,fAxle.fRadius*fAxle.fWheelVisualScale);
+ fWorldTransform:=QuaternionToMatrix4x4(WorldWheelRotation);
+ Scale:=fAxle.fRadius*fAxle.fWheelVisualScale;
+ fWorldTransform[0,0]:=fWorldTransform[0,0]*Scale;
+ fWorldTransform[0,1]:=fWorldTransform[0,1]*Scale;
+ fWorldTransform[0,2]:=fWorldTransform[0,2]*Scale;
+ fWorldTransform[1,0]:=fWorldTransform[1,0]*Scale;
+ fWorldTransform[1,1]:=fWorldTransform[1,1]*Scale;
+ fWorldTransform[1,2]:=fWorldTransform[1,2]*Scale;
+ fWorldTransform[2,0]:=fWorldTransform[2,0]*Scale;
+ fWorldTransform[2,1]:=fWorldTransform[2,1]*Scale;
+ fWorldTransform[2,2]:=fWorldTransform[2,2]*Scale;
+{Vector3Scale(PKraftVector3(@fWorldTransform[0,0])^,fAxle.fRadius*fAxle.fWheelVisualScale);
  Vector3Scale(PKraftVector3(@fWorldTransform[1,0])^,fAxle.fRadius*fAxle.fWheelVisualScale);
- Vector3Scale(PKraftVector3(@fWorldTransform[2,0])^,fAxle.fRadius*fAxle.fWheelVisualScale);
- PKraftVector3(@fWorldTransform[3,0])^:=WorldSpacePosition;
+ Vector3Scale(PKraftVector3(@fWorldTransform[2,0])^,fAxle.fRadius*fAxle.fWheelVisualScale);}
+ PKraftVector3(@fWorldTransform[3,0])^.xyz:=WorldWheelPosition.xyz;
+
 
 end;
 
 procedure TVehicle.TAxle.TWheel.StoreWorldTransforms;
 begin
  fLastWorldTransform:=fWorldTransform;
+ fLastLocalWheelPosition:=fLocalWheelPosition;
+ fLastLocalWheelRotation:=fLocalWheelRotation;
 {$ifdef DebugDraw}
  fLastHitValid:=fHitValid;
  fLastHitPoint:=fHitPoint;
@@ -1264,6 +1439,10 @@ end;
 procedure TVehicle.TAxle.TWheel.InterpolateWorldTransforms(const aAlpha:TKraftScalar);
 begin
  fVisualWorldTransform:=Matrix4x4Lerp(fLastWorldTransform,fWorldTransform,aAlpha);
+ fVisualLocalWheelPosition:=Vector3Lerp(fLastLocalWheelPosition,fLocalWheelPosition,aAlpha);
+ fVisualLocalWheelRotation.x:=AngleLerp(fLastLocalWheelRotation.x,fLocalWheelRotation.x,aAlpha);
+ fVisualLocalWheelRotation.y:=AngleLerp(fLastLocalWheelRotation.y,fLocalWheelRotation.y,aAlpha);
+ fVisualLocalWheelRotation.z:=AngleLerp(fLastLocalWheelRotation.z,fLocalWheelRotation.z,aAlpha);
 {$ifdef DebugDraw}
  if fLastHitValid then begin
   if fHitValid then begin
@@ -1305,31 +1484,66 @@ begin
 {$endif}
 end;
 
+{$ifdef KraftPasJSON}
+procedure TVehicle.TAxle.TWheel.LoadFromJSON(const aJSONItem:TPasJSONItem);
+begin
+ if assigned(aJSONItem) and (aJSONItem is TPasJSONItemObject) then begin
+  fOffset:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['offset'],fOffset);
+ end;
+end;
+
+function TVehicle.TAxle.TWheel.SaveToJSON:TPasJSONItem;
+begin
+ result:=TPasJSONItemObject.Create;
+ TPasJSONItemObject(result).Add('offset',TPasJSONItemNumber.Create(fOffset));
+end;
+{$endif}
+
 {$ifdef DebugDraw}
 procedure TVehicle.TAxle.TWheel.DebugDraw;
-var Index:Int32;
-    v:TKraftVector3;
+var Index:TKraftInt32;
+    v{$ifdef NoOpenGL},v0,v1,v2{$endif}:TKraftVector3;
 begin
  if true then begin
 
   if fVisualHitValid then begin
 
+{$ifdef NoOpenGL}
+   if assigned(fVehicle.fDebugDrawLine) then begin
+    fVehicle.fDebugDrawLine(fVisualDebugDrawLinePoints[0],fVisualDebugDrawLinePoints[1],Vector4(1.0,1.0,1.0,1.0));
+   end;
+{$else}
    glColor4f(1.0,1.0,0.0,1.0);
    glBegin(GL_LINES);
    glVertex3fv(@fVisualDebugDrawLinePoints[0]);
    glVertex3fv(@fVisualDebugDrawLinePoints[1]);
    glEnd;
+{$endif}
 
-   DrawRay(fVisualHitPoint,fVisualDebugSlidingVelocity,1.0,0.0,0.0);
+   DrawRay(fVehicle,fVisualHitPoint,fVisualDebugSlidingVelocity,1.0,0.0,0.0);
 
-   DrawRay(fVisualHitPoint,fVisualDebugFrictionForce,1.0,0.0,0.0);
+   DrawRay(fVehicle,fVisualHitPoint,fVisualDebugFrictionForce,1.0,0.0,0.0);
 
-   DrawRay(fVisualHitPoint,fVisualDebugLongitudinalForce,1.0,1.0,1.0);
+   DrawRay(fVehicle,fVisualHitPoint,fVisualDebugLongitudinalForce,1.0,1.0,1.0);
 
-   DrawRay(fVisualDebugAccForcePoint,fVisualDebugEngineForce,0.0,1.0,0.0);
+   DrawRay(fVehicle,fVisualDebugAccForcePoint,fVisualDebugEngineForce,0.0,1.0,0.0);
 
   end;
 
+{$ifdef NoOpenGL}
+  v:=Vector3TermMatrixMul(Vector3Origin,fVisualWorldTransform);
+  v0:=v;
+  for Index:=0 to 16 do begin
+   if assigned(fVehicle.fDebugDrawLine) then begin
+    v1:=v0;
+    v0:=Vector3TermMatrixMul(Vector3Add(Vector3Add(Vector3Origin,Vector3ScalarMul(Vector3YAxis,Sin((Index/16)*PI*2))),Vector3ScalarMul(Vector3ZAxis,Cos((Index/16)*PI*2))),fVisualWorldTransform);
+    if Index>0 then begin
+     fVehicle.fDebugDrawLine(v,v0,Vector4(1.0,1.0,1.0,1.0));
+     fVehicle.fDebugDrawLine(v0,v1,Vector4(1.0,1.0,1.0,1.0));
+    end;
+   end;
+  end;
+{$else}
   glColor4f(1.0,1.0,1.0,1.0);
   glDisable(GL_CULL_FACE);
   glBegin(GL_TRIANGLE_FAN);
@@ -1341,6 +1555,7 @@ begin
   end;
   glEnd;
   glEnable(GL_CULL_FACE);
+{$endif}
 
  end;
 end;
@@ -1414,7 +1629,7 @@ begin
  fWheelRight.UpdateSuspensionLength;
 end;
 
-procedure TVehicle.TAxle.Update(const aTotalWheelsCount,aCountPoweredWheels:Int32);
+procedure TVehicle.TAxle.Update(const aTotalWheelsCount,aCountPoweredWheels:TKraftInt32);
 begin
  fWheelLeft.Update(Vector3TermMatrixMul(Vector3(fWidth*-0.5,fOffset.y,fOffset.x),fVehicle.fWorldTransform),aTotalWheelsCount,aCountPoweredWheels,true);
  fWheelRight.Update(Vector3TermMatrixMul(Vector3(fWidth*0.5,fOffset.y,fOffset.x),fVehicle.fWorldTransform),aTotalWheelsCount,aCountPoweredWheels,false);
@@ -1458,23 +1673,76 @@ begin
 {$endif}
 end;
 
+{$ifdef KraftPasJSON}
+procedure TVehicle.TAxle.LoadFromJSON(const aJSONItem:TPasJSONItem);
+begin
+ if assigned(aJSONItem) and (aJSONItem is TPasJSONItemObject) then begin
+  fWidth:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['width'],fWidth);
+  fOffset.x:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['horizontaloffset'],fOffset.x);
+  fOffset.y:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['verticaloffset'],fOffset.y);
+  fRadius:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['radius'],fRadius);
+  fLaterialFriction:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['laterialfriction'],fLaterialFriction);
+  fRollingFriction:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['rollingfriction'],fRollingFriction);
+  fBrakeForceMagnitude:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['brakeforcemagnitude'],fBrakeForceMagnitude);
+  fSuspensionStiffness:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['suspensionstiffness'],fSuspensionStiffness);
+  fSuspensionDamping:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['suspensiondamping'],fSuspensionDamping);
+  fSuspensionRestitution:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['suspensionrestitution'],fSuspensionRestitution);
+  fRelaxedSuspensionLength:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['relaxedsuspensionlength'],fRelaxedSuspensionLength);
+  fStabilizerBarAntiRollForce:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['stabilizerbarantirollforce'],fStabilizerBarAntiRollForce);
+  fWheelVisualScale:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['wheelvisualscale'],fWheelVisualScale);
+  fIsPowered:=TPasJSON.GetBoolean(TPasJSONItemObject(aJSONItem).Properties['ispowered'],fIsPowered);
+  fAfterFlightSlipperyK:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['afterflightslipperyk'],fAfterFlightSlipperyK);
+  fBrakeSlipperyK:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['brakeslipperyk'],fBrakeSlipperyK);
+  fHandBrakeSlipperyK:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['handbrakeslipperyk'],fHandBrakeSlipperyK);
+ end;
+end;
+
+function TVehicle.TAxle.SaveToJSON:TPasJSONItem;
+begin
+ result:=TPasJSONItemObject.Create;
+ TPasJSONItemObject(result).Add('width',TPasJSONItemNumber.Create(fWidth));
+ TPasJSONItemObject(result).Add('horizontaloffset',TPasJSONItemNumber.Create(fOffset.x));
+ TPasJSONItemObject(result).Add('verticaloffset',TPasJSONItemNumber.Create(fOffset.y));
+ TPasJSONItemObject(result).Add('radius',TPasJSONItemNumber.Create(fRadius));
+ TPasJSONItemObject(result).Add('laterialfriction',TPasJSONItemNumber.Create(fLaterialFriction));
+ TPasJSONItemObject(result).Add('rollingfriction',TPasJSONItemNumber.Create(fRollingFriction));
+ TPasJSONItemObject(result).Add('brakeforcemagnitude',TPasJSONItemNumber.Create(fBrakeForceMagnitude));
+ TPasJSONItemObject(result).Add('suspensionstiffness',TPasJSONItemNumber.Create(fSuspensionStiffness));
+ TPasJSONItemObject(result).Add('suspensiondamping',TPasJSONItemNumber.Create(fSuspensionDamping));
+ TPasJSONItemObject(result).Add('suspensionrestitution',TPasJSONItemNumber.Create(fSuspensionRestitution));
+ TPasJSONItemObject(result).Add('relaxedsuspensionlength',TPasJSONItemNumber.Create(fRelaxedSuspensionLength));
+ TPasJSONItemObject(result).Add('stabilizerbarantirollforce',TPasJSONItemNumber.Create(fStabilizerBarAntiRollForce));
+ TPasJSONItemObject(result).Add('wheelvisualscale',TPasJSONItemNumber.Create(fWheelVisualScale));
+ TPasJSONItemObject(result).Add('ispowered',TPasJSONItemBoolean.Create(fIsPowered));
+ TPasJSONItemObject(result).Add('afterflightslipperyk',TPasJSONItemNumber.Create(fAfterFlightSlipperyK));
+ TPasJSONItemObject(result).Add('brakeslipperyk',TPasJSONItemNumber.Create(fBrakeSlipperyK));
+ TPasJSONItemObject(result).Add('handbrakeslipperyk',TPasJSONItemNumber.Create(fHandBrakeSlipperyK));
+end;
+{$endif}
+
 {$ifdef DebugDraw}
 procedure TVehicle.TAxle.DebugDraw;
 begin
  fWheelLeft.DebugDraw;
  fWheelRight.DebugDraw;
  if fWheelLeft.fHitValid then begin
-  DrawRay(fWheelLeft.fVisualHitPoint,fVisualDebugAntiRollForces[0],1.0,0.0,1.0);
+  DrawRay(fVehicle,fWheelLeft.fVisualHitPoint,fVisualDebugAntiRollForces[0],1.0,0.0,1.0);
  end;
  if fWheelRight.fHitValid then begin
-  DrawRay(fWheelRight.fVisualHitPoint,fVisualDebugAntiRollForces[1],1.0,0.0,1.0);
+  DrawRay(fVehicle,fWheelRight.fVisualHitPoint,fVisualDebugAntiRollForces[1],1.0,0.0,1.0);
  end;
+{$ifdef NoOpenGL}
+ if assigned(fVehicle.fDebugDrawLine) then begin
+  fVehicle.fDebugDrawLine(fVisualDebugWheels[0],fVisualDebugWheels[1],Vector4(0.0,0.0,1.0,1.0));
+ end;
+{$else}
  glColor4f(0.0,0.0,1.0,1.0);
  glBegin(GL_LINES);
  glVertex3fv(@fVisualDebugWheels[0]);
  glVertex3fv(@fVisualDebugWheels[1]);
  glEnd;
  glColor4f(1.0,1.0,1.0,1.0);
+{$endif}
 end;
 {$endif}
 
@@ -1501,6 +1769,7 @@ begin
  fAfterFlightSlipperyTiresTime:=0.0;
  fBrakeSlipperyTiresTime:=0.0;
  fHandBrakeSlipperyTiresTime:=0.0;
+ fUseSphereCast:=true;
  fIsBrake:=false;
  fIsHandBrake:=false;
  fIsAcceleration:=false;
@@ -1512,6 +1781,7 @@ begin
  fInputReset:=false;
  fInputBrake:=false;
  fInputHandBrake:=false;
+ fDebugDrawLine:=nil;
 end;
 
 destructor TVehicle.Destroy;
@@ -1543,13 +1813,13 @@ end;
 procedure TVehicle.UpdateWorldTransformVectors;
 begin
  fWorldTransform:=fRigidBody.WorldTransform;
- fWorldRight:=PKraftVector3(pointer(@fWorldTransform[0,0]))^;
+ fWorldRight:=Vector3(PKraftRawVector3(pointer(@fWorldTransform[0,0]))^);
  fWorldLeft:=Vector3Neg(fWorldRight);
- fWorldUp:=PKraftVector3(pointer(@fWorldTransform[1,0]))^;
+ fWorldUp:=Vector3(PKraftRawVector3(pointer(@fWorldTransform[1,0]))^);
  fWorldDown:=Vector3Neg(fWorldUp);
- fWorldForward:=PKraftVector3(pointer(@fWorldTransform[2,0]))^;
+ fWorldForward:=Vector3(PKraftRawVector3(pointer(@fWorldTransform[2,0]))^);
  fWorldBackward:=Vector3Neg(fWorldForward);
- fWorldPosition:=PKraftVector3(pointer(@fWorldTransform[3,0]))^;
+ fWorldPosition:=Vector3(PKraftRawVector3(pointer(@fWorldTransform[3,0]))^);
 end;
 
 function TVehicle.GetHandBrakeK:TKraftScalar;
@@ -1565,7 +1835,7 @@ end;
 
 function TVehicle.GetAccelerationForceMagnitude(const aEnvelope:TEnvelope;const aSpeedMetersPerSec,aDeltaTime:TKraftScalar):TKraftScalar;
 const Inv3d6=1/3.6;
-var Index,Count:Int32;
+var Index,Count:TKraftInt32;
     SpeedKMH,Mass,MinTime,MaxTime,TimeNow,CurrentSpeed,CurrentSpeedDifference,
     Step,StepTime,StepSpeed,StepSpeedDifference:TKraftScalar;
 begin
@@ -1633,7 +1903,7 @@ var LinearVelocity,WorldSpaceForward,ProjectedVector:TKraftVector3;
     Factor:TKraftScalar;
 begin
  LinearVelocity:=fRigidBody.LinearVelocity;
- WorldSpaceForward:=PKraftVector3(@fRigidBody.WorldTransform[2,0])^;
+ WorldSpaceForward:=Vector3(PKraftRawVector3(@fRigidBody.WorldTransform[2,0])^);
  Factor:=Vector3Dot(WorldSpaceForward,LinearVelocity);
  ProjectedVector:=Vector3ScalarMul(WorldSpaceForward,Factor);
  result:=Vector3Length(ProjectedVector)*Sign(Factor);
@@ -1776,7 +2046,7 @@ end;
 
 procedure TVehicle.Update;
 const TotalWheelsCount=2 shl 1;
-var CountPoweredWheels:Int32;
+var CountPoweredWheels:TKraftInt32;
     Axis,AngularVelocity,AngularVelocityDamping,VehicleUp,AntiGravityUp:TKraftVector3;
     DownForceAmount:TKraftScalar;
 begin
@@ -1858,13 +2128,13 @@ begin
  fAxleFront.StoreWorldTransforms;
  fAxleRear.StoreWorldTransforms;
  fLastWorldTransform:=fWorldTransform;
- fLastWorldRight:=PKraftVector3(pointer(@fLastWorldTransform[0,0]))^;
+ fLastWorldRight:=Vector3(PKraftRawVector3(pointer(@fLastWorldTransform[0,0]))^);
  fLastWorldLeft:=Vector3Neg(fLastWorldRight);
- fLastWorldUp:=PKraftVector3(pointer(@fLastWorldTransform[1,0]))^;
+ fLastWorldUp:=Vector3(PKraftRawVector3(pointer(@fLastWorldTransform[1,0]))^);
  fLastWorldDown:=Vector3Neg(fLastWorldUp);
- fLastWorldForward:=PKraftVector3(pointer(@fLastWorldTransform[2,0]))^;
+ fLastWorldForward:=Vector3(PKraftRawVector3(pointer(@fLastWorldTransform[2,0]))^);
  fLastWorldBackward:=Vector3Neg(fLastWorldForward);
- fLastWorldPosition:=PKraftVector3(pointer(@fLastWorldTransform[3,0]))^;
+ fLastWorldPosition:=Vector3(PKraftRawVector3(pointer(@fLastWorldTransform[3,0]))^);
 end;
 
 procedure TVehicle.InterpolateWorldTransforms(const aAlpha:TKraftScalar);
@@ -1874,23 +2144,77 @@ begin
  fAxleFront.InterpolateWorldTransforms(aAlpha);
  fAxleRear.InterpolateWorldTransforms(aAlpha);
  fVisualWorldTransform:=Matrix4x4Lerp(fLastWorldTransform,fWorldTransform,aAlpha);
- fVisualWorldRight:=PKraftVector3(pointer(@fVisualWorldTransform[0,0]))^;
+ fVisualWorldRight:=Vector3(PKraftRawVector3(pointer(@fVisualWorldTransform[0,0]))^);
  fVisualWorldLeft:=Vector3Neg(fVisualWorldRight);
- fVisualWorldUp:=PKraftVector3(pointer(@fVisualWorldTransform[1,0]))^;
+ fVisualWorldUp:=Vector3(PKraftRawVector3(pointer(@fVisualWorldTransform[1,0]))^);
  fVisualWorldDown:=Vector3Neg(fVisualWorldUp);
- fVisualWorldForward:=PKraftVector3(pointer(@fVisualWorldTransform[2,0]))^;
+ fVisualWorldForward:=Vector3(PKraftRawVector3(pointer(@fVisualWorldTransform[2,0]))^);
  fVisualWorldBackward:=Vector3Neg(fVisualWorldForward);
- fVisualWorldPosition:=PKraftVector3(pointer(@fVisualWorldTransform[3,0]))^;
+ fVisualWorldPosition:=Vector3(PKraftRawVector3(pointer(@fVisualWorldTransform[3,0]))^);
 end;
+
+{$ifdef KraftPasJSON}
+procedure TVehicle.LoadFromJSON(const aJSONItem:TPasJSONItem);
+begin
+ if assigned(aJSONItem) and (aJSONItem is TPasJSONItemObject) then begin
+  fAccelerationCurveEnvelope.LoadFromJSON(TPasJSONItemObject(aJSONItem).Properties['accelerationcurveenvelope']);
+  fReverseAccelerationCurveEnvelope.LoadFromJSON(TPasJSONItemObject(aJSONItem).Properties['reverseaccelerationcurveenvelope']);
+  fReverseEvaluationAccuracy:=TPasJSON.GetInt64(TPasJSONItemObject(aJSONItem).Properties['reverseevaluationaccuracy'],fReverseEvaluationAccuracy);
+  fSteerAngleLimitEnvelope.LoadFromJSON(TPasJSONItemObject(aJSONItem).Properties['steeranglelimitenvelope']);
+  fSteeringResetSpeedEnvelope.LoadFromJSON(TPasJSONItemObject(aJSONItem).Properties['steeringresetspeedenvelope']);
+  fSteeringSpeedEnvelope.LoadFromJSON(TPasJSONItemObject(aJSONItem).Properties['steeringspeedenvelope']);
+  fFlightStabilizationForce:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['flightstabilizationforce'],fFlightStabilizationForce);
+  fFlightStabilizationDamping:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['flightstabilizationdamping'],fFlightStabilizationDamping);
+  fHandBrakeSlipperyTime:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['handbrakeslipperytime'],fHandBrakeSlipperyTime);
+  fControllable:=TPasJSON.GetBoolean(TPasJSONItemObject(aJSONItem).Properties['controllable'],fControllable);
+  fDownForceCurveEnvelope.LoadFromJSON(TPasJSONItemObject(aJSONItem).Properties['downforcecurveenvelope']);
+  fDownForce:=TPasJSON.GetNumber(TPasJSONItemObject(aJSONItem).Properties['downforce'],fDownForce);
+  fAxleFront.LoadFromJSON(TPasJSONItemObject(aJSONItem).Properties['axlefront']);
+  fAxleRear.LoadFromJSON(TPasJSONItemObject(aJSONItem).Properties['axlerear']);
+ end;
+end;
+
+function TVehicle.SaveToJSON:TPasJSONItem;
+begin
+ result:=TPasJSONItemObject.Create;
+ TPasJSONItemObject(result).Add('accelerationcurveenvelope',fAccelerationCurveEnvelope.SaveToJSON);
+ TPasJSONItemObject(result).Add('reverseaccelerationcurveenvelope',fReverseAccelerationCurveEnvelope.SaveToJSON);
+ TPasJSONItemObject(result).Add('reverseevaluationaccuracyenvelope',TPasJSONItemNumber.Create(fReverseEvaluationAccuracy));
+ TPasJSONItemObject(result).Add('steeranglelimitenvelope',fSteerAngleLimitEnvelope.SaveToJSON);
+ TPasJSONItemObject(result).Add('steeringresetspeedenvelope',fSteeringResetSpeedEnvelope.SaveToJSON);
+ TPasJSONItemObject(result).Add('steeringspeedenvelope',fSteeringSpeedEnvelope.SaveToJSON);
+ TPasJSONItemObject(result).Add('flightstabilizationforce',TPasJSONItemNumber.Create(fFlightStabilizationForce));
+ TPasJSONItemObject(result).Add('flightstabilizationdamping',TPasJSONItemNumber.Create(fFlightStabilizationDamping));
+ TPasJSONItemObject(result).Add('handbrakeslipperytime',TPasJSONItemNumber.Create(fHandBrakeSlipperyTime));
+ TPasJSONItemObject(result).Add('controllable',TPasJSONItemBoolean.Create(fControllable));
+ TPasJSONItemObject(result).Add('downforcecurveenvelope',fDownForceCurveEnvelope.SaveToJSON);
+ TPasJSONItemObject(result).Add('downforce',TPasJSONItemNumber.Create(fDownForce));
+ TPasJSONItemObject(result).Add('axlefront',fAxleFront.SaveToJSON);
+ TPasJSONItemObject(result).Add('axlerear',fAxleRear.SaveToJSON);
+end;
+{$endif}
 
 {$ifdef DebugDraw}
 procedure TVehicle.DebugDraw;
-var v:TKraftVector3;
+var v{$ifdef NoOpenGL},v0{$endif}:TKraftVector3;
 begin
- v:=Vector3TermMatrixMul(fRigidBody.Sweep.LocalCenter,fRigidBody.WorldTransform);
+ v:=Vector3TermMatrixMul(fRigidBody.Sweep.LocalCenter,fRigidBody.InterpolatedWorldTransform);
+{$ifdef NoOpenGL}
+{$else}
  glDisable(GL_DEPTH_TEST);
+{$endif}
  fAxleFront.DebugDraw;
  fAxleRear.DebugDraw;
+{$ifdef NoOpenGL}
+ if assigned(fDebugDrawLine) then begin
+  v0:=Vector3Lerp(fAxleFront.fVisualDebugMiddle,v,0.95);
+  fDebugDrawLine(fAxleFront.fVisualDebugMiddle,v0,Vector4(0.0,0.0,1.0,1.0));
+  fDebugDrawLine(v0,v,Vector4(0.0,1.0,1.0,1.0));
+  v0:=Vector3Lerp(fAxleRear.fVisualDebugMiddle,v,0.95);
+  fDebugDrawLine(v,v0,Vector4(0.0,1.0,1.0,1.0));
+  fDebugDrawLine(v0,fAxleRear.fVisualDebugMiddle,Vector4(0.0,0.0,1.0,1.0));
+ end;
+{$else}
  glColor4f(0.0,0.0,1.0,1.0);
  glBegin(GL_LINE_STRIP);
  glVertex3fv(@fAxleFront.fVisualDebugMiddle);
@@ -1905,6 +2229,7 @@ begin
  end;
  glColor4f(1.0,1.0,1.0,1.0);
  glEnable(GL_DEPTH_TEST);
+{$endif}
 //write(#13,fAxleFront.SteerAngle:1:5,' ',AxleFront.WheelLeft.fYawRad*RAD2DEG:1:5,' ',fSpeed*3.6:1:5,' - ',fWorldForward.x:1:5,' ',fWorldForward.y:1:5,' ',fWorldForward.z:1:5);
 end;
 {$endif}

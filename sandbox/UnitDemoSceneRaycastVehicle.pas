@@ -4,7 +4,7 @@ unit UnitDemoSceneRaycastVehicle;
 
 interface
 
-uses LCLIntf,LCLType,LMessages,SysUtils,Classes,Math,Kraft,KraftArcadeCarPhysics,UnitDemoScene,gl,glext;
+uses LCLIntf,LCLType,LMessages,SysUtils,Classes,Math,Kraft,KraftRayCastVehicle,UnitDemoScene,gl,glext;
 
 type { TDemoSceneRaycastVehicle }
 
@@ -12,7 +12,7 @@ type { TDemoSceneRaycastVehicle }
       public
        RigidBodyFloor:TKraftRigidBody;
        ShapeFloorPlane:TKraftShapePlane;
-       Vehicle:TVehicle;
+       Vehicle:TKraftRayCastVehicle;
        CarSteering:double;
        CarSpeed:double;
        Time:double;
@@ -33,9 +33,9 @@ implementation
 
 uses UnitFormMain;
 
-const CarWidth=1.8;
-      CarLength=4.40;
-      CarHeight=1.55;
+const CarWidth=1.0;
+      CarLength=2.0;
+      CarHeight=0.5;
 
       CarHalfWidth=CarWidth*0.5;
 
@@ -57,14 +57,19 @@ const CarWidth=1.8;
       JumpingRampHalfHeight=JumpingRampHeight*0.5;
       JumpingRampHalfLength=JumpingRampLength*0.5;
 
-      JumpingRampConvexHullPoints:array[0..5] of TKraftVector3=((x:-JumpingRampHalfWidth;y:0.0;z:0{$ifdef SIMD};w:0.0{$endif}),
-                                                                (x:JumpingRampHalfWidth;y:0.0;z:0{$ifdef SIMD};w:0.0{$endif}),
-                                                                (x:-JumpingRampHalfWidth;y:JumpingRampHeight;z:0.0{$ifdef SIMD};w:0.0{$endif}),
-                                                                (x:JumpingRampHalfWidth;y:JumpingRampHeight;z:0.0{$ifdef SIMD};w:0.0{$endif}),
-                                                                (x:-JumpingRampHalfWidth;y:0.0;z:JumpingRampLength{$ifdef SIMD};w:0.0{$endif}),
-                                                                (x:JumpingRampHalfWidth;y:0.0;z:JumpingRampLength{$ifdef SIMD};w:0.0{$endif}));{}
+      JumpingRampConvexHullPoints:array[0..5] of TKraftVector3=((x:-JumpingRampHalfWidth;y:0.0;z:0{$if KraftSIMD};w:0.0{$ifend}),
+                                                                (x:JumpingRampHalfWidth;y:0.0;z:0{$if KraftSIMD};w:0.0{$ifend}),
+                                                                (x:-JumpingRampHalfWidth;y:JumpingRampHeight;z:0.0{$if KraftSIMD};w:0.0{$ifend}),
+                                                                (x:JumpingRampHalfWidth;y:JumpingRampHeight;z:0.0{$if KraftSIMD};w:0.0{$ifend}),
+                                                                (x:-JumpingRampHalfWidth;y:0.0;z:JumpingRampLength{$if KraftSIMD};w:0.0{$ifend}),
+                                                                (x:JumpingRampHalfWidth;y:0.0;z:JumpingRampLength{$if KraftSIMD};w:0.0{$ifend}));{}
 
 { TDemoSceneRaycastVehicle }
+
+const WheelPositions:array[0..1,0..1] of TKraftVector3=(((x:CarHalfWidth;y:0;z:-CarLength*0.5{$if KraftSIMD};w:0.0{$ifend}),
+                                                         (x:-CarHalfWidth;y:0;z:-CarLength*0.5{$if KraftSIMD};w:0.0{$ifend})),
+                                                        ((x:CarHalfWidth;y:0;z:CarLength*0.5{$if KraftSIMD};w:0.0{$ifend}),
+                                                         (x:-CarHalfWidth;y:0;z:CarLength*0.5{$if KraftSIMD};w:0.0{$ifend})));
 
 constructor TDemoSceneRaycastVehicle.Create(const aKraftPhysics: TKraft);
 const Height=10;
@@ -72,6 +77,7 @@ var Index,i,j:Int32;
     RigidBody:TKraftRigidBody;
     Shape:TKraftShape;
     ConvexHull:TKraftConvexHull;
+//    Wheel:TKraftVehicle.TWheel;
 begin
  inherited Create(AKraftPhysics);
 
@@ -82,6 +88,7 @@ begin
  RigidBodyFloor.SetRigidBodyType(krbtSTATIC);
  ShapeFloorPlane:=TKraftShapePlane.Create(KraftPhysics,RigidBodyFloor,Plane(Vector3Norm(Vector3(0.0,1.0,0.0)),0.0));
  ShapeFloorPlane.Restitution:=0.3;
+ RigidBodyFloor.ForcedMass:=0.01;
  RigidBodyFloor.Finish;
  RigidBodyFloor.SetWorldTransformation(Matrix4x4Translate(0.0,0.0,0.0));
  RigidBodyFloor.CollisionGroups:=[0];
@@ -170,9 +177,65 @@ begin
   end;
  end;    //}
 
- Vehicle:=TVehicle.Create(KraftPhysics);
+ Vehicle:=TKraftRayCastVehicle.Create(KraftPhysics);
+
+(*Vehicle.RigidBody:=TKraftRigidBody.Create(aKraftPhysics);
+ Vehicle.RigidBody.SetRigidBodyType(krbtDYNAMIC);
+ Shape:=TKraftShapeBox.Create(aKraftPhysics,Vehicle.RigidBody,Vector3(CarHalfWidth,CarHeight*0.5,CarLength*0.5));
+ Shape.Restitution:=0.3;
+ Shape.Density:=200.0;
+ Shape.LocalTransform:=Matrix4x4Translate(0.0,0.0,0.0);
+{Shape.Flags:=Shape.Flags+[ksfHasForcedCenterOfMass];
+ Shape.ForcedCenterOfMass.x:=0.0;
+ Shape.ForcedCenterOfMass.y:=0.0;
+ Shape.ForcedCenterOfMass.z:=0.0;}
+ Shape.ForcedMass:=150.0;
+ Vehicle.RigidBody.Finish;
+ Vehicle.RigidBody.SetWorldTransformation(Matrix4x4TermMul(Matrix4x4RotateY(PI),Matrix4x4Translate(0.0,CarHeight+5.0,0.0)));
+ Vehicle.RigidBody.CollisionGroups:=[1];
+ Vehicle.RigidBody.CollideWithCollisionGroups:=[0,1];
+ Vehicle.RigidBody.AngularVelocityDamp:=10.0;//10.0;
+ Vehicle.RigidBody.LinearVelocityDamp:=0.3275;
+
+ Wheel:=TKraftVehicle.TWheel.Create(Vehicle);
+ try
+  Wheel.ChassisConnectionPointLocal:=WheelPositions[0,0];
+ finally
+  Vehicle.AddWheel(Wheel);
+ end;
+
+ Wheel:=TKraftVehicle.TWheel.Create(Vehicle);
+ try
+  Wheel.ChassisConnectionPointLocal:=WheelPositions[0,1];
+ finally
+  Vehicle.AddWheel(Wheel);
+ end;
+
+ Wheel:=TKraftVehicle.TWheel.Create(Vehicle);
+ try
+  Wheel.ChassisConnectionPointLocal:=WheelPositions[1,0];
+ finally
+  Vehicle.AddWheel(Wheel);
+ end;
+
+ Wheel:=TKraftVehicle.TWheel.Create(Vehicle);
+ try
+  Wheel.ChassisConnectionPointLocal:=WheelPositions[1,1];
+ finally
+  Vehicle.AddWheel(Wheel);
+ end;                *)
+
+ Vehicle.Finish;
+
+ Vehicle.RigidBody.SetWorldTransformation(Matrix4x4TermMul(Matrix4x4RotateY(PI),Matrix4x4Translate(0.0,1.0,0.0)));
+
+(*
+Vehicle:=TVehicle.Create(KraftPhysics);
 
  Vehicle.DownForce:=10.0;
+
+ Vehicle.AccelerationCurveEnvelope:=TVehicle.TEnvelope.CreateLinear(0.0,0.0,5.0,200.0);
+ Vehicle.ReverseAccelerationCurveEnvelope:=TVehicle.TEnvelope.CreateLinear(0.0,0.0,5.0,50.0);
 
  Vehicle.FlightStabilizationForce:=6.0;
  Vehicle.FlightStabilizationDamping:=0.7;
@@ -240,13 +303,15 @@ begin
  Vehicle.RigidBody.CollisionGroups:=[1];
  Vehicle.RigidBody.CollideWithCollisionGroups:=[0,1];
  Vehicle.RigidBody.AngularVelocityDamp:=10.0;//10.0;
- Vehicle.RigidBody.LinearVelocityDamp:=0.05;
+ Vehicle.RigidBody.LinearVelocityDamp:=0.3275;
 {Vehicle.RigidBody.Flags:=Vehicle.RigidBody.Flags+[TKraftRigidBodyFlag.krbfHasOwnGravity];
  Vehicle.RigidBody.Gravity.x:=0.0;
  Vehicle.RigidBody.Gravity.y:=0.0;
  Vehicle.RigidBody.Gravity.z:=0.0;}
 
  Vehicle.Reset;
+
+*)
 
  InputKeyLeft:=false;
  InputKeyRight:=false;
@@ -280,7 +345,7 @@ begin
  Vehicle.InputHorizontal:=(ord(InputKeyLeft) and 1)-(ord(InputKeyRight) and 1);
  Vehicle.InputBrake:=InputKeyBrake;
  Vehicle.InputHandBrake:=InputKeyHandBrake;
- Vehicle.Update;
+ Vehicle.Update(DeltaTime);
 end;
 
 procedure TDemoSceneRaycastVehicle.DebugDraw;
@@ -359,10 +424,10 @@ var Position:TKraftVector3;
 begin
  LerpFactor:=1.0-exp(-(1.0/20.0));
  Position:=Vector3Add(Vector3Add(Vehicle.WorldPosition,Vector3ScalarMul(Vehicle.WorldForward,-5.0)),Vector3ScalarMul(Vehicle.WorldUp,0.0));
- PKraftVector3(@TargetMatrix[2,0])^:=Vector3Norm(Vector3Sub(Vehicle.WorldPosition,Position));
- PKraftVector3(@TargetMatrix[1,0])^:=Vehicle.WorldUp;
- PKraftVector3(@TargetMatrix[0,0])^:=Vector3Cross(PKraftVector3(@TargetMatrix[1,0])^,PKraftVector3(@TargetMatrix[2,0])^);
- PKraftVector3(@TargetMatrix[1,0])^:=Vector3Cross(PKraftVector3(@TargetMatrix[2,0])^,PKraftVector3(@TargetMatrix[0,0])^);
+ PKraftVector3(@TargetMatrix[2,0])^.xyz:=Vector3Norm(Vector3Sub(Vehicle.WorldPosition,Position)).xyz;
+ PKraftVector3(@TargetMatrix[1,0])^.xyz:=Vehicle.WorldUp.xyz;
+ PKraftVector3(@TargetMatrix[0,0])^.xyz:=Vector3Cross(PKraftVector3(@TargetMatrix[1,0])^,PKraftVector3(@TargetMatrix[2,0])^).xyz;
+ PKraftVector3(@TargetMatrix[1,0])^.xyz:=Vector3Cross(PKraftVector3(@TargetMatrix[2,0])^,PKraftVector3(@TargetMatrix[0,0])^).xyz;
  aCameraPosition:=Vector3Lerp(aCameraPosition,Position,LerpFactor);
  aCameraOrientation:=QuaternionSlerp(aCameraOrientation,QuaternionFromMatrix3x3(TargetMatrix),LerpFactor);
  result:=true;

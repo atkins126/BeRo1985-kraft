@@ -13,16 +13,24 @@ uses
   SysUtils,
   Forms, Interfaces,
   UnitFormMain in 'UnitFormMain.pas' {FormMain},
-  kraft in '..\src\kraft.pas',
 {$ifdef KraftPasMP}
-  PasMP in '..\..\..\PASMP.github\trunk\src\PasMP.pas',
+  PasMP in '..\..\pasmp\src\PasMP.pas',
 {$endif}
+{$ifdef KraftPasJSON}
+  PUCU in '..\..\pucu\src\PUCU.pas',
+  PasDblStrUtils in '..\..\pasdblstrutils\src\PasDblStrUtils.pas',
+  PasJSON in '..\..\pasjson\src\PasJSON.pas',
+{$endif}
+  kraft in '..\src\kraft.pas',
+  KraftArcadeCarPhysics in '..\src\KraftArcadeCarPhysics.pas',
+  KraftRayCastVehicle,
   UnitDemoScene in 'UnitDemoScene.pas',
   UnitDemoSceneCatapult in 'UnitDemoSceneCatapult.pas',
   UnitDemoSceneRoundabout in 'UnitDemoSceneRoundabout.pas',
   UnitDemoSceneCarousel in 'UnitDemoSceneCarousel.pas',
   UnitDemoSceneBoxOnPlane in 'UnitDemoSceneBoxOnPlane.pas',
   UnitDemoSceneSandBox in 'UnitDemoSceneSandBox.pas',
+  UnitDemoSceneSphereOnSDFTerrain in 'UnitDemoSceneSphereOnSDFTerrain.pas',
   UnitDemoSceneBoxStacking in 'UnitDemoSceneBoxStacking.pas',
   UnitDemoSceneBoxPyramidStacking in 'UnitDemoSceneBoxPyramidStacking.pas',
   UnitDemoSceneBridge in 'UnitDemoSceneBridge.pas',
@@ -33,8 +41,9 @@ uses
   UnitDemoSceneDomino in 'UnitDemoSceneDomino.pas',
   UnitDemoSceneChairAndTable in 'UnitDemoSceneChairAndTable.pas',
   UnitDemoSceneConvexHull in 'UnitDemoSceneConvexHull.pas',
-  UnitDemoSceneConstraintVehicle,
-  UnitDemoSceneRaycastVehicle in 'UnitDemoSceneRaycastVehicle.pas';
+  UnitDemoSceneConstraintVehicle in 'UnitDemoSceneConstraintVehicle.pas',
+  UnitDemoSceneRaycastArcadeVehicle in 'UnitDemoSceneRaycastArcadeVehicle.pas',
+  UnitDemoSceneRaycastVehicle;
 
 {$R *.res}
 

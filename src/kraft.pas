@@ -1,12 +1,12 @@
-(****************************************************************************** 
+(******************************************************************************
  *                            KRAFT PHYSICS ENGINE                            *
  ******************************************************************************
- *                        Version 2022-08-02-13-24-0000                       *
+ *                        Version 2023-06-25-20-38-0000                       *
  ******************************************************************************
  *                                zlib license                                *
  *============================================================================*
  *                                                                            *
- * Copyright (c) 2015-2022, Benjamin Rosseaux (benjamin@rosseaux.de)          *
+ * Copyright (c) 2015-2023, Benjamin Rosseaux (benjamin@rosseaux.de)          *
  *                                                                            *
  * This software is provided 'as-is', without any express or implied          *
  * warranty. In no event will the authors be held liable for any damages      *
@@ -66,6 +66,12 @@ unit kraft;
    {$define cpux64}
   {$endif}
  {$endif}
+ {$ifdef cpuamd64}
+  {$asmmode intel}
+  {$define cpux64}
+  {$define cpux86_64}
+  {$define cpu64}
+ {$endif}
  {$ifdef cpu386}
   {$define cpu386}
   {$asmmode intel}
@@ -79,8 +85,15 @@ unit kraft;
   {$endif}
  {$endif}
  {$excessprecision off}
+ {$define KraftAdvancedRecords}
+ {$packset fixed}
 {$else}
  {$define LITTLE_ENDIAN}
+ {$ifdef cpux64}
+  {$define cpuamd64}
+  {$define cpux86_64}
+  {$define cpu64}
+ {$endif}
  {$ifndef cpu64}
   {$define cpu32}
  {$endif}
@@ -91,7 +104,8 @@ unit kraft;
  {$ifdef conditionalexpressions}
   {$if CompilerVersion>=24.0}
    {$legacyifend on}
-  {$ifend} 
+   {$define KraftAdvancedRecords}
+  {$ifend}
  {$endif}
  {$ifdef ver180}
   {$define caninline}
@@ -108,7 +122,7 @@ unit kraft;
  {$define windows}
 {$endif}
 {$extendedsyntax on}
-{$writeableconst on}
+{$writeableconst off}
 {$varstringchecks on}
 {$typedaddress off}
 {$overflowchecks off}
@@ -129,26 +143,37 @@ unit kraft;
 
 {-$define memdebug}
 
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
  {$define NonSIMD}
 {$endif}
 
-{-$define NonSIMD}
+{$if (not defined(fpc)) and defined(cpuamd64)}
+ {$define NonSIMD} // Due to inline assembler bugs at the Delphi compiler
+{$ifend}
 
 {$ifdef NonSIMD}
- {$undef CPU386ASMForSinglePrecision}
  {$undef SIMD}
+ {$undef SIMDASM}
 {$else}
  {$ifdef cpu386}
   {$if not (defined(Darwin) or defined(CompileForWithPIC))}
-   {$define CPU386ASMForSinglePrecision}
+   {$define SIMDASM}
   {$ifend}
  {$endif}
- {$undef SIMD}
- {$ifdef CPU386ASMForSinglePrecision}
+ {$if defined(cpux64) or defined(cpuamd64)}
+  {$define SIMDASM}
+ {$ifend}
+ {$if defined(SIMDASM)}
   {$define SIMD}
- {$endif}
+  //{$undef SIMDASM}
+ {$ifend}
 {$endif}
+{$undef USE_CONSTREF_EX} // for later usage if needed, for to investigate further FPC codegen issues in the future
+{$if defined(FPC_HAS_CONSTREF) and defined(SIMDASM)}
+ {$define USE_CONSTREF} // For to avoid FPC codegen issues with const in connection with "function result is also a function argument" and so on => physics simulation explodes in some cases
+{$else}
+ {$undef USE_CONSTREF} // For to avoid "then other" FPC codegen issues in this case with constref in connection with "function result is also a function argument" and so on => physics simulation explodes in some cases
+{$ifend}
 
 interface
 
@@ -168,11 +193,13 @@ uses {$ifdef windows}
       {$endif}
      {$endif}
      {$ifdef DebugDraw}
-      {$ifdef fpc}
-       GL,
-       GLext,
-      {$else}
-       OpenGL,
+      {$ifndef NoOpenGL}
+       {$ifdef fpc}
+        GL,
+        GLext,
+       {$else}
+        OpenGL,
+       {$endif}
       {$endif}
      {$endif}
      SysUtils,
@@ -183,9 +210,9 @@ uses {$ifdef windows}
 {$endif}
      Math;
 
-const EPSILON={$ifdef UseDouble}1e-14{$else}1e-5{$endif}; // actually {$ifdef UseDouble}1e-16{$else}1e-7{$endif}; but we are conservative here
+const EPSILON={$ifdef KraftUseDouble}1e-14{$else}1e-5{$endif}; // actually {$ifdef KraftUseDouble}1e-16{$else}1e-7{$endif}; but we are conservative here
 
-      MAX_SCALAR={$ifdef UseDouble}1.7e+308{$else}3.4e+28{$endif};
+      MAX_SCALAR={$ifdef KraftUseDouble}1.7e+308{$else}3.4e+28{$endif};
 
       DEG2RAD=pi/180.0;
       RAD2DEG=180.0/PI;
@@ -237,13 +264,22 @@ const EPSILON={$ifdef UseDouble}1e-14{$else}1e-5{$endif}; // actually {$ifdef Us
       KRAFT_QUICKHULL_HASHSIZE=1 shl KRAFT_QUICKHULL_HASHBITS;
       KRAFT_QUICKHULL_HASHMASK=KRAFT_QUICKHULL_HASHSIZE-1;
 
-type PKraftForceMode=^TKraftForceMode;
-     TKraftForceMode=(kfmForce,        // The unit of the force parameter is applied to the rigidbody as mass*distance/time^2.
+      KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES=16;
+
+      KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_SAMPLES=KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES*KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES*KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES;
+
+      KRAFT_SIGNED_DISTANCE_FIELD_LARGEST_SIZE=4096.0;
+
+      KRAFT_SIMD={$ifdef SIMD}true{$else}false{$endif};
+
+      KraftSIMD={$ifdef SIMD}true{$else}false{$endif};
+
+type TKraftForceMode=(kfmForce,        // The unit of the force parameter is applied to the rigidbody as mass*distance/time^2.
                       kfmAcceleration, // The unit of the force parameter is applied to the rigidbody as distance/time^2.
                       kfmImpulse,      // The unit of the force parameter is applied to the rigidbody as mass*distance/time.
                       kfmVelocity);    // The unit of the force parameter is applied to the rigidbody as distance/time.
+     PKraftForceMode=^TKraftForceMode;
 
-     PKraftContinuousMode=^TKraftContinuousMode;
      TKraftContinuousMode=(kcmNone,                     // No continuous collision detection and response
                            kcmSpeculativeContacts,      // Fake continuous collision detection and response with speculative contacts
                            kcmMotionClamping,           // Continuous collision detection and response with motion clamping
@@ -251,71 +287,75 @@ type PKraftForceMode=^TKraftForceMode;
                                                         // (needs kpcmNonLinearGaussSeidel at ContactPositionCorrectionMode, otherwise it
                                                         // fallbacks to kcmMotionClamping, when kpcmBaumgarte is used at
                                                         // ContactPositionCorrectionMode)
+     PKraftContinuousMode=^TKraftContinuousMode;
 
-     PKraftTimeOfImpactAlgorithm=^TKraftTimeOfImpactAlgorithm;
      TKraftTimeOfImpactAlgorithm=(ktoiaConservativeAdvancement,       // Time of impact detection with conservative advancement
                                   ktoiaBilateralAdvancement);         // Time of impact detection with bilateral advancement
+     PKraftTimeOfImpactAlgorithm=^TKraftTimeOfImpactAlgorithm;
 
-     PKraftPositionCorrectionMode=^TKraftPositionCorrectionMode;
      TKraftPositionCorrectionMode=(kpcmBaumgarte,                     // Faster but it can be inaccurate in some situations
                                    kpcmNonLinearGaussSeidel);         // Slower but it's more precise (default)
+     PKraftPositionCorrectionMode=^TKraftPositionCorrectionMode;
 
-     PKraftContactFlag=^TKraftContactFlag;
+     TKraftGravityMode=(kgmNORMAL,         // Normal gravity in a common direction vector
+                        kgmMIDPOINT);      // A world midpoint as gravity target
+     PKraftGravityMode=^TKraftGravityMode;
+
      TKraftContactFlag=(kcfEnabled,       // To disable contacts by users and for internal usage for processing continuous collection detection
                         kcfColliding,     // Set when contact collides during a step
                         kcfWasColliding,  // Set when two objects stop colliding
                         kcfInIsland,      // For internal marking during island forming
                         kcfFiltered,      // For internal filering
                         kcfTimeOfImpact); // For internal marking during time of impact stuff
+     PKraftContactFlag=^TKraftContactFlag;
 
-     PKraftContactFlags=^TKraftContactFlags;
      TKraftContactFlags=set of TKraftContactFlag;
+     PKraftContactFlags=^TKraftContactFlags;
 
-     PKraftConstraintFlag=^TKraftConstraintFlag;
      TKraftConstraintFlag=(kcfCollideConnected,
                            kcfBreakable,
                            kcfActive,
                            kcfVisited,
                            kcfBreaked,
                            kcfFreshBreaked);
-
-     PKraftConstraintFlags=^TKraftConstraintFlags;
+     PKraftConstraintFlag=^TKraftConstraintFlag;
 
      TKraftConstraintFlags=set of TKraftConstraintFlag;
+     PKraftConstraintFlags=^TKraftConstraintFlags;
 
-     PKraftConstraintLimitBehavior=^TKraftConstraintLimitBehavior;
      TKraftConstraintLimitBehavior=(kclbLimitDistance,
                                     kclbLimitMaximumDistance,
                                     kclbLimitMinimumDistance);
+     PKraftConstraintLimitBehavior=^TKraftConstraintLimitBehavior;
 
-     PKraftShapeType=^TKraftShapeType;
      TKraftShapeType=(kstUnknown=0,
+                      kstSignedDistanceField,
                       kstSphere,
                       kstCapsule,
                       kstConvexHull,
-                      kstBox,          // Internally derived from convex hull
-                      kstPlane,        // Internally derived from convex hull
-                      kstTriangle,     // Internally derived from convex hull and only for internal usage only at mesh shapes
-                      kstMesh);        // Static only
+                      kstBox,                  // Internally derived from convex hull
+                      kstPlane,                // Internally derived from convex hull
+                      kstTriangle,             // Internally derived from convex hull and only for internal usage only at mesh shapes
+                      kstMesh);                // Static only
+     PKraftShapeType=^TKraftShapeType;
 
-     PKraftShapeFlag=^TKraftShapeFlag;
      TKraftShapeFlag=(ksfHasForcedCenterOfMass,
                       ksfCollision,
                       ksfMass,
                       ksfSensor,
                       ksfRayCastable,
                       ksfSphereCastable);
+     PKraftShapeFlag=^TKraftShapeFlag;
 
-     PKraftShapeFlags=^TKraftShapeFlags;
      TKraftShapeFlags=set of TKraftShapeFlag;
+     PKraftShapeFlags=^TKraftShapeFlags;
 
-     PKraftRigidBodyType=^TKraftRigidBodyType;
      TKraftRigidBodyType=(krbtUnknown,
                           krbtStatic,
                           krbtDynamic,
                           krbtKinematic);
+     PKraftRigidBodyType=^TKraftRigidBodyType;
 
-     PKraftRigidBodyFlag=^TKraftRigidBodyFlag;
      TKraftRigidBodyFlag=(krbfHasOwnGravity,
                           krbfHasForcedCenterOfMass,
                           krbfContinuous,
@@ -332,21 +372,110 @@ type PKraftForceMode=^TKraftForceMode;
                           krbfSensor,
                           krbfIslandVisited,
                           krbfIslandStatic);
+     PKraftRigidBodyFlag=^TKraftRigidBodyFlag;
 
-     PKraftRigidBodyFlags=^TKraftRigidBodyFlags;
      TKraftRigidBodyFlags=set of TKraftRigidBodyFlag;
+     PKraftRigidBodyFlags=^TKraftRigidBodyFlags;
 
-     PKraftRigidBodyCollisionGroup=^TKraftRigidBodyCollisionGroup;
+     TKraftParticleFlag=
+      (
+       kpfWater,
+       kpfZombie,
+       kpfWall,
+       kpfSpring,
+       kpfElastic,
+       kpfViscous,
+       kpfPowder,
+       kpfTensile,
+       kpfColorMixing,
+       kpfDestructionListener,
+       kpfBarrier,
+       kpfStaticPressure,
+       kpfReactive,
+       kpfRepulsive,
+       kpfShapeContactListener,
+       kpfParticleContactListener,
+       kpfShapeContactFilter,
+       kpfParticleContactFilter
+      );
+     PKraftParticleFlag=^TKraftParticleFlag;
+
+     TKraftParticleFlags=set of TKraftParticleFlag;
+     PKraftParticleFlags=^TKraftParticleFlags;
+
      TKraftRigidBodyCollisionGroup={$ifdef UseMoreCollisionGroups}0..255{$else}0..31{$endif};
+     PKraftRigidBodyCollisionGroup=^TKraftRigidBodyCollisionGroup;
 
-     PKraftRigidBodyCollisionGroups=^TKraftRigidBodyCollisionGroup;
      TKraftRigidBodyCollisionGroups=set of TKraftRigidBodyCollisionGroup;
+     PKraftRigidBodyCollisionGroups=^TKraftRigidBodyCollisionGroup;
 
-     EKraftShapeTypeOnlyForStaticRigidBody=class(Exception);
+     TKraftInt8={$if declared(Int8)}Int8{$else}ShortInt{$ifend};
+     PKraftInt8=^TKraftInt8;
+     PPKraftInt8=^PKraftInt8;
 
-     EKraftCorruptMeshData=class(Exception);
+     TKraftUInt8={$if declared(UInt8)}UInt8{$else}Byte{$ifend};
+     PKraftUInt8=^TKraftUInt8;
+     PPKraftUInt8=^PKraftUInt8;
 
-     EKraftDegeneratedConvexHull=class(Exception);
+     TKraftInt16={$if declared(Int16)}Int16{$else}SmallInt{$ifend};
+     PKraftInt16=^TKraftInt16;
+     PPKraftInt16=^PKraftInt16;
+
+     TKraftUInt16={$if declared(UInt16)}UInt16{$else}Word{$ifend};
+     PKraftUInt16=^TKraftUInt16;
+     PPKraftUInt16=^PKraftUInt16;
+
+     TKraftInt32={$if declared(Int32)}Int32{$else}LongInt{$ifend};
+     PKraftInt32=^TKraftInt32;
+     PPKraftInt32=^PKraftInt32;
+
+     TKraftUInt32={$if declared(UInt32)}UInt32{$else}LongWord{$ifend};
+     PKraftUInt32=^TKraftUInt32;
+     PPKraftUInt32=^PKraftUInt32;
+
+     TKraftInt64=Int64;
+     PKraftInt64=^TKraftInt64;
+     PPKraftInt64=^PKraftInt64;
+
+     TKraftUInt64={$if declared(UInt64)}UInt64{$else}QWord{$ifend};
+     PKraftUInt64=^TKraftUInt64;
+     PPKraftUInt64=^PKraftUInt64;
+
+     TKraftSizeInt={$if declared(PtrInt)}PtrInt{$elseif declared(SizeInt)}SizeInt{$elseif defined(CPU64)}TKraftInt64{$else}TKraftInt32{$ifend};
+     PKraftSizeInt=^TKraftSizeInt;
+     PPKraftSizeInt=^PKraftSizeInt;
+
+     TKraftSizeUInt={$if declared(PtrUInt)}PtrUInt{$elseif declared(SizeUInt)}SizeUInt{$elseif defined(CPU64)}TKraftUInt64{$else}TKraftUInt32{$ifend};
+     PKraftSizeUInt=^TKraftSizeUInt;
+     PPKraftSizeUInt=^PKraftSizeUInt;
+
+     TKraftPtrInt={$if declared(PtrInt)}PtrInt{$elseif declared(SizeInt)}SizeInt{$elseif defined(CPU64)}TKraftInt64{$else}TKraftInt32{$ifend};
+     PKraftPtrInt=^TKraftPtrInt;
+     PPKraftPtrInt=^PKraftPtrInt;
+
+     TKraftPtrUInt={$if declared(PtrUInt)}PtrUInt{$elseif declared(SizeUInt)}SizeUInt{$elseif defined(CPU64)}TKraftUInt64{$else}TKraftUInt32{$ifend};
+     PKraftPtrUInt=^TKraftPtrUInt;
+     PPKraftPtrUInt=^PKraftPtrUInt;
+
+     TKraftFloat=Single;
+     PKraftFloat=^TKraftFloat;
+     PPKraftFloat=^PKraftFloat;
+
+     TKraftDouble=Double;
+     PKraftDouble=^TKraftDouble;
+     PPKraftDouble=^PKraftDouble;
+
+     EKraft=class(Exception);
+
+     EKraftInvalidSignature=class(Exception);
+
+     EKraftInvalidFileFormatVersion=class(Exception);
+
+     EKraftShapeTypeOnlyForStaticRigidBody=class(EKraft);
+
+     EKraftCorruptMeshData=class(EKraft);
+
+     EKraftDegeneratedConvexHull=class(EKraft);
 
      TKraft=class;
 
@@ -358,78 +487,151 @@ type PKraftForceMode=^TKraftForceMode;
 
      TKraftRigidBody=class;
 
-     TKraftHighResolutionTimer=class
-      private
-       fFrequency:int64;
-       fFrequencyShift:longint;
-       fFrameInterval:int64;
-       fMillisecondInterval:int64;
-       fTwoMillisecondsInterval:int64;
-       fFourMillisecondsInterval:int64;
-       fQuarterSecondInterval:int64;
-       fHourInterval:int64;
+     TKraftQueue<T>=class
       public
-       constructor Create(FrameRate:longint=60);
+       type TQueueItems=array of T;
+      private
+       fItems:TQueueItems;
+       fHead:TKraftSizeInt;
+       fTail:TKraftSizeInt;
+       fCount:TKraftSizeInt;
+       fSize:TKraftSizeInt;
+      public
+       constructor Create; reintroduce;
        destructor Destroy; override;
-       procedure SetFrameRate(FrameRate:longint);
-       function GetTime:int64;
-       function GetEventTime:int64;
-       procedure Sleep(Delay:int64);
-       function ToFixedPointSeconds(Time:int64):int64;
-       function ToFixedPointFrames(Time:int64):int64;
-       function ToFloatSeconds(Time:int64):double;
-       function FromFloatSeconds(Time:double):int64;
-       function ToMilliseconds(Time:int64):int64;
-       function FromMilliseconds(Time:int64):int64;
-       function ToMicroseconds(Time:int64):int64;
-       function FromMicroseconds(Time:int64):int64;
-       function ToNanoseconds(Time:int64):int64;
-       function FromNanoseconds(Time:int64):int64;
-       property SecondInterval:int64 read fFrequency;
-       property Frequency:int64 read fFrequency;
-       property FrequencyShift:longint read fFrequencyShift;
-       property FrameInterval:int64 read fFrameInterval;
-       property MillisecondInterval:int64 read fMillisecondInterval;
-       property TwoMillisecondsInterval:int64 read fTwoMillisecondsInterval;
-       property FourMillisecondsInterval:int64 read fFourMillisecondsInterval;
-       property QuarterSecondInterval:int64 read fQuarterSecondInterval;
-       property HourInterval:int64 read fHourInterval;
+       procedure GrowResize(const aSize:TKraftSizeInt);
+       procedure Clear;
+       function IsEmpty:boolean;
+       procedure EnqueueAtFront(const aItem:T);
+       procedure Enqueue(const aItem:T);
+       function Dequeue(out aItem:T):boolean; overload;
+       function Dequeue:boolean; overload;
+       function Peek(out aItem:T):boolean;
      end;
 
+     TKraftHighResolutionTimer=class
+      private
+       fFrequency:TKraftInt64;
+       fFrequencyShift:TKraftInt32;
+       fFrameInterval:TKraftInt64;
+       fMillisecondInterval:TKraftInt64;
+       fTwoMillisecondsInterval:TKraftInt64;
+       fFourMillisecondsInterval:TKraftInt64;
+       fQuarterSecondInterval:TKraftInt64;
+       fHourInterval:TKraftInt64;
+      public
+       constructor Create(FrameRate:TKraftInt32=60);
+       destructor Destroy; override;
+       procedure SetFrameRate(FrameRate:TKraftInt32);
+       function GetTime:TKraftInt64;
+       function GetEventTime:TKraftInt64;
+       procedure Sleep(Delay:TKraftInt64);
+       function ToFixedPointSeconds(Time:TKraftInt64):TKraftInt64;
+       function ToFixedPointFrames(Time:TKraftInt64):TKraftInt64;
+       function ToFloatSeconds(Time:TKraftInt64):double;
+       function FromFloatSeconds(Time:double):TKraftInt64;
+       function ToMilliseconds(Time:TKraftInt64):TKraftInt64;
+       function FromMilliseconds(Time:TKraftInt64):TKraftInt64;
+       function ToMicroseconds(Time:TKraftInt64):TKraftInt64;
+       function FromMicroseconds(Time:TKraftInt64):TKraftInt64;
+       function ToNanoseconds(Time:TKraftInt64):TKraftInt64;
+       function FromNanoseconds(Time:TKraftInt64):TKraftInt64;
+       property SecondInterval:TKraftInt64 read fFrequency;
+       property Frequency:TKraftInt64 read fFrequency;
+       property FrequencyShift:TKraftInt32 read fFrequencyShift;
+       property FrameInterval:TKraftInt64 read fFrameInterval;
+       property MillisecondInterval:TKraftInt64 read fMillisecondInterval;
+       property TwoMillisecondsInterval:TKraftInt64 read fTwoMillisecondsInterval;
+       property FourMillisecondsInterval:TKraftInt64 read fFourMillisecondsInterval;
+       property QuarterSecondInterval:TKraftInt64 read fQuarterSecondInterval;
+       property HourInterval:TKraftInt64 read fHourInterval;
+     end;
+
+     TKraftScalar={$ifdef KraftUseDouble}TKraftDouble{$else}TKraftFloat{$endif};
      PKraftScalar=^TKraftScalar;
-     TKraftScalar={$ifdef UseDouble}double{$else}single{$endif};
 
      TKraftScalars=array[0..1] of TKraftScalar;
      PKraftScalars=^TKraftScalars;
 
-     TKraftLongInts=array[0..0] of longint;
-     PKraftLongInts=^TKraftLongInts;
+     TKraftScalarArray=array of TKraftScalar;
 
-     PKraftColor=^TKraftColor;
+     TKraftInt8s=array[0..0] of TKraftInt8;
+     PKraftInt8s=^TKraftInt8s;
+
+     TKraftUInt8s=array[0..0] of TKraftUInt8;
+     PKraftUInt8s=^TKraftUInt8s;
+
+     TKraftInt16s=array[0..0] of TKraftInt16;
+     PKraftInt16s=^TKraftInt16s;
+
+     TKraftUInt16s=array[0..0] of TKraftUInt16;
+     PKraftUInt16s=^TKraftUInt16s;
+
+     TKraftInt32s=array[0..0] of TKraftInt32;
+     PKraftInt32s=^TKraftInt32s;
+
+     TKraftUInt32s=array[0..0] of TKraftUInt32;
+     PKraftUInt32s=^TKraftUInt32s;
+
+     TKraftInt64s=array[0..0] of TKraftInt64;
+     PKraftInt64s=^TKraftInt64s;
+
+     TKraftUInt64s=array[0..0] of TKraftUInt64;
+     PKraftUInt64s=^TKraftUInt64s;
+
+     TKraftFloats=array[0..0] of TKraftFloat;
+     PKraftFloats=^TKraftFloats;
+
+     TKraftDoubles=array[0..0] of TKraftDouble;
+     PKraftDoubles=^TKraftDoubles;
+
+     TKraftInt8Array=array of TKraftInt8;
+
+     TKraftUInt8Array=array of TKraftUInt8;
+
+     TKraftInt16Array=array of TKraftInt16;
+
+     TKraftUInt16Array=array of TKraftUInt16;
+
+     TKraftInt32Array=array of TKraftInt32;
+
+     TKraftUInt32Array=array of TKraftUInt32;
+
+     TKraftInt64Array=array of TKraftInt64;
+
+     TKraftUInt64Array=array of TKraftUInt64;
+
+     TKraftFloatArray=array of TKraftFloat;
+
+     TKraftDoubleArray=array of TKraftDouble;
+
+     TKraftSignature=array[0..7] of AnsiChar;
+     PKraftSignature=^TKraftSignature;
+
      TKraftColor=record
       r,g,b,a:TKraftScalar;
      end;
+     PKraftColor=^TKraftColor;
 
-     PKraftAngles=^TKraftAngles;
      TKraftAngles=record
       Pitch,Yaw,Roll:TKraftScalar;
      end;
+     PKraftAngles=^TKraftAngles;
 
-     PKraftVector2=^TKraftVector2;
      TKraftVector2=record
       x,y:TKraftScalar;
      end;
+     PKraftVector2=^TKraftVector2;
 
-     PKraftRawVector3=^TKraftRawVector3;
      TKraftRawVector3=record
-      case byte of
+      case TKraftUInt8 of
        0:(x,y,z:TKraftScalar);
        1:(xyz:array[0..2] of TKraftScalar);
      end;
+     PKraftRawVector3=^TKraftRawVector3;
 
-     PKraftVector3=^TKraftVector3;
      TKraftVector3=record
-      case byte of
+      case TKraftUInt8 of
        0:(x,y,z{$ifdef SIMD},w{$endif}:TKraftScalar);
        1:(Pitch,Yaw,Roll:single);
        2:(xyz:array[0..2] of TKraftScalar);
@@ -439,44 +641,44 @@ type PKraftForceMode=^TKraftForceMode;
        5:(xyzw:array[0..3] of TKraftScalar);
 {$endif}
      end;
+     PKraftVector3=^TKraftVector3;
 
-     PKraftVector4=^TKraftVector4;
      TKraftVector4=record
-      case byte of
+      case TKraftUInt8 of
        0:(x,y,z,w:TKraftScalar);
        1:(xyz:array[0..2] of TKraftScalar);
        2:(xyzw:array[0..3] of TKraftScalar);
      end;
+     PKraftVector4=^TKraftVector4;
 
      TKraftVector3Array=array of TKraftVector3;
 
-     PKraftVector3s=^TKraftVector3s;
      TKraftVector3s=array[0..$ff] of TKraftVector3;
+     PKraftVector3s=^TKraftVector3s;
 
-     PPKraftVector3s=^TPKraftVector3s;
      TPKraftVector3s=array[0..$ff] of PKraftVector3;
+     PPKraftVector3s=^TPKraftVector3s;
 
-     PKraftPlane=^TKraftPlane;
      TKraftPlane=record
       Normal:TKraftVector3;
       Distance:TKraftScalar;
      end;
+     PKraftPlane=^TKraftPlane;
 
-     PKraftQuaternion=^TKraftQuaternion;
      TKraftQuaternion=record
       x,y,z,w:TKraftScalar;
      end;
+     PKraftQuaternion=^TKraftQuaternion;
 
-     PKraftMatrix2x2=^TKraftMatrix2x2;
      TKraftMatrix2x2=array[0..1,0..1] of TKraftScalar;
+     PKraftMatrix2x2=^TKraftMatrix2x2;
 
-     PKraftMatrix3x3=^TKraftMatrix3x3;
      TKraftMatrix3x3=array[0..2,0..{$ifdef SIMD}3{$else}2{$endif}] of TKraftScalar;
+     PKraftMatrix3x3=^TKraftMatrix3x3;
 
-     PKraftMatrix4x4=^TKraftMatrix4x4;
      TKraftMatrix4x4=array[0..3,0..3] of TKraftScalar;
+     PKraftMatrix4x4=^TKraftMatrix4x4;
 
-     PKraftAABB=^TKraftAABB;
      TKraftAABB=record
       case boolean of
        false:(
@@ -486,43 +688,44 @@ type PKraftForceMode=^TKraftForceMode;
         MinMax:array[0..1] of TKraftVector3;
        );
      end;
+     PKraftAABB=^TKraftAABB;
 
-     PKraftAABBs=^TKraftAABBs;
      TKraftAABBs=array[0..65535] of TKraftAABB;
+     PKraftAABBs=^TKraftAABBs;
 
-     PKraftSphere=^TKraftSphere;
      TKraftSphere=record
       Center:TKraftVector3;
       Radius:TKraftScalar;
      end;
+     PKraftSphere=^TKraftSphere;
 
-     PKraftSpheres=^TKraftSpheres;
      TKraftSpheres=array[0..65535] of TKraftSphere;
+     PKraftSpheres=^TKraftSpheres;
 
-     PKraftSegment=^TKraftSegment;
      TKraftSegment=record
       Points:array[0..1] of TKraftVector3;
      end;
+     PKraftSegment=^TKraftSegment;
 
-     PKraftRelativeSegment=^TKraftRelativeSegment;
      TKraftRelativeSegment=record
       Origin:TKraftVector3;
       Delta:TKraftVector3;
      end;
+     PKraftRelativeSegment=^TKraftRelativeSegment;
 
-     PKraftTriangle=^TKraftTriangle;
      TKraftTriangle=record
       Points:array[0..2] of TKraftVector3;
       Normal:TKraftVector3;
      end;
+     PKraftTriangle=^TKraftTriangle;
 
-     PKraftTimeStep=^TKraftTimeStep;
      TKraftTimeStep=record
       DeltaTime:TKraftScalar;
       InverseDeltaTime:TKraftScalar;
       DeltaTimeRatio:TKraftScalar;
       WarmStarting:boolean;
      end;
+     PKraftTimeStep=^TKraftTimeStep;
 
      // This class does exist as workaround for FreePascal, which doesn't support TKraftVector3 as published property (but Delphi does it)
      TKraftVector3Property=class(TPersistent)
@@ -550,15 +753,15 @@ type PKraftForceMode=^TKraftForceMode;
      TKraftDynamicAABBTreeNode=record
       AABB:TKraftAABB;
       UserData:pointer;
-      Children:array[0..1] of longint;
-      Height:longint;
-      MoveBufferIndex:longint;
+      Children:array[0..1] of TKraftInt32;
+      Height:TKraftInt32;
+      MoveBufferIndex:TKraftInt32;
       case boolean of
        false:(
-        Parent:longint;
+        Parent:TKraftInt32;
        );
        true:(
-        Next:longint;
+        Next:TKraftInt32;
        );
      end;
 
@@ -566,47 +769,47 @@ type PKraftForceMode=^TKraftForceMode;
      TKraftDynamicAABBTreeNodes=array[0..0] of TKraftDynamicAABBTreeNode;
 
      PKraftDynamicAABBTreeLongintArray=^TKraftDynamicAABBTreeLongintArray;
-     TKraftDynamicAABBTreeLongintArray=array[0..65535] of longint;
+     TKraftDynamicAABBTreeLongintArray=array[0..65535] of TKraftInt32;
 
      TKraftDynamicAABBTree=class
       private
-       fRoot:longint;
+       fRoot:TKraftInt32;
        fNodes:PKraftDynamicAABBTreeNodes;
-       fNodeCount:longint;
-       fNodeCapacity:longint;
-       fFreeList:longint;
-       fPath:longword;
-       fInsertionCount:longint;
+       fNodeCount:TKraftInt32;
+       fNodeCapacity:TKraftInt32;
+       fFreeList:TKraftInt32;
+       fPath:TKraftUInt32;
+       fInsertionCount:TKraftInt32;
        fStack:PKraftDynamicAABBTreeLongintArray;
-       fStackCapacity:longint;
+       fStackCapacity:TKraftInt32;
       public
        constructor Create;
        destructor Destroy; override;
-       function AllocateNode:longint;
-       procedure FreeNode(NodeID:longint);
-       function Balance(NodeAID:longint):longint;
-       procedure InsertLeaf(Leaf:longint);
-       procedure RemoveLeaf(Leaf:longint);
-       function CreateProxy(const AABB:TKraftAABB;UserData:pointer):longint;
-       procedure DestroyProxy(NodeID:longint);
-       function MoveProxy(NodeID:longint;const AABB:TKraftAABB;const Displacement,BoundsExpansion:TKraftVector3):boolean;
-       procedure Rebalance(Iterations:longint);
+       function AllocateNode:TKraftInt32;
+       procedure FreeNode(NodeID:TKraftInt32);
+       function Balance(NodeAID:TKraftInt32):TKraftInt32;
+       procedure InsertLeaf(Leaf:TKraftInt32);
+       procedure RemoveLeaf(Leaf:TKraftInt32);
+       function CreateProxy(const AABB:TKraftAABB;UserData:pointer):TKraftInt32;
+       procedure DestroyProxy(NodeID:TKraftInt32);
+       function MoveProxy(NodeID:TKraftInt32;const AABB:TKraftAABB;const Displacement,BoundsExpansion:TKraftVector3):boolean;
+       procedure Rebalance(Iterations:TKraftInt32);
        procedure Rebuild;
-       function ComputeHeight:longint;
-       function GetHeight:longint;
+       function ComputeHeight:TKraftInt32;
+       function GetHeight:TKraftInt32;
        function GetAreaRatio:TKraftScalar;
-       function GetMaxBalance:longint;
+       function GetMaxBalance:TKraftInt32;
        function ValidateStructure:boolean;
        function ValidateMetrics:boolean;
        function Validate:boolean;
        function GetIntersectionProxy(const AABB:TKraftAABB):pointer;
-       property Root:longint read fRoot;
+       property Root:TKraftInt32 read fRoot;
        property Nodes:PKraftDynamicAABBTreeNodes read fNodes;
-       property NodeCount:longint read fNodeCount;
-       property NodeCapacity:longint read fNodeCapacity;
-       property FreeList:longint read fFreeList;
-       property Path:longword read fPath;
-       property InsertionCount:longint read fInsertionCount;
+       property NodeCount:TKraftInt32 read fNodeCount;
+       property NodeCapacity:TKraftInt32 read fNodeCapacity;
+       property FreeList:TKraftInt32 read fFreeList;
+       property Path:TKraftUInt32 read fPath;
+       property InsertionCount:TKraftInt32 read fInsertionCount;
      end;
 
      PKraftSweep=^TKraftSweep;
@@ -628,16 +831,16 @@ type PKraftForceMode=^TKraftForceMode;
      // 64-bit contact feature ID
      PKraftContactFeatureID=^TKraftContactFeatureID;
      TKraftContactFeatureID=record
-      case longint of
+      case TKraftInt32 of
        0:(
         // when the last bit isn't set => continuous edge numbering at convex hulls for face<->face contacts
         // when the last bit is set    => continuous edge numbering at convex hulls for edge<->edge contacts
-        ElementA:longword;
-        ElementB:longword;
+        ElementA:TKraftUInt32;
+        ElementB:TKraftUInt32;
        );
        1:(
         // -1 => feature matching per nearest point search (like for example Bullet does it also)
-        Key:int64;
+        Key:TKraftInt64;
        );
      end;
 
@@ -652,8 +855,8 @@ type PKraftForceMode=^TKraftForceMode;
      TKraftClipVertexList=class
       private
        fVertices:TKraftClipVertices;
-       fCapacity:longint;
-       fCount:longint;
+       fCapacity:TKraftInt32;
+       fCount:TKraftInt32;
        fColor:TKraftColor;
       public
        constructor Create;
@@ -662,8 +865,8 @@ type PKraftForceMode=^TKraftForceMode;
        procedure Add(const v:TKraftVector3;const fp:TKraftContactFeatureID); overload;
        procedure Add(const v:TKraftClipVertex); overload;
        property Vertices:TKraftClipVertices read fVertices write fVertices;
-       property Capacity:longint read fCapacity write fCapacity;
-       property Count:longint read fCount write fCount;
+       property Capacity:TKraftInt32 read fCapacity write fCapacity;
+       property Count:TKraftInt32 read fCount write fCount;
        property Color:TKraftColor read fColor write fColor;
      end;
 
@@ -700,37 +903,37 @@ type PKraftForceMode=^TKraftForceMode;
      EKraftQuickHull=class(Exception);
 
      PKraftQuickHullIntegerArray=^TKraftQuickHullIntegerArray;
-     TKraftQuickHullIntegerArray=array[0..(2147483647 div sizeof(longint))-1] of longint;
+     TKraftQuickHullIntegerArray=array[0..(2147483647 div sizeof(TKraftInt32))-1] of TKraftInt32;
 
      TKraftQuickHullIntegerList=class
       private
        fList:PKraftQuickHullIntegerArray;
-       fCountItems:longint;
-       fAllocated:longint;
+       fCountItems:TKraftInt32;
+       fAllocated:TKraftInt32;
        fIsSorted:boolean;
-       function GetItem(Index:longint):longint;
-       procedure SetItem(Index:longint;Value:longint);
-       function GetItemPointer(Index:longint):pointer;
+       function GetItem(Index:TKraftInt32):TKraftInt32;
+       procedure SetItem(Index:TKraftInt32;Value:TKraftInt32);
+       function GetItemPointer(Index:TKraftInt32):pointer;
       public
        constructor Create;
        destructor Destroy; override;
        procedure Clear;
-       function Add(Item:longint):longint;
-       procedure AddSorted(Item:longint);
-       procedure Insert(Index:longint;Item:longint);
-       procedure Delete(Index:longint);
-       function Remove(Item:longint):longint;
-       function Find(Item:longint):longint;
-       function IndexOf(Item:longint):longint;
-       procedure Exchange(Index1,Index2:longint);
-       procedure SetCapacity(NewCapacity:longint);
-       procedure SetCount(NewCount:longint);
+       function Add(Item:TKraftInt32):TKraftInt32;
+       procedure AddSorted(Item:TKraftInt32);
+       procedure Insert(Index:TKraftInt32;Item:TKraftInt32);
+       procedure Delete(Index:TKraftInt32);
+       function Remove(Item:TKraftInt32):TKraftInt32;
+       function Find(Item:TKraftInt32):TKraftInt32;
+       function IndexOf(Item:TKraftInt32):TKraftInt32;
+       procedure Exchange(Index1,Index2:TKraftInt32);
+       procedure SetCapacity(NewCapacity:TKraftInt32);
+       procedure SetCount(NewCount:TKraftInt32);
        procedure Sort;
-       property Count:longint read fCountItems;
-       property Capacity:longint read fAllocated write SetCapacity;
-       property Item[Index:longint]:longint read GetItem write SetItem; default;
-       property Items[Index:longint]:longint read GetItem write SetItem;
-       property PItems[Index:longint]:pointer read GetItemPointer;
+       property Count:TKraftInt32 read fCountItems;
+       property Capacity:TKraftInt32 read fAllocated write SetCapacity;
+       property Item[Index:TKraftInt32]:TKraftInt32 read GetItem write SetItem; default;
+       property Items[Index:TKraftInt32]:TKraftInt32 read GetItem write SetItem;
+       property PItems[Index:TKraftInt32]:pointer read GetItemPointer;
      end;
 
      TKraftQuickHull=class;
@@ -742,8 +945,8 @@ type PKraftForceMode=^TKraftForceMode;
        y:double;
        z:double;
        function Init(const ax:double=0.0;const ay:double=0.0;const az:double=0.0):TKraftQuickHullVector3D;
-       procedure SetValue(i:longint;const v:double);
-       function GetValue(i:longint):double;
+       procedure SetValue(i:TKraftInt32;const v:double);
+       function GetValue(i:TKraftInt32):double;
        procedure Add(const v0,v1:TKraftQuickHullVector3D); overload;
        procedure Add(const v:TKraftQuickHullVector3D); overload;
        procedure Sub(const v0,v1:TKraftQuickHullVector3D); overload;
@@ -763,7 +966,7 @@ type PKraftForceMode=^TKraftForceMode;
 
      TKraftQuickHullVector3DArray=array of TKraftQuickHullVector3D;
 
-     TKraftQuickHullOutputFace=array of longint;
+     TKraftQuickHullOutputFace=TKraftInt32Array;
 
      TKraftQuickHullOutputFaces=array of TKraftQuickHullOutputFace;
 
@@ -775,7 +978,7 @@ type PKraftForceMode=^TKraftForceMode;
       private
        fInstance:TKraftQuickHull;
        fPoint:TKraftQuickHullVector3D;
-       fIndex:longint;
+       fIndex:TKraftInt32;
        fPrevious:TKraftQuickHullVertex;
        fNext:TKraftQuickHullVertex;
        fFace:TKraftQuickHullFace;
@@ -785,7 +988,7 @@ type PKraftForceMode=^TKraftForceMode;
        destructor Destroy; override;
        property Instance:TKraftQuickHull read fInstance;
        property Point:TKraftQuickHullVector3D read fPoint write fPoint;
-       property Index:longint read fIndex write fIndex;
+       property Index:TKraftInt32 read fIndex write fIndex;
        property Previous:TKraftQuickHullVertex read fPrevious write fPrevious;
        property Next:TKraftQuickHullVertex read fNext write fNext;
        property Face:TKraftQuickHullFace read fFace write fFace;
@@ -830,13 +1033,13 @@ type PKraftForceMode=^TKraftForceMode;
        fArea:double;
        fCentroid:TKraftQuickHullVector3D;
        fPlaneOffset:double;
-       fIndex:longint;
-       fCountVertices:longint;
-       fMark:longint;
+       fIndex:TKraftInt32;
+       fCountVertices:TKraftInt32;
+       fMark:TKraftInt32;
        fOutside:TKraftQuickHullVertex;
       public
        constructor Create(const AInstance:TKraftQuickHull);
-       constructor CreatePolygon(const AInstance:TKraftQuickHull;const AVertices:array of TKraftQuickHullVertex;const AIndices:array of longint);
+       constructor CreatePolygon(const AInstance:TKraftQuickHull;const AVertices:array of TKraftQuickHullVertex;const AIndices:array of TKraftInt32);
        constructor CreateTriangle(const AInstance:TKraftQuickHull;const v0,v1,v2:TKraftQuickHullVertex;const AMinArea:double=0.0);
        destructor Destroy; override;
        procedure ComputeCentroid(var ACentroid:TKraftQuickHullVector3D);
@@ -844,13 +1047,13 @@ type PKraftForceMode=^TKraftForceMode;
        procedure ComputeNormal(var ANormal:TKraftQuickHullVector3D;const AMinArea:double); overload;
        procedure ComputeNormalAndCentroid; overload;
        procedure ComputeNormalAndCentroid(const AMinArea:double); overload;
-       function GetEdge(i:longint):TKraftQuickHullHalfEdge;
+       function GetEdge(i:TKraftInt32):TKraftQuickHullHalfEdge;
        function GetFirstEdge:TKraftQuickHullHalfEdge;
        function FindEdge(const vt,vh:TKraftQuickHullVertex):TKraftQuickHullHalfEdge;
        function DistanceToPlane(const p:TKraftQuickHullVector3D):double;
        function ConnectHalfEdges(const hedgePrev,hedge:TKraftQuickHullHalfEdge):TKraftQuickHullFace;
        procedure CheckConsistency;
-       function MergeAdjacentFace(const hedgeAdj:TKraftQuickHullHalfEdge;const Discarded:TList):longint;
+       function MergeAdjacentFace(const hedgeAdj:TKraftQuickHullHalfEdge;const Discarded:TList):TKraftInt32;
        function AreaSquared(const hedge0,hedge1:TKraftQuickHullHalfEdge):double;
        procedure Triangulate(var NewFaces:TKraftQuickHullFaceList;const MinArea:double);
        property Instance:TKraftQuickHull read fInstance;
@@ -860,9 +1063,9 @@ type PKraftForceMode=^TKraftForceMode;
        property Area:double read fArea write fArea;
        property Centroid:TKraftQuickHullVector3D read fCentroid write fCentroid;
        property PlaneOffset:double read fPlaneOffset write fPlaneOffset;
-       property Index:longint read fIndex write fIndex;
-       property CountVertices:longint read fCountVertices write fCountVertices;
-       property Mark:longint read fMark write fMark;
+       property Index:TKraftInt32 read fIndex write fIndex;
+       property CountVertices:TKraftInt32 read fCountVertices write fCountVertices;
+       property Mark:TKraftInt32 read fMark write fMark;
        property Outside:TKraftQuickHullVertex read fOutside write fOutside;
      end;
 
@@ -897,7 +1100,7 @@ type PKraftForceMode=^TKraftForceMode;
      TKraftQuickHull=class
       private
        fGarbageCollectedClassInstances:TList;
-       fFindIndex:longint;
+       fFindIndex:TKraftInt32;
        fPointBuffer:TList;
        fVertexHashTable:TKraftQuickHullVertexHashTable;
        fVertexPointIndices:TKraftQuickHullIntegerList;
@@ -909,9 +1112,9 @@ type PKraftForceMode=^TKraftForceMode;
        fNewFaces:TKraftQuickHullFaceList;
        fUnclaimed:TKraftQuickHullVertexList;
        fClaimed:TKraftQuickHullVertexList;
-       fCountVertices:longint;
-       fCountFaces:longint;
-       fCountPoints:longint;
+       fCountVertices:TKraftInt32;
+       fCountFaces:TKraftInt32;
+       fCountPoints:TKraftInt32;
        fExplicitTolerance:double;
        fTolerance:double;
        fCharLength:double;
@@ -933,17 +1136,17 @@ type PKraftForceMode=^TKraftForceMode;
        function AddAdjoiningFace(const EyeVertex:TKraftQuickHullVertex;const he:TKraftQuickHullHalfEdge):TKraftQuickHullHalfEdge;
        procedure AddNewFaces(const NewFaces:TKraftQuickHullFaceList;const EyeVertex:TKraftQuickHullVertex;const Horizon:TList);
        function OppFaceDistance(he:TKraftQuickHullHalfEdge):double;
-       function DoAdjacentMerge(const Face:TKraftQuickHullFace;const MergeType:longint):boolean;
+       function DoAdjacentMerge(const Face:TKraftQuickHullFace;const MergeType:TKraftInt32):boolean;
        procedure ResolveUnclaimedPoints(NewFaces:TKraftQuickHullFaceList);
        procedure AddPointToHull(const EyeVertex:TKraftQuickHullVertex);
-       procedure MarkFaceVertices(const Face:TKraftQuickHullFace;const Mark:longint);
+       procedure MarkFaceVertices(const Face:TKraftQuickHullFace;const Mark:TKraftInt32);
        procedure ReindexFacesAndVertices;
-       procedure Build(const MaximumVertices:longint=-1);
-       procedure GetFaceIndices(out OutputFace:TKraftQuickHullOutputFace;const Face:TKraftQuickHullFace;const Flags:longint);
+       procedure Build(const MaximumVertices:TKraftInt32=-1);
+       procedure GetFaceIndices(out OutputFace:TKraftQuickHullOutputFace;const Face:TKraftQuickHullFace;const Flags:TKraftInt32);
        procedure GetVertices(out OutputVertices:TKraftQuickHullVector3DArray);
        procedure GetFaces(out OutputFaces:TKraftQuickHullOutputFaces);
        property GarbageCollectedClassInstances:TList read fGarbageCollectedClassInstances write fGarbageCollectedClassInstances;
-       property FindIndex:longint read fFindIndex write fFindIndex;
+       property FindIndex:TKraftInt32 read fFindIndex write fFindIndex;
        property PointBuffer:TList read fPointBuffer write fPointBuffer;
        property VertexHashTable:TKraftQuickHullVertexHashTable read fVertexHashTable write fVertexHashTable;
        property VertexPointIndices:TKraftQuickHullIntegerList read fVertexPointIndices;
@@ -955,9 +1158,9 @@ type PKraftForceMode=^TKraftForceMode;
        property NewFaces:TKraftQuickHullFaceList read fNewFaces write fNewFaces;
        property Unclaimed:TKraftQuickHullVertexList read fUnclaimed write fUnclaimed;
        property Claimed:TKraftQuickHullVertexList read fClaimed write fClaimed;
-       property CountVertices:longint read fCountVertices write fCountVertices;
-       property CountFaces:longint read fCountFaces write fCountFaces;
-       property CountPoints:longint read fCountPoints write fCountPoints;
+       property CountVertices:TKraftInt32 read fCountVertices write fCountVertices;
+       property CountFaces:TKraftInt32 read fCountFaces write fCountFaces;
+       property CountPoints:TKraftInt32 read fCountPoints write fCountPoints;
        property ExplicitTolerance:double read fExplicitTolerance write fExplicitTolerance;
        property Tolerance:double read fTolerance write fTolerance;
        property CharLength:double read fCharLength write fCharLength;
@@ -966,8 +1169,8 @@ type PKraftForceMode=^TKraftForceMode;
      PKraftConvexHullVertex=^TKraftConvexHullVertex;
      TKraftConvexHullVertex=record
       Position:TKraftVector3;
-      CountAdjacencies:longint;
-      Adjacencies:array of longint;
+      CountAdjacencies:TKraftInt32;
+      Adjacencies:TKraftInt32Array;
      end;
 
      PPKraftConvexHullVertices=^TPKraftConvexHullVertices;
@@ -978,23 +1181,23 @@ type PKraftForceMode=^TKraftForceMode;
      PKraftConvexHullFace=^TKraftConvexHullFace;
      TKraftConvexHullFace=record
       Plane:TKraftPlane;
-      Vertices:array of longint;
-      CountVertices:longint;
-      EdgeVertexOffset:longint;
+      Vertices:TKraftInt32Array;
+      CountVertices:TKraftInt32;
+      EdgeVertexOffset:TKraftInt32;
      end;
 
      TKraftConvexHullFaces=array of TKraftConvexHullFace;
 
      PKraftConvexHullEdge=^TKraftConvexHullEdge;
      TKraftConvexHullEdge=record
-      Vertices:array[0..1] of longint;
-      Faces:array[0..1] of longint;
+      Vertices:array[0..1] of TKraftInt32;
+      Faces:array[0..1] of TKraftInt32;
      end;
 
      TKraftConvexHullEdges=array of TKraftConvexHullEdge;
 
      TKraftConvexHull=class(TPersistent)
-      private              
+      private
 
        fPhysics:TKraft;
 
@@ -1002,13 +1205,13 @@ type PKraftForceMode=^TKraftForceMode;
        fNext:TKraftConvexHull;
 
        fVertices:TKraftConvexHullVertices;
-       fCountVertices:longint;
+       fCountVertices:TKraftInt32;
 
        fFaces:TKraftConvexHullFaces;
-       fCountFaces:longint;
+       fCountFaces:TKraftInt32;
 
        fEdges:TKraftConvexHullEdges;
-       fCountEdges:longint;
+       fCountEdges:TKraftInt32;
 
        fSphere:TKraftSphere;
 
@@ -1027,12 +1230,14 @@ type PKraftForceMode=^TKraftForceMode;
        constructor Create(const APhysics:TKraft);
        destructor Destroy; override;
 
+       procedure Clear(const aFreeMemory:boolean=true);
+
        procedure LoadFromStream(const AStream:TStream);
        procedure SaveToStream(const AStream:TStream);
 
-       function AddVertex(const AVertex:TKraftVector3):longint;
+       function AddVertex(const AVertex:TKraftVector3):TKraftInt32;
 
-       procedure Load(const AVertices:PKraftVector3;const ACountVertices:longint);
+       procedure Load(const AVertices:PKraftVector3;const ACountVertices:TKraftInt32);
 
        procedure Scale(const WithFactor:TKraftScalar); overload;
        procedure Scale(const WithVector:TKraftVector3); overload;
@@ -1040,17 +1245,25 @@ type PKraftForceMode=^TKraftForceMode;
        procedure Transform(const WithMatrix:TKraftMatrix3x3); overload;
        procedure Transform(const WithMatrix:TKraftMatrix4x4); overload;
 
-       procedure Build(const AMaximumCountConvexHullPoints:longint=-1;const AUserDefinedTolerance:double=-1.0);
+       procedure Build(const AMaximumCountConvexHullPoints:TKraftInt32=-1;const AUserDefinedTolerance:double=-1.0);
 
        procedure Update;
 
        procedure Finish;
 
-       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
 
-       function GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3;
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
 
-       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint;
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+
+       function GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
+
+       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
 
        function GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
 
@@ -1060,13 +1273,13 @@ type PKraftForceMode=^TKraftForceMode;
        property Next:TKraftConvexHull read fNext;
 
        property Vertices:TKraftConvexHullVertices read fVertices;
-       property CountVertices:longint read fCountVertices;
+       property CountVertices:TKraftInt32 read fCountVertices;
 
        property Faces:TKraftConvexHullFaces read fFaces;
-       property CountFaces:longint read fCountFaces;
+       property CountFaces:TKraftInt32 read fCountFaces;
 
        property Edges:TKraftConvexHullEdges read fEdges;
-       property CountEdges:longint read fCountEdges;
+       property CountEdges:TKraftInt32 read fCountEdges;
 
        property Sphere:TKraftSphere read fSphere;
 
@@ -1081,35 +1294,42 @@ type PKraftForceMode=^TKraftForceMode;
      end;
 
      PKraftMeshTriangle=^TKraftMeshTriangle;
-     TKraftMeshTriangle=record
-      Next:longint;
-      Vertices:array[0..2] of longint;
-      Normals:array[0..2] of longint;
+     TKraftMeshTriangle=packed record
+      Next:TKraftInt32;
+      Vertices:array[0..2] of TKraftInt32;
+      Normals:array[0..2] of TKraftInt32;
+      Center:TKraftVector3;
       Plane:TKraftPlane;
       AABB:TKraftAABB;
      end;
 
      TKraftMeshTriangles=array of TKraftMeshTriangle;
 
-     PKraftMeshNode=^TKraftMeshNode;
-     TKraftMeshNode=record
-      Children:array[0..1] of longint;
-      TriangleIndex:longint;
+     TKraftMeshTreeNode=packed record
+      FirstLeftChild:TKraftInt32;
+      FirstTriangleIndex:TKraftInt32;
+      CountTriangles:TKraftInt32;
       AABB:TKraftAABB;
      end;
+     PKraftMeshTreeNode=^TKraftMeshTreeNode;
 
-     TKraftMeshNodes=array of TKraftMeshNode;
+     TKraftMeshTreeNodes=array of TKraftMeshTreeNode;
 
+     TKraftMeshSkipListNode=packed record
+      SkipToNodeIndex:TKraftInt32;
+      FirstTriangleIndex:TKraftInt32;
+      CountTriangles:TKraftInt32;
+      AABB:TKraftAABB;
+     end;
      PKraftMeshSkipListNode=^TKraftMeshSkipListNode;
-     TKraftMeshSkipListNode=record
-      SkipToNodeIndex:longint;
-      TriangleIndex:longint;
-      AABB:TKraftAABB;
-     end;
 
      TKraftMeshSkipListNodes=array of TKraftMeshSkipListNode;
 
+     TKraftMeshNodeQueue={$ifdef KraftPasMP}TPasMPUnboundedQueue<TKraftInt32>{$else}TKraftQueue<TKraftInt32>{$endif};
+
      TKraftMesh=class(TPersistent)
+      private
+       const MaximumTrianglesPerNode=8;
       private
 
        fPhysics:TKraft;
@@ -1118,23 +1338,35 @@ type PKraftForceMode=^TKraftForceMode;
        fNext:TKraftMesh;
 
        fVertices:TKraftVector3Array;
-       fCountVertices:longint;
+       fCountVertices:TKraftInt32;
 
        fNormals:TKraftVector3Array;
-       fCountNormals:longint;
+       fCountNormals:TKraftInt32;
 
        fTriangles:TKraftMeshTriangles;
-       fCountTriangles:longint;
+       fCountTriangles:TKraftInt32;
 
-       fNodes:TKraftMeshNodes;
-       fCountNodes:longint;
+       fTreeNodes:TKraftMeshTreeNodes;
+       fCountTreeNodes:TKraftInt32;
+       fTreeNodeRoot:TKraftInt32;
 
        fSkipListNodes:TKraftMeshSkipListNodes;
-       fCountSkipListNodes:longint;
+       fCountSkipListNodes:TKraftInt32;
 
        fAABB:TKraftAABB;
 
        fDoubleSided:boolean;
+
+       fNodeQueue:TKraftMeshNodeQueue;
+       fCountActiveWorkers:TKraftInt32;
+
+       function FindBestSplitPlane(const aParentTreeNode:PKraftMeshTreeNode;out aAxis:TKraftInt32;out aSplitPosition:TKraftScalar):TKraftScalar;
+       function CalculateNodeCost(const aParentTreeNode:PKraftMeshTreeNode):TKraftScalar;
+       procedure UpdateNodeBounds(const aParentTreeNode:PKraftMeshTreeNode);
+       procedure ProcessNodeQueue;
+{$ifdef KraftPasMP}
+       procedure BuildJob(const Job:PPasMPJob;const ThreadIndex:TPasMPInt32);
+{$endif}
 
        procedure CalculateNormals;
 
@@ -1143,14 +1375,19 @@ type PKraftForceMode=^TKraftForceMode;
        constructor Create(const APhysics:TKraft);
        destructor Destroy; override;
 
-       function AddVertex(const AVertex:TKraftVector3):longint;
+       procedure Clear(const aFreeMemory:boolean=true);
 
-       function AddNormal(const ANormal:TKraftVector3):longint;
+       procedure LoadFromStream(const AStream:TStream);
+       procedure SaveToStream(const AStream:TStream);
 
-       function AddTriangle(const AVertexIndex0,AVertexIndex1,AVertexIndex2:longint;const ANormalIndex0:longint=-1;const ANormalIndex1:longint=-1;ANormalIndex2:longint=-1):longint;
+       function AddVertex(const AVertex:TKraftVector3):TKraftInt32;
 
-       procedure Load(const AVertices:PKraftVector3;const ACountVertices:longint;const ANormals:PKraftVector3;const ACountNormals:longint;const AVertexIndices,ANormalIndices:pointer;const ACountIndices:longint); overload;
-       procedure Load(const ASourceData:pointer;const ASourceSize:longint); overload;
+       function AddNormal(const ANormal:TKraftVector3):TKraftInt32;
+
+       function AddTriangle(const AVertexIndex0,AVertexIndex1,AVertexIndex2:TKraftInt32;const ANormalIndex0:TKraftInt32=-1;const ANormalIndex1:TKraftInt32=-1;ANormalIndex2:TKraftInt32=-1):TKraftInt32;
+
+       procedure Load(const AVertices:PKraftVector3;const ACountVertices:TKraftInt32;const ANormals:PKraftVector3;const ACountNormals:TKraftInt32;const AVertexIndices,ANormalIndices:pointer;const ACountIndices:TKraftInt32); overload;
+       procedure Load(const ASourceData:pointer;const ASourceSize:TKraftInt32); overload;
 
        procedure Scale(const WithFactor:TKraftScalar); overload;
        procedure Scale(const WithVector:TKraftVector3); overload;
@@ -1160,7 +1397,15 @@ type PKraftForceMode=^TKraftForceMode;
 
        procedure Finish;
 
-       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
+
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
 
        property Physics:TKraft read fPhysics;
 
@@ -1168,19 +1413,19 @@ type PKraftForceMode=^TKraftForceMode;
        property Next:TKraftMesh read fNext;
 
        property Vertices:TKraftVector3Array read fVertices;
-       property CountVertices:longint read fCountVertices;
+       property CountVertices:TKraftInt32 read fCountVertices;
 
        property Normals:TKraftVector3Array read fNormals;
-       property CountNormals:longint read fCountNormals;
+       property CountNormals:TKraftInt32 read fCountNormals;
 
        property Triangles:TKraftMeshTriangles read fTriangles;
-       property CountTriangles:longint read fCountTriangles;
+       property CountTriangles:TKraftInt32 read fCountTriangles;
 
-       property Nodes:TKraftMeshNodes read fNodes;
-       property CountNodes:longint read fCountNodes;
+       property Nodes:TKraftMeshTreeNodes read fTreeNodes;
+       property CountNodes:TKraftInt32 read fCountTreeNodes;
 
        property SkipListNodes:TKraftMeshSkipListNodes read fSkipListNodes;
-       property CountSkipListNodes:longint read fCountSkipListNodes;
+       property CountSkipListNodes:TKraftInt32 read fCountSkipListNodes;
 
        property AABB:TKraftAABB read fAABB;
 
@@ -1195,6 +1440,8 @@ type PKraftForceMode=^TKraftForceMode;
      TKraftShapeOnContactBeginHook=procedure(const ContactPair:PKraftContactPair;const WithShape:TKraftShape) of object;
      TKraftShapeOnContactEndHook=procedure(const ContactPair:PKraftContactPair;const WithShape:TKraftShape) of object;
      TKraftShapeOnContactStayHook=procedure(const ContactPair:PKraftContactPair;const WithShape:TKraftShape) of object;
+
+     TKraftShapeOnCanCollideWithHook=function(const WithShape:TKraftShape):boolean of object;
 
      TKraftShape=class(TPersistent)
       private
@@ -1224,10 +1471,10 @@ type PKraftForceMode=^TKraftForceMode;
 
        fUserData:pointer;
 
-       fStaticAABBTreeProxy:longint;
-       fSleepingAABBTreeProxy:longint;
-       fDynamicAABBTreeProxy:longint;
-       fKinematicAABBTreeProxy:longint;
+       fStaticAABBTreeProxy:TKraftInt32;
+       fSleepingAABBTreeProxy:TKraftInt32;
+       fDynamicAABBTreeProxy:TKraftInt32;
+       fKinematicAABBTreeProxy:TKraftInt32;
 
        fShapeAABB:TKraftAABB;
 
@@ -1259,8 +1506,12 @@ type PKraftForceMode=^TKraftForceMode;
        fOnContactEnd:TKraftShapeOnContactEndHook;
        fOnContactStay:TKraftShapeOnContactStayHook;
 
+       fOnCanCollideWith:TKraftShapeOnCanCollideWithHook;
+
 {$ifdef DebugDraw}
+{$ifndef NoOpenGL}
        fDrawDisplayList:glUint;
+{$endif}
 {$endif}
 
        fIsMesh:boolean;
@@ -1272,6 +1523,8 @@ type PKraftForceMode=^TKraftForceMode;
        constructor Create(const APhysics:TKraft;const ARigidBody:TKraftRigidBody);
        destructor Destroy; override;
 
+       procedure RemoveContactPairEdges; virtual;
+
        procedure UpdateShapeAABB; virtual;
 
        procedure CalculateMassData; virtual;
@@ -1282,13 +1535,31 @@ type PKraftForceMode=^TKraftForceMode;
 
        procedure Finish; virtual;
 
-       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar; virtual;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar; virtual;
+
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar; virtual;
+
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3; virtual;
+
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3; virtual;
+
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3; virtual;
+
+       function GetSignedDistance(const Position:TKraftVector3;const Transform:TKraftMatrix4x4):TKraftScalar; overload; virtual;
+
+       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar; overload; virtual;
+
+       function GetSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3;const Transform:TKraftMatrix4x4):TKraftScalar; overload; virtual;
+
+       function GetSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar; overload; virtual;
+
+       function GetClosestPointTo(const Position:TKraftVector3):TKraftVector3; virtual;
 
        function GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3; virtual;
 
-       function GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3; virtual;
+       function GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3; virtual;
 
-       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint; virtual;
+       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32; virtual;
 
        function GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3; virtual;
 
@@ -1317,10 +1588,10 @@ type PKraftForceMode=^TKraftForceMode;
 
        property UserData:pointer read fUserData write fUserData;
 
-       property StaticAABBTreeProxy:longint read fStaticAABBTreeProxy write fStaticAABBTreeProxy;
-       property SleepingAABBTreeProxy:longint read fSleepingAABBTreeProxy write fSleepingAABBTreeProxy;
-       property DynamicAABBTreeProxy:longint read fDynamicAABBTreeProxy write fDynamicAABBTreeProxy;
-       property KinematicAABBTreeProxy:longint read fKinematicAABBTreeProxy write fKinematicAABBTreeProxy;
+       property StaticAABBTreeProxy:TKraftInt32 read fStaticAABBTreeProxy write fStaticAABBTreeProxy;
+       property SleepingAABBTreeProxy:TKraftInt32 read fSleepingAABBTreeProxy write fSleepingAABBTreeProxy;
+       property DynamicAABBTreeProxy:TKraftInt32 read fDynamicAABBTreeProxy write fDynamicAABBTreeProxy;
+       property KinematicAABBTreeProxy:TKraftInt32 read fKinematicAABBTreeProxy write fKinematicAABBTreeProxy;
 
        property ShapeAABB:TKraftAABB read fShapeAABB;
 
@@ -1351,7 +1622,9 @@ type PKraftForceMode=^TKraftForceMode;
        property ContinuousMinimumRadiusScaleFactor:TKraftScalar read fContinuousMinimumRadiusScaleFactor write fContinuousMinimumRadiusScaleFactor;
 
 {$ifdef DebugDraw}
+{$ifndef NoOpenGL}
        property DrawDisplayList:glUint read fDrawDisplayList write fDrawDisplayList;
+{$endif}
 {$endif}
 
        property IsMesh:boolean read fIsMesh write fIsMesh;
@@ -1374,6 +1647,8 @@ type PKraftForceMode=^TKraftForceMode;
        property OnContactEnd:TKraftShapeOnContactEndHook read fOnContactEnd write fOnContactEnd;
        property OnContactStay:TKraftShapeOnContactStayHook read fOnContactStay write fOnContactStay;
 
+       property OnCanCollideWith:TKraftShapeOnCanCollideWithHook read fOnCanCollideWith write fOnCanCollideWith;
+
      end;
 
      TKraftShapes=array of TKraftShape;
@@ -1386,10 +1661,14 @@ type PKraftForceMode=^TKraftForceMode;
        destructor Destroy; override;
        procedure UpdateShapeAABB; override;
        procedure CalculateMassData; override;
-       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3; override;
        function GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3; override;
-       function GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3; override;
-       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint; override;
+       function GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3; override;
+       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32; override;
        function GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3; override;
        function TestPoint(const p:TKraftVector3):boolean; override;
        function RayCast(var RayCastData:TKraftRayCastData):boolean; override;
@@ -1409,10 +1688,14 @@ type PKraftForceMode=^TKraftForceMode;
        destructor Destroy; override;
        procedure UpdateShapeAABB; override;
        procedure CalculateMassData; override;
-       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3; override;
        function GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3; override;
-       function GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3; override;
-       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint; override;
+       function GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3; override;
+       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32; override;
        function GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3; override;
        function TestPoint(const p:TKraftVector3):boolean; override;
        function RayCast(var RayCastData:TKraftRayCastData):boolean; override;
@@ -1432,10 +1715,14 @@ type PKraftForceMode=^TKraftForceMode;
        destructor Destroy; override;
        procedure UpdateShapeAABB; override;
        procedure CalculateMassData; override;
-       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3; override;
        function GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3; override;
-       function GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3; override;
-       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint; override;
+       function GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3; override;
+       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32; override;
        function GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3; override;
        function TestPoint(const p:TKraftVector3):boolean; override;
        function RayCast(var RayCastData:TKraftRayCastData):boolean; override;
@@ -1455,10 +1742,14 @@ type PKraftForceMode=^TKraftForceMode;
        destructor Destroy; override;
        procedure UpdateShapeAABB; override;
        procedure CalculateMassData; override;
-       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3; override;
        function GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3; override;
-       function GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3; override;
-       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint; override;
+       function GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3; override;
+       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32; override;
        function GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3; override;
        function TestPoint(const p:TKraftVector3):boolean; override;
        function RayCast(var RayCastData:TKraftRayCastData):boolean; override;
@@ -1480,10 +1771,14 @@ type PKraftForceMode=^TKraftForceMode;
        destructor Destroy; override;
        procedure UpdateShapeAABB; override;
        procedure CalculateMassData; override;
-       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3; override;
        function GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3; override;
-       function GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3; override;
-       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint; override;
+       function GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3; override;
+       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32; override;
        function GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3; override;
        function TestPoint(const p:TKraftVector3):boolean; override;
        function RayCast(var RayCastData:TKraftRayCastData):boolean; override;
@@ -1497,15 +1792,20 @@ type PKraftForceMode=^TKraftForceMode;
      TKraftShapeMesh=class(TKraftShape)
       private
        fMesh:TKraftMesh;
+       fSmoothNormalsAtCasting:boolean;
       public
        constructor Create(const APhysics:TKraft;const ARigidBody:TKraftRigidBody;const AMesh:TKraftMesh); reintroduce;
        destructor Destroy; override;
        procedure UpdateShapeAABB; override;
        procedure CalculateMassData; override;
-       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3; override;
        function GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3; override;
-       function GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3; override;
-       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint; override;
+       function GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3; override;
+       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32; override;
        function GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3; override;
        function TestPoint(const p:TKraftVector3):boolean; override;
        function RayCast(var RayCastData:TKraftRayCastData):boolean; override;
@@ -1514,6 +1814,35 @@ type PKraftForceMode=^TKraftForceMode;
        procedure Draw(const CameraMatrix:TKraftMatrix4x4); override;
 {$endif}
        property Mesh:TKraftMesh read fMesh;
+      published
+       property SmoothNormalsAtCasting:boolean read fSmoothNormalsAtCasting write fSmoothNormalsAtCasting;
+     end;
+
+     TKraftShapeSignedDistanceField=class(TKraftShape)
+      private
+       fAABB:TKraftAABB;
+       function Project(const aDirection:TKraftVector3):TKraftScalar;
+       procedure CalculateAABB;
+      public
+       constructor Create(const APhysics:TKraft;const ARigidBody:TKraftRigidBody;const aAABB:PKraftAABB=nil); reintroduce;
+       destructor Destroy; override;
+       procedure UpdateShapeAABB; override;
+       procedure CalculateMassData; override;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3; override;
+       function GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3; override;
+       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32; override;
+       function GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3; override;
+       function TestPoint(const p:TKraftVector3):boolean; override;
+       function RayCast(var RayCastData:TKraftRayCastData):boolean; override;
+       function SphereCast(var SphereCastData:TKraftSphereCastData):boolean; override;
+{$ifdef DebugDraw}
+       procedure Draw(const CameraMatrix:TKraftMatrix4x4); override;
+{$endif}
      end;
 
      PKraftGJKStateShapes=^TKraftGJKStateShapes;
@@ -1528,9 +1857,9 @@ type PKraftForceMode=^TKraftForceMode;
       sB:TKraftVector3;
       w:TKraftVector3;
       a:TKraftScalar;
-      iA:longint;
-      iB:longint;
-      Dummy:longint;
+      iA:TKraftInt32;
+      iB:TKraftInt32;
+      Dummy:TKraftInt32;
      end;
 
      PKraftGJKSimplexVertices=^TKraftGJKSimplexVertices;
@@ -1542,9 +1871,9 @@ type PKraftForceMode=^TKraftForceMode;
      PKraftGJKCachedSimplexVertex=^TKraftGJKCachedSimplexVertex;
      TKraftGJKCachedSimplexVertex=record
       a:TKraftScalar;
-      iA:longint;
-      iB:longint;
-      Dummy:longint;
+      iA:TKraftInt32;
+      iB:TKraftInt32;
+      Dummy:TKraftInt32;
      end;
 
      PKraftGJKCachedSimplexVertices=^TKraftGJKCachedSimplexVertices;
@@ -1553,7 +1882,7 @@ type PKraftForceMode=^TKraftForceMode;
      PKraftGJKCachedSimplex=^TKraftGJKCachedSimplex;
      TKraftGJKCachedSimplex=record
       Vertices:TKraftGJKCachedSimplexVertices;
-      Count:longint;
+      Count:TKraftInt32;
       Metric:TKraftScalar;
      end;
 
@@ -1562,7 +1891,7 @@ type PKraftForceMode=^TKraftForceMode;
       VerticesData:TKraftGJKSimplexVertices;
       Vertices:TPKraftGJKSimplexVertices;
       Divisor:TKraftScalar;
-      Count:longint;
+      Count:TKraftInt32;
      end;
 
      PKraftGJKClosestPoints=^TKraftGJKClosestPoints;
@@ -1572,7 +1901,7 @@ type PKraftForceMode=^TKraftForceMode;
      TKraftGJK=object
       public
        Distance:TKraftScalar;
-       Iterations:longint;
+       Iterations:TKraftInt32;
        UseRadii:boolean;
        Failed:boolean;
        Normal:TKraftVector3;
@@ -1594,7 +1923,7 @@ type PKraftForceMode=^TKraftForceMode;
       NormalMass:TKraftScalar;
       TangentMass:array[0..1] of TKraftScalar;
       FeatureID:TKraftContactFeatureID;
-      WarmStartState:longword;
+      WarmStartState:TKraftUInt32;
      end;
 
      PKraftContacts=^TKraftContacts;
@@ -1602,14 +1931,14 @@ type PKraftForceMode=^TKraftForceMode;
 
      PKraftContactFaceQuery=^TKraftContactFaceQuery;
      TKraftContactFaceQuery=record
-      Index:longint;
+      Index:TKraftInt32;
       Separation:TKraftScalar;
      end;
 
      PKraftContactEdgeQuery=^TKraftContactEdgeQuery;
      TKraftContactEdgeQuery=record
-      IndexA:longint;
-      IndexB:longint;
+      IndexA:TKraftInt32;
+      IndexB:TKraftInt32;
       Separation:TKraftScalar;
       Normal:TKraftVector3;
      end;
@@ -1622,7 +1951,7 @@ type PKraftForceMode=^TKraftForceMode;
 
      PKraftSolverContactManifold=^TKraftSolverContactManifold;
      TKraftSolverContactManifold=record
-      CountContacts:longint;
+      CountContacts:TKraftInt32;
       Contacts:array[0..MAX_CONTACTS-1] of TKraftSolverContact;
       Points:array[0..1] of TKraftVector3;
       Normal:TKraftVector3;
@@ -1644,7 +1973,7 @@ type PKraftForceMode=^TKraftForceMode;
       ContactManifoldType:TKraftContactManifoldType;
       HaveData:boolean;
       Persistent:boolean;
-      CountContacts:longint;
+      CountContacts:TKraftInt32;
       LostSpeculativeBounce:single;
       LocalRadius:array[0..1] of TKraftScalar;
       LocalNormal:TKraftVector3;
@@ -1674,12 +2003,12 @@ type PKraftForceMode=^TKraftForceMode;
       public
        Previous:PKraftContactPair;
        Next:PKraftContactPair;
-       HashBucket:longint;
+       HashBucket:TKraftInt32;
        HashPrevious:PKraftContactPair;
        HashNext:PKraftContactPair;
        Island:TKraftIsland;
        Shapes:array[0..1] of TKraftShape;
-       ElementIndex:longint;
+       ElementIndex:TKraftInt32;
        MeshContactPair:TKraftMeshContactPair;
        RigidBodies:array[0..1] of TKraftRigidBody;
        Edges:array[0..1] of TKraftContactPairEdge;
@@ -1687,10 +2016,10 @@ type PKraftForceMode=^TKraftForceMode;
        Restitution:TKraftScalar;
        Manifold:TKraftContactManifold;
        Flags:TKraftContactFlags;
-       TimeOfImpactCount:longint;
+       TimeOfImpactCount:TKraftInt32;
        TimeOfImpact:TKraftScalar;
        procedure GetSolverContactManifold(out SolverContactManifold:TKraftSolverContactManifold;const WorldTransformA,WorldTransformB:TKraftMatrix4x4;const ContactManifoldMode:TKraftContactPairContactManifoldMode);
-       procedure DetectCollisions(const ContactManager:TKraftContactManager;const TriangleShape:TKraftShape=nil;const ThreadIndex:longint=0;const SpeculativeContacts:boolean=true;const DeltaTime:double=0.0);
+       procedure DetectCollisions(const ContactManager:TKraftContactManager;const TriangleShape:TKraftShape=nil;const ThreadIndex:TKraftInt32=0;const SpeculativeContacts:boolean=true;const DeltaTime:double=0.0);
      end;
 
      TPKraftContactPairs=array of PKraftContactPair;
@@ -1700,7 +2029,7 @@ type PKraftForceMode=^TKraftForceMode;
      TKraftContactManagerOnContactStayHook=procedure(const ContactPair:PKraftContactPair) of object;
 
      PKraftContactIndices=^TKraftContactIndices;
-     TKraftContactIndices=array[0..MAX_CONTACTS-1] of longint;
+     TKraftContactIndices=array[0..MAX_CONTACTS-1] of TKraftInt32;
 
      TKraftMeshContactPair=class
       private
@@ -1710,7 +2039,7 @@ type PKraftForceMode=^TKraftForceMode;
        fPrevious:TKraftMeshContactPair;
        fNext:TKraftMeshContactPair;
 
-       fHashBucket:longint;
+       fHashBucket:TKraftInt32;
        fHashPrevious:TKraftMeshContactPair;
        fHashNext:TKraftMeshContactPair;
 
@@ -1736,7 +2065,7 @@ type PKraftForceMode=^TKraftForceMode;
        procedure MoveFromFreeList;
        procedure Query;
        procedure Update;
-       
+
      end;
 
      PKraftMeshContactPairHashTableBucket=^TKraftMeshContactPairHashTableBucket;
@@ -1760,7 +2089,7 @@ type PKraftForceMode=^TKraftForceMode;
      PKraftContactManagerMeshTriangleContactQueueItem=^TKraftContactManagerMeshTriangleContactQueueItem;
      TKraftContactManagerMeshTriangleContactQueueItem=record
       MeshContactPair:TKraftMeshContactPair;
-      TriangleIndex:longint;
+      TriangleIndex:TKraftInt32;
      end;
 
      TKraftContactManagerMeshTriangleContactQueueItems=array of TKraftContactManagerMeshTriangleContactQueueItem;
@@ -1775,7 +2104,7 @@ type PKraftForceMode=^TKraftForceMode;
 
        fFreeContactPairs:PKraftContactPair;
 
-       fCountContactPairs:longint;
+       fCountContactPairs:TKraftInt32;
 
        fMeshContactPairFirst:TKraftMeshContactPair;
        fMeshContactPairLast:TKraftMeshContactPair;
@@ -1783,7 +2112,7 @@ type PKraftForceMode=^TKraftForceMode;
        fMeshContactPairFirstFree:TKraftMeshContactPair;
        fMeshContactPairLastFree:TKraftMeshContactPair;
 
-       fCountMeshContactPairs:longint;
+       fCountMeshContactPairs:TKraftInt32;
 
        fOnContactBegin:TKraftContactManagerOnContactBeginHook;
        fOnContactEnd:TKraftContactManagerOnContactEndHook;
@@ -1795,15 +2124,16 @@ type PKraftForceMode=^TKraftForceMode;
 
 {$ifdef DebugDraw}
        fDebugClipVertexLists:array[0..255] of TKraftClipVertexList;
-       fCountDebugClipVertexLists:longint;
+       fCountDebugClipVertexLists:TKraftInt32;
+       fDebugClipVertexListLock:{$ifdef KraftPasMP}TPasMPSlimReaderWriterLock{$else}TCriticalSection{$endif};
 {$endif}
 
        fTemporaryContacts:array[0..MAX_THREADS-1,0..MAX_TEMPORARY_CONTACTS-1] of TKraftContact;
-       fCountTemporaryContacts:array[0..MAX_THREADS-1] of longint;
+       fCountTemporaryContacts:array[0..MAX_THREADS-1] of TKraftInt32;
 
        fActiveContactPairs:array of PKraftContactPair;
-       fCountActiveContactPairs:longint;
-       fCountRemainActiveContactPairsToDo:longint;
+       fCountActiveContactPairs:TKraftInt32;
+       fCountRemainActiveContactPairsToDo:TKraftInt32;
 
        fConvexConvexContactPairHashTable:TKraftContactPairHashTable;
 
@@ -1816,9 +2146,9 @@ type PKraftForceMode=^TKraftForceMode;
        constructor Create(const APhysics:TKraft);
        destructor Destroy; override;
 
-       function HasDuplicateContact(const ARigidBodyA,ARigidBodyB:TKraftRigidBody;const AShapeA,AShapeB:TKraftShape;const AElementIndex:longint=-1):boolean;
+       function HasDuplicateContact(const ARigidBodyA,ARigidBodyB:TKraftRigidBody;const AShapeA,AShapeB:TKraftShape;const AElementIndex:TKraftInt32=-1):boolean;
 
-       procedure AddConvexContact(const ARigidBodyA,ARigidBodyB:TKraftRigidBody;const AShapeA,AShapeB:TKraftShape;const AElementIndex:longint=-1;const AMeshContactPair:TKraftMeshContactPair=nil);
+       procedure AddConvexContact(const ARigidBodyA,ARigidBodyB:TKraftRigidBody;const AShapeA,AShapeB:TKraftShape;const AElementIndex:TKraftInt32=-1;const AMeshContactPair:TKraftMeshContactPair=nil);
 
        procedure AddMeshContact(const ARigidBodyConvex,ARigidBodyMesh:TKraftRigidBody;const AShapeConvex,AShapeMesh:TKraftShape);
 
@@ -1834,12 +2164,12 @@ type PKraftForceMode=^TKraftForceMode;
 
        procedure DoMidPhase;
 
-       procedure ProcessContactPair(const ContactPair:PKraftContactPair;const ThreadIndex:longint=0);
+       procedure ProcessContactPair(const ContactPair:PKraftContactPair;const ThreadIndex:TKraftInt32=0);
 
 {$ifdef KraftPasMP}
-       procedure ProcessContactPairParallelForFunction(const Job:PPasMPJob;const ThreadIndex:longint;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
+       procedure ProcessContactPairParallelForFunction(const Job:PPasMPJob;const ThreadIndex:TKraftInt32;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
 {$else}
-       procedure ProcessContactPairJob(const JobIndex,ThreadIndex:longint);
+       procedure ProcessContactPairJob(const JobIndex,ThreadIndex:TKraftInt32);
 {$endif}
 
        procedure DoNarrowPhase;
@@ -1848,9 +2178,9 @@ type PKraftForceMode=^TKraftForceMode;
        procedure DebugDraw(const CameraMatrix:TKraftMatrix4x4);
 {$endif}
 
-       function ReduceContacts(const AInputContacts:PKraftContacts;const ACountInputContacts:longint;const AOutputContacts:PKraftContacts):longint;
+       function ReduceContacts(const AInputContacts:PKraftContacts;const ACountInputContacts:TKraftInt32;const AOutputContacts:PKraftContacts):TKraftInt32;
 
-       function GetMaximizedAreaReducedContactIndices(const AInputContactPositions:PPKraftVector3s;const ACountInputContactPositions:longint;var AOutputContactIndices:TKraftContactIndices):longint;
+       function GetMaximizedAreaReducedContactIndices(const AInputContactPositions:PPKraftVector3s;const ACountInputContactPositions:TKraftInt32;var AOutputContactIndices:TKraftContactIndices):TKraftInt32;
 
        property ContactPairFirst:PKraftContactPair read fContactPairFirst write fContactPairFirst;
        property ContactPairLast:PKraftContactPair read fContactPairLast write fContactPairLast;
@@ -1859,7 +2189,7 @@ type PKraftForceMode=^TKraftForceMode;
 
        property Physics:TKraft read fPhysics;
 
-       property CountContactPairs:longint read fCountContactPairs;
+       property CountContactPairs:TKraftInt32 read fCountContactPairs;
 
        property MeshContactPairFirst:TKraftMeshContactPair read fMeshContactPairFirst;
        property MeshContactPairLast:TKraftMeshContactPair read fMeshContactPairLast;
@@ -1867,7 +2197,7 @@ type PKraftForceMode=^TKraftForceMode;
        property MeshContactPairFirstFree:TKraftMeshContactPair read fMeshContactPairFirstFree;
        property MeshContactPairLastFree:TKraftMeshContactPair read fMeshContactPairLastFree;
 
-       property CountMeshContactPairs:longint read fCountMeshContactPairs;
+       property CountMeshContactPairs:TKraftInt32 read fCountMeshContactPairs;
 
       published
 
@@ -1884,25 +2214,35 @@ type PKraftForceMode=^TKraftForceMode;
 
      TKraftBroadPhaseContactPairs=array of TKraftBroadPhaseContactPair;
 
-     TKraftBroadPhaseMoveBufferItems=array of longint;
+     TKraftBroadPhaseMoveBufferItems=TKraftInt32Array;
 
      TKraftBroadPhaseMoveBuffer=class
       private
-       fPhysics:TKraft;
+       fAABBTree:TKraftDynamicAABBTree;
        fItems:TKraftBroadPhaseMoveBufferItems;
-       fSize:longint;
-       function GetItem(const aIndex:longint):longint; {$ifdef caninline}inline;{$endif}
+       fSize:TKraftInt32;
+       function GetItem(const aIndex:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
       public
-       constructor Create(const aPhysics:TKraft);
+       constructor Create(const aAABBTree:TKraftDynamicAABBTree);
        destructor Destroy; override;
        procedure Clear;
-       procedure Add(const aProxyID:longint);
-       procedure Remove(const aProxyID:longint);
+       procedure Add(const aProxyID:TKraftInt32);
+       procedure Remove(const aProxyID:TKraftInt32);
       public
-       property Items[const aIndex:longint]:longint read GetItem; default;
+       property Items[const aIndex:TKraftInt32]:TKraftInt32 read GetItem; default;
       published
-       property Size:longint read fSize;
+       property Size:TKraftInt32 read fSize;
      end;
+
+{$ifndef KraftSingleThreadedUsage}
+     TKraftBroadPhaseData=record
+      ThreadIndex:TKraftInt32;
+      Shape:TKraftShape;
+      AABBTree:TKraftDynamicAABBTree;
+      ShapeAABB:PKraftAABB;
+     end;
+     PKraftBroadPhaseData=^TKraftBroadPhaseData;
+{$endif}
 
      TKraftBroadPhase=class
       private
@@ -1910,10 +2250,10 @@ type PKraftForceMode=^TKraftForceMode;
        fPhysics:TKraft;
 
        fStack:array[0..MAX_THREADS-1] of PKraftDynamicAABBTreeLongintArray;
-       fStackCapacity:array[0..MAX_THREADS-1] of longint;
+       fStackCapacity:array[0..MAX_THREADS-1] of TKraftInt32;
 
        fContactPairs:array[0..MAX_THREADS-1] of TKraftBroadPhaseContactPairs;
-       fCountContactPairs:array[0..MAX_THREADS-1] of longint;
+       fCountContactPairs:array[0..MAX_THREADS-1] of TKraftInt32;
 
        fStaticMoveBuffer:TKraftBroadPhaseMoveBuffer;
 
@@ -1921,16 +2261,20 @@ type PKraftForceMode=^TKraftForceMode;
 
        fKinematicMoveBuffer:TKraftBroadPhaseMoveBuffer;
 
-       fAllMoveBufferSize:longint;
+       fAllMoveBufferSize:TKraftInt32;
 
-       procedure AddPair(const ThreadIndex:longint;ShapeA,ShapeB:TKraftShape); {$ifdef caninline}inline;{$endif}
+       procedure AddPair(const ThreadIndex:TKraftInt32;ShapeA,ShapeB:TKraftShape); {$ifdef caninline}inline;{$endif}
 
-       procedure QueryShapeWithTree(const ThreadIndex:longint;const Shape:TKraftShape;const AABBTree:TKraftDynamicAABBTree);
+{$ifndef KraftSingleThreadedUsage}
+       procedure ProcessNode(const Data:PKraftBroadPhaseData;NodeID:TKraftInt32);
+{$endif}
+
+       procedure QueryShapeWithTree(const ThreadIndex:TKraftInt32;const Shape:TKraftShape;const AABBTree:TKraftDynamicAABBTree);
 
 {$ifdef KraftPasMP}
-       procedure ProcessMoveBufferItemParallelForFunction(const Job:PPasMPJob;const ThreadIndex:longint;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
+       procedure ProcessMoveBufferItemParallelForFunction(const Job:PPasMPJob;const ThreadIndex:TKraftInt32;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
 {$else}
-       procedure ProcessMoveBufferItem(const JobIndex,ThreadIndex:longint);
+       procedure ProcessMoveBufferItem(const JobIndex,ThreadIndex:TKraftInt32);
 {$endif}
 
 
@@ -1965,7 +2309,7 @@ type PKraftForceMode=^TKraftForceMode;
       OtherRigidBody:TKraftRigidBody;
      end;
 
-     TKraftRigidBodyIslandIndices=array of longint;
+     TKraftRigidBodyIslandIndices=TKraftInt32Array;
 
      TKraftRigidBody=class(TPersistent)
       private
@@ -1998,15 +2342,23 @@ type PKraftForceMode=^TKraftForceMode;
        fShapeFirst:TKraftShape;
        fShapeLast:TKraftShape;
 
-       fShapeCount:longint;
+       fShapeCount:TKraftInt32;
 
        fFlags:TKraftRigidBodyFlags;
 
        fWorldDisplacement:TKraftVector3;
 
+       fLastWorldTransform:TKraftMatrix4x4;
+
+       fInterpolatedWorldTransform:TKraftMatrix4x4;
+
        fWorldTransform:TKraftMatrix4x4;
 
        fSweep:TKraftSweep;
+
+       fGravityMode:TKraftGravityMode;
+
+       fGravitySpeed:TKraftScalar;
 
        fGravity:TKraftVector3;
 
@@ -2066,7 +2418,7 @@ type PKraftForceMode=^TKraftForceMode;
 
        fCollideWithCollisionGroups:TKraftRigidBodyCollisionGroups;
 
-       fCountConstraints:longint;
+       fCountConstraints:TKraftInt32;
 
        fConstraintEdgeFirst:PKraftConstraintEdge;
        fConstraintEdgeLast:PKraftConstraintEdge;
@@ -2133,6 +2485,9 @@ type PKraftForceMode=^TKraftForceMode;
        procedure SetForceAtPosition(const AForce,APosition:TKraftVector3;const AForceMode:TKraftForceMode=kfmForce;const aWake:boolean=true);
        procedure AddForceAtPosition(const AForce,APosition:TKraftVector3;const AForceMode:TKraftForceMode=kfmForce;const aWake:boolean=true);
 
+       procedure SetForceAtRelativePosition(const AForce,ARelativePosition:TKraftVector3;const AForceMode:TKraftForceMode=kfmForce;const aWake:boolean=true);
+       procedure AddForceAtRelativePosition(const AForce,ARelativePosition:TKraftVector3;const AForceMode:TKraftForceMode=kfmForce;const aWake:boolean=true);
+
        procedure SetWorldForce(const AForce:TKraftVector3;const AForceMode:TKraftForceMode=kfmForce;const aWake:boolean=true);
        procedure AddWorldForce(const AForce:TKraftVector3;const AForceMode:TKraftForceMode=kfmForce;const aWake:boolean=true);
 
@@ -2160,6 +2515,10 @@ type PKraftForceMode=^TKraftForceMode;
        function GetWorldLinearVelocityFromPoint(const APoint:TKraftVector3):TKraftVector3;
        function GetBodyLinearVelocityFromPoint(const APoint:TKraftVector3):TKraftVector3;
 
+       function ComputeImpulseDenominator(const aPosition,aNormal:TKraftVector3):TKraftScalar;
+
+       function ComputeAngularImpulseDenominator(const aAxis:TKraftVector3):TKraftScalar;
+
        property Physics:TKraft read fPhysics;
 
        property Island:TKraftIsland read fIsland;
@@ -2186,7 +2545,9 @@ type PKraftForceMode=^TKraftForceMode;
        property ShapeFirst:TKraftShape read fShapeFirst write fShapeFirst;
        property ShapeLast:TKraftShape read fShapeLast write fShapeLast;
 
-       property ShapeCount:longint read fShapeCount write fShapeCount;
+       property ShapeCount:TKraftInt32 read fShapeCount write fShapeCount;
+
+       property InterpolatedWorldTransform:TKraftMatrix4x4 read fInterpolatedWorldTransform;
 
        property WorldTransform:TKraftMatrix4x4 read fWorldTransform write fWorldTransform;
 
@@ -2201,7 +2562,7 @@ type PKraftForceMode=^TKraftForceMode;
        property ConstraintEdgeFirst:PKraftConstraintEdge read fConstraintEdgeFirst write fConstraintEdgeFirst;
        property ConstraintEdgeLast:PKraftConstraintEdge read fConstraintEdgeLast write fConstraintEdgeLast;
 
-       property CountConstraints:longint read fCountConstraints;
+       property CountConstraints:TKraftInt32 read fCountConstraints;
 
        property ContactPairEdgeFirst:PKraftContactPairEdge read fContactPairEdgeFirst write fContactPairEdgeFirst;
        property ContactPairEdgeLast:PKraftContactPairEdge read fContactPairEdgeLast write fContactPairEdgeLast;
@@ -2231,6 +2592,10 @@ type PKraftForceMode=^TKraftForceMode;
        property RigidBodyType:TKraftRigidBodyType read fRigidBodyType write fRigidBodyType;
 
        property Flags:TKraftRigidBodyFlags read fFlags write fFlags;
+
+       property GravityMode:TKraftGravityMode read fGravityMode write fGravityMode;
+
+       property GravitySpeed:TKraftScalar read fGravitySpeed write fGravitySpeed;
 
        property Gravity:TKraftVector3Property read fGravityProperty write fGravityProperty;
 
@@ -2322,10 +2687,10 @@ type PKraftForceMode=^TKraftForceMode;
        fParent:TKraftConstraint;
 
        fChildren:array of TKraftConstraint;
-       fCountChildren:longint;
+       fCountChildren:TKraftInt32;
 
       public
-      
+
        constructor Create(const APhysics:TKraft);
        destructor Destroy; override;
 
@@ -2369,7 +2734,7 @@ type PKraftForceMode=^TKraftForceMode;
      // Constrains a body to a specified world position which can change over time.
      TKraftConstraintJointGrab=class(TKraftConstraintJoint)
       private
-       fIslandIndex:longint;
+       fIslandIndex:TKraftInt32;
        fInverseMass:TKraftScalar;
        fSolverVelocity:PKraftSolverVelocity;
        fSolverPosition:PKraftSolverPosition;
@@ -2406,7 +2771,7 @@ type PKraftForceMode=^TKraftForceMode;
      // Keeps body at some fixed distance to a world plane.
      TKraftConstraintJointWorldPlaneDistance=class(TKraftConstraintJoint)
       private
-       fIslandIndex:longint;
+       fIslandIndex:TKraftInt32;
        fInverseMass:TKraftScalar;
        fSolverVelocity:PKraftSolverVelocity;
        fSolverPosition:PKraftSolverPosition;
@@ -2449,7 +2814,7 @@ type PKraftForceMode=^TKraftForceMode;
      // Keeps bodies at some fixed distance from each other.
      TKraftConstraintJointDistance=class(TKraftConstraintJoint)
       private
-       fIslandIndices:array[0..1] of longint;
+       fIslandIndices:array[0..1] of TKraftInt32;
        fInverseMasses:array[0..1] of TKraftScalar;
        fSolverVelocities:array[0..1] of PKraftSolverVelocity;
        fSolverPositions:array[0..1] of PKraftSolverPosition;
@@ -2481,7 +2846,7 @@ type PKraftForceMode=^TKraftForceMode;
      // Restricts the maximum distance between two points.
      TKraftConstraintJointRope=class(TKraftConstraintJoint)
       private
-       fIslandIndices:array[0..1] of longint;
+       fIslandIndices:array[0..1] of TKraftInt32;
        fInverseMasses:array[0..1] of TKraftScalar;
        fSolverVelocities:array[0..1] of PKraftSolverVelocity;
        fSolverPositions:array[0..1] of PKraftSolverPosition;
@@ -2513,7 +2878,7 @@ type PKraftForceMode=^TKraftForceMode;
      // Connects two bodies to ground and to each other. As one body goes up, the other goes down.
      TKraftConstraintJointPulley=class(TKraftConstraintJoint)
       private
-       fIslandIndices:array[0..1] of longint;
+       fIslandIndices:array[0..1] of TKraftInt32;
        fInverseMasses:array[0..1] of TKraftScalar;
        fSolverVelocities:array[0..1] of PKraftSolverVelocity;
        fSolverPositions:array[0..1] of PKraftSolverPosition;
@@ -2547,7 +2912,7 @@ type PKraftForceMode=^TKraftForceMode;
      // Allows arbitrary rotation between two bodies. This joint has three degrees of freedom.
      TKraftConstraintJointBallSocket=class(TKraftConstraintJoint)
       private
-       fIslandIndices:array[0..1] of longint;
+       fIslandIndices:array[0..1] of TKraftInt32;
        fInverseMasses:array[0..1] of TKraftScalar;
        fSolverVelocities:array[0..1] of PKraftSolverVelocity;
        fSolverPositions:array[0..1] of PKraftSolverPosition;
@@ -2575,7 +2940,7 @@ type PKraftForceMode=^TKraftForceMode;
      // Forbids any translation or rotation between two bodies.
      TKraftConstraintJointFixed=class(TKraftConstraintJoint)
       private
-       fIslandIndices:array[0..1] of longint;
+       fIslandIndices:array[0..1] of TKraftInt32;
        fInverseMasses:array[0..1] of TKraftScalar;
        fSolverVelocities:array[0..1] of PKraftSolverVelocity;
        fSolverPositions:array[0..1] of PKraftSolverPosition;
@@ -2606,7 +2971,7 @@ type PKraftForceMode=^TKraftForceMode;
      // Allows arbitrary rotation between two bodies around a TKraftScalar axis. This joint has one degree of freedom.
      TKraftConstraintJointHinge=class(TKraftConstraintJoint)
       private
-       fIslandIndices:array[0..1] of longint;
+       fIslandIndices:array[0..1] of TKraftInt32;
        fInverseMasses:array[0..1] of TKraftScalar;
        fSolverVelocities:array[0..1] of PKraftSolverVelocity;
        fSolverPositions:array[0..1] of PKraftSolverPosition;
@@ -2682,7 +3047,7 @@ type PKraftForceMode=^TKraftForceMode;
      // Allows relative translation of the bodies along a TKraftScalar direction and no rotation
      TKraftConstraintJointSlider=class(TKraftConstraintJoint)
       private
-       fIslandIndices:array[0..1] of longint;
+       fIslandIndices:array[0..1] of TKraftInt32;
        fInverseMasses:array[0..1] of TKraftScalar;
        fSolverVelocities:array[0..1] of PKraftSolverVelocity;
        fSolverPositions:array[0..1] of PKraftSolverPosition;
@@ -2778,15 +3143,15 @@ type PKraftForceMode=^TKraftForceMode;
       Normal:TKraftVector3;
       Centers:array[0..1] of TKraftVector3;
       LostSpeculativeBounce:single;
-      SpeculativeVelocity:single;      
+      SpeculativeVelocity:single;
       WorldInverseInertiaTensors:array[0..1] of TKraftMatrix3x3;
       NormalMass:TKraftScalar;
       TangentMass:array[0..1] of TKraftScalar;
       InverseMasses:array[0..1] of TKraftScalar;
       Restitution:TKraftScalar;
       Friction:TKraftScalar;
-      Indices:array[0..1] of longint;
-      CountPoints:longint;
+      Indices:array[0..1] of TKraftInt32;
+      CountPoints:TKraftInt32;
      end;
 
      TKraftSolverVelocityStates=array of TKraftSolverVelocityState;
@@ -2798,8 +3163,8 @@ type PKraftForceMode=^TKraftForceMode;
       LocalCenters:array[0..1] of TKraftVector3;
       WorldInverseInertiaTensors:array[0..1] of TKraftMatrix3x3;
       InverseMasses:array[0..1] of TKraftScalar;
-      Indices:array[0..1] of longint;
-      CountPoints:longint;
+      Indices:array[0..1] of TKraftInt32;
+      CountPoints:TKraftInt32;
      end;
 
      TKraftSolverPositionStates=array of TKraftSolverPositionState;
@@ -2823,7 +3188,7 @@ type PKraftForceMode=^TKraftForceMode;
       InverseMasses:array[0..1] of single;
       Restitution:single;
       Friction:single;
-      Indices:array[0..1] of longint;
+      Indices:array[0..1] of TKraftInt32;
      end;
 
      TKraftSolverSpeculativeContactStates=array of TKraftSolverSpeculativeContactState;
@@ -2836,26 +3201,26 @@ type PKraftForceMode=^TKraftForceMode;
        fIsland:TKraftIsland;
 
        fVelocities:TKraftSolverVelocities;
-       fCountVelocities:longint;
+       fCountVelocities:TKraftInt32;
 
        fPositions:TKraftSolverPositions;
-       fCountPositions:longint;
+       fCountPositions:TKraftInt32;
 
        fLinearFactors:TKraftSolverLinearFactors;
-       fCountLinearFactors:longint;
+       fCountLinearFactors:TKraftInt32;
 
        fVelocityStates:TKraftSolverVelocityStates;
-       fCountVelocityStates:longint;
+       fCountVelocityStates:TKraftInt32;
 
        fPositionStates:TKraftSolverPositionStates;
-       fCountPositionStates:longint;
+       fCountPositionStates:TKraftInt32;
 
        fSpeculativeContactStates:TKraftSolverSpeculativeContactStates;
-       fCountSpeculativeContactStates:longint;
+       fCountSpeculativeContactStates:TKraftInt32;
 
-       fCountContacts:longint;
+       fCountContacts:TKraftInt32;
 
-       fCountSpeculativeContacts:longint;
+       fCountSpeculativeContacts:TKraftInt32;
 
        fDeltaTime:TKraftScalar;
 
@@ -2882,7 +3247,7 @@ type PKraftForceMode=^TKraftForceMode;
 
        function SolvePositionConstraints:boolean;
 
-       function SolveTimeOfImpactConstraints(IndexA,IndexB:longint):boolean;
+       function SolveTimeOfImpactConstraints(IndexA,IndexB:TKraftInt32):boolean;
 
        procedure SolveSpeculativeContactConstraints;
 
@@ -2893,26 +3258,26 @@ type PKraftForceMode=^TKraftForceMode;
        property Island:TKraftIsland read fIsland;
 
        property Velocities:TKraftSolverVelocities read fVelocities;
-       property CountVelocities:longint read fCountVelocities;
+       property CountVelocities:TKraftInt32 read fCountVelocities;
 
        property Positions:TKraftSolverPositions read fPositions;
-       property CountPositions:longint read fCountPositions;
+       property CountPositions:TKraftInt32 read fCountPositions;
 
        property LinearFactors:TKraftSolverLinearFactors read fLinearFactors;
-       property CountLinearFactors:longint read fCountLinearFactors;
+       property CountLinearFactors:TKraftInt32 read fCountLinearFactors;
 
        property VelocityStates:TKraftSolverVelocityStates read fVelocityStates;
-       property CountVelocityStates:longint read fCountVelocityStates;
+       property CountVelocityStates:TKraftInt32 read fCountVelocityStates;
 
        property PositionStates:TKraftSolverPositionStates read fPositionStates;
-       property CountPositionStates:longint read fCountPositionStates;
+       property CountPositionStates:TKraftInt32 read fCountPositionStates;
 
        property SpeculativeContactStates:TKraftSolverSpeculativeContactStates read fSpeculativeContactStates;
-       property CountSpeculativeContactStates:longint read fCountSpeculativeContactStates;
+       property CountSpeculativeContactStates:TKraftInt32 read fCountSpeculativeContactStates;
 
-       property CountContacts:longint read fCountContacts;
+       property CountContacts:TKraftInt32 read fCountContacts;
 
-       property CountSpeculativeContacts:longint read fCountSpeculativeContacts;
+       property CountSpeculativeContacts:TKraftInt32 read fCountSpeculativeContacts;
 
        property DeltaTime:TKraftScalar read fDeltaTime;
 
@@ -2924,60 +3289,266 @@ type PKraftForceMode=^TKraftForceMode;
 
      end;
 
+     TKraftParticleColor=record
+      public
+       constructor Create(const aR,aG,aB,aA:TKraftUInt8);
+       function IsZero:boolean;
+       procedure SetColor(const aR,aG,aB,aA:TKraftUInt8);
+       procedure MulFloat(const aValue:TKraftScalar);
+       procedure MulUInt(const aValue:TKraftUInt8);
+       procedure Add(const aColor:TKraftParticleColor);
+       function Equals(const aColor:TKraftParticleColor):boolean;
+       class procedure MixColors(var aColor0,aColor1:TKraftParticleColor;const aStrength:TKraftInt32); static;
+       procedure Mix(const aColor:TKraftParticleColor;const aStrength:TKraftInt32);
+      public
+       case boolean of
+        false:(
+         r:TKraftUInt8;
+         g:TKraftUInt8;
+         b:TKraftUInt8;
+         a:TKraftUInt8;
+        );
+        true:(
+         Value:TKraftUInt32;
+        );
+     end;
+
+     TKraftParticleSystem=class;
+
+     TKraftParticleGroup=class;
+
+     TKraftParticleParticleContact=record
+      public
+       Index0:TKraftInt32;
+       Index1:TKraftInt32;
+       Weight:TKraftScalar;
+       Normal:TKraftVector3;
+       Flags:TKraftParticleFlags;
+     end;
+
+     PKraftParticleParticleContact=^TKraftParticleParticleContact;
+
+     TKraftParticleParticleContacts=array of TKraftParticleParticleContact;
+
+     TKraftParticleParticleContactList=record
+      Items:TKraftParticleParticleContacts;
+      Count:TKraftSizeInt;
+     end;
+
+     PKraftParticleParticleContactList=^TKraftParticleParticleContactList;
+
+     TKraftParticleRigidBodyContact=record
+      public
+       Index:TKraftInt32;
+       RigidBody:TKraftRigidBody;
+       Shape:TKraftShape;
+       TriangleIndex:TKraftInt32;
+       Mass:TKraftScalar;
+       Weight:TKraftScalar;
+       Normal:TKraftVector3;
+     end;
+
+     PKraftParticleRigidBodyContact=^TKraftParticleRigidBodyContact;
+
+     TKraftParticleRigidBodyContacts=array of TKraftParticleRigidBodyContact;
+
+     TKraftParticleRigidBodyContactList=record
+      Items:TKraftParticleRigidBodyContacts;
+      Count:TKraftSizeInt;
+     end;
+
+     PKraftParticleRigidBodyContactList=^TKraftParticleRigidBodyContactList;
+
+     TKraftParticle=record
+      public
+       Flags:TKraftParticleFlags;
+       Position:TKraftVector3;
+       Velocity:TKraftVector3;
+       Color:TKraftParticleColor;
+       LifeTime:TKraftScalar;
+       UserData:Pointer;
+       Group:TKraftParticleGroup;
+       class function Create:TKraftParticle; static;
+     end;
+
+     PKraftParticle=^TKraftParticle;
+
+     TKraftParticles=array of TKraftParticle;
+
+     TKraftParticleList=record
+      Items:TKraftParticles;
+      Count:TKraftSizeInt;
+     end;
+
+     PKraftParticleList=^TKraftParticleList;
+
+     TKraftParticleSpatialHashTableItem=TKraftUInt32;
+
+     PKraftParticleSpatialHashTableItem=^TKraftParticleSpatialHashTableItem;
+
+     TKraftParticleSpatialHashTableItems=array of TKraftParticleSpatialHashTableItem;
+
+     TKraftParticleSpatialHashTableItemList=record
+      Items:TKraftParticleSpatialHashTableItems;
+      Count:TKraftSizeInt;
+     end;
+
+     PKraftParticleSpatialHashTableItemList=^TKraftParticleSpatialHashTableItemList;
+
+     TKraftParticleSpatialHashTableBucket=TKraftParticleSpatialHashTableItemList;
+
+     PKraftParticleSpatialHashTableBucket=^TKraftParticleSpatialHashTableBucket;
+
+     TKraftParticleSpatialHashTableBuckets=array of TKraftParticleSpatialHashTableBucket;
+
+     TKraftParticleSpatialHashTableBucketLock=TKraftInt32;
+
+     PKraftParticleSpatialHashTableBucketLock=^TKraftParticleSpatialHashTableBucketLock;
+
+     TKraftParticleSpatialHashTableBucketLocks=array of TKraftParticleSpatialHashTableBucketLock;
+
+     TKraftParticleSpatialHashTableBucketGeneration=TKraftUInt64;
+
+     PKraftParticleSpatialHashTableBucketGeneration=^TKraftParticleSpatialHashTableBucketGeneration;
+
+     TKraftParticleSpatialHashTableBucketGenerations=array of TKraftParticleSpatialHashTableBucketGeneration;
+
+     TKraftParticleSpatialHashTable=class
+      private
+       fParticleSystem:TKraftParticleSystem;
+       fCellSize:TKraftScalar;
+       fCellOffset:TKraftScalar;
+       fHashBits:TKraftUInt32;
+       fHashSize:TKraftUInt32;
+       fHashMask:TKraftUInt32;
+       fBuckets:TKraftParticleSpatialHashTableBuckets;
+       fBucketLocks:TKraftParticleSpatialHashTableBucketLocks;
+       fBucketGenerations:TKraftParticleSpatialHashTableBucketGenerations;
+       fGeneration:TKraftUInt64;
+      public
+       constructor Create(const aParticleSystem:TKraftParticleSystem;const aCellSize:TKraftScalar=0.1;const aHashBits:TKraftUInt32=16); reintroduce;
+       destructor Destroy; override;
+       procedure Update;
+       procedure LookUp(var aItemList:TKraftParticleSpatialHashTableItemList;const aPosition:TKraftVector3);
+     end;
+
+     TKraftParticleGroup=class
+      public
+
+     end;
+
+     TKraftParticleSystem=class(TPersistent)
+      private
+       fPhysics:TKraft;
+       fParticleRadius:TKraftScalar;
+       fParticles:TKraftParticleList;
+       fPointerToParticles:PKraftParticleList;
+       fSpatialHashTable:TKraftParticleSpatialHashTable;
+       fStrictContactCheck:boolean;
+       fDensity:TKraftScalar;
+       fGravityScale:TKraftScalar;
+       fMaxCount:TKraftSizeInt;
+       fPressureStrength:TKraftScalar;
+       fDampingStrength:TKraftScalar;
+       fElasticStrength:TKraftScalar;
+       fSpringStrength:TKraftScalar;
+       fViscousStrength:TKraftScalar;
+       fSurfaceTensionPressureStrength:TKraftScalar;
+       fSurfaceTensionNormalStrength:TKraftScalar;
+       fRepulsiveStrength:TKraftScalar;
+       fPowderStrength:TKraftScalar;
+       fEjectionStrength:TKraftScalar;
+       fStaticPressureStrength:TKraftScalar;
+       fStaticPressureRelaxation:TKraftScalar;
+       fStaticPressureIterations:TKraftScalar;
+       fColorMixingStrength:TKraftScalar;
+       fDestroyByAge:boolean;
+       fLifetimeGranularity:TKraftScalar;
+      public
+       constructor Create(const aPhysics:TKraft;const aParticleRadius:TKraftScalar=0.1); reintroduce;
+       destructor Destroy; override;
+       function CreateParticle:TKraftSizeInt;
+       procedure DestroyParticle(const aIndex:TKraftSizeInt);
+       procedure Step(const aDeltaTime:TKraftScalar=0);
+      public
+       property Particles:PKraftParticleList read fPointerToParticles;
+      published
+       property StrictContactCheck:boolean read fStrictContactCheck write fStrictContactCheck;
+       property Density:TKraftScalar read fDensity write fDensity;
+       property GravityScale:TKraftScalar read fGravityScale write fGravityScale;
+       property MaxCount:TKraftSizeInt read fMaxCount write fMaxCount;
+       property PressureStrength:TKraftScalar read fPressureStrength write fPressureStrength;
+       property DampingStrength:TKraftScalar read fDampingStrength write fDampingStrength;
+       property ElasticStrength:TKraftScalar read fElasticStrength write fElasticStrength;
+       property SpringStrength:TKraftScalar read fSpringStrength write fSpringStrength;
+       property ViscousStrength:TKraftScalar read fViscousStrength write fViscousStrength;
+       property SurfaceTensionPressureStrength:TKraftScalar read fSurfaceTensionPressureStrength write fSurfaceTensionPressureStrength;
+       property SurfaceTensionNormalStrength:TKraftScalar read fSurfaceTensionNormalStrength write fSurfaceTensionNormalStrength;
+       property RepulsiveStrength:TKraftScalar read fRepulsiveStrength write fRepulsiveStrength;
+       property PowderStrength:TKraftScalar read fPowderStrength write fPowderStrength;
+       property EjectionStrength:TKraftScalar read fEjectionStrength write fEjectionStrength;
+       property StaticPressureStrength:TKraftScalar read fStaticPressureStrength write fStaticPressureStrength;
+       property StaticPressureRelaxation:TKraftScalar read fStaticPressureRelaxation write fStaticPressureRelaxation;
+       property StaticPressureIterations:TKraftScalar read fStaticPressureIterations write fStaticPressureIterations;
+       property ColorMixingStrength:TKraftScalar read fColorMixingStrength write fColorMixingStrength;
+       property DestroyByAge:boolean read fDestroyByAge write fDestroyByAge;
+       property LifetimeGranularity:TKraftScalar read fLifetimeGranularity write fLifetimeGranularity;
+     end;
+
      TKraftIsland=class
       private
 
        fPhysics:TKraft;
 
-       fIslandIndex:longint;
+       fIslandIndex:TKraftInt32;
 
        fRigidBodies:TKraftRigidBodies;
-       fCountRigidBodies:longint;
+       fCountRigidBodies:TKraftInt32;
 
        fConstraints:TKraftConstraints;
-       fCountConstraints:longint;
+       fCountConstraints:TKraftInt32;
 
        fContactPairs:TPKraftContactPairs;
-       fCountContactPairs:longint;
+       fCountContactPairs:TKraftInt32;
 
        fStaticContactPairs:TPKraftContactPairs;
-       fCountStaticContactPairs:longint;
+       fCountStaticContactPairs:TKraftInt32;
 
        fSpeculativeContactPairs:TPKraftContactPairs;
-       fCountSpeculativeContactPairs:longint;
+       fCountSpeculativeContactPairs:TKraftInt32;
 
        fSolver:TKraftSolver;
 
       public
 
-       constructor Create(const APhysics:TKraft;const AIndex:longint);
+       constructor Create(const APhysics:TKraft;const AIndex:TKraftInt32);
        destructor Destroy; override;
        procedure Clear;
-       function AddRigidBody(RigidBody:TKraftRigidBody):longint;
+       function AddRigidBody(RigidBody:TKraftRigidBody):TKraftInt32;
        procedure AddConstraint(Constraint:TKraftConstraint);
        procedure AddContactPair(ContactPair:PKraftContactPair);
        procedure MergeContactPairs;
        procedure Solve(const TimeStep:TKraftTimeStep);
-       procedure SolveTimeOfImpact(const TimeStep:TKraftTimeStep;const IndexA,IndexB:longint);
+       procedure SolveTimeOfImpact(const TimeStep:TKraftTimeStep;const IndexA,IndexB:TKraftInt32);
 
        property Physics:TKraft read fPhysics;
 
-       property IslandIndex:longint read fIslandIndex;
+       property IslandIndex:TKraftInt32 read fIslandIndex;
 
        property RigidBodies:TKraftRigidBodies read fRigidBodies;
-       property CountRigidBodies:longint read fCountRigidBodies;
+       property CountRigidBodies:TKraftInt32 read fCountRigidBodies;
 
        property Constraints:TKraftConstraints read fConstraints;
-       property CountConstraints:longint read fCountConstraints;
+       property CountConstraints:TKraftInt32 read fCountConstraints;
 
        property ContactPairs:TPKraftContactPairs read fContactPairs;
-       property CountContactPairs:longint read fCountContactPairs;
+       property CountContactPairs:TKraftInt32 read fCountContactPairs;
 
        property StaticContactPairs:TPKraftContactPairs read fStaticContactPairs;
-       property CountStaticContactPairs:longint read fCountStaticContactPairs;
+       property CountStaticContactPairs:TKraftInt32 read fCountStaticContactPairs;
 
        property SpeculativeContactPairs:TPKraftContactPairs read fSpeculativeContactPairs;
-       property CountSpeculativeContactPairs:longint read fCountSpeculativeContactPairs;
+       property CountSpeculativeContactPairs:TKraftInt32 read fCountSpeculativeContactPairs;
 
        property Solver:TKraftSolver read fSolver;
 
@@ -2988,23 +3559,23 @@ type PKraftForceMode=^TKraftForceMode;
 {$ifndef KraftPasMP}
      TKraftJobManager=class;
 
-     TKraftJobManagerOnProcessJob=procedure(const JobIndex,ThreadIndex:longint) of object;
+     TKraftJobManagerOnProcessJob=procedure(const JobIndex,ThreadIndex:TKraftInt32) of object;
 
      TKraftJobThread=class(TThread)
       private
        fPhysics:TKraft;
        fJobManager:TKraftJobManager;
-       fThreadNumber:longint;
+       fThreadNumber:TKraftInt32;
        fEvent:TEvent;
        fDoneEvent:TEvent;
       protected
        procedure Execute; override;
       public
-       constructor Create(const APhysics:TKraft;const AJobManager:TKraftJobManager;const AThreadNumber:longint);
+       constructor Create(const APhysics:TKraft;const AJobManager:TKraftJobManager;const AThreadNumber:TKraftInt32);
        destructor Destroy; override;
        property Physics:TKraft read fPhysics;
        property JobManager:TKraftJobManager read fJobManager;
-       property ThreadNumber:longint read fThreadNumber;
+       property ThreadNumber:TKraftInt32 read fThreadNumber;
        property Event:TEvent read fEvent;
        property DoneEvent:TEvent read fDoneEvent;
      end;
@@ -3015,12 +3586,12 @@ type PKraftForceMode=^TKraftForceMode;
       private
        fPhysics:TKraft;
        fThreads:TKraftJobThreads;
-       fCountThreads:longint;
-       fCountAliveThreads:longint;
+       fCountThreads:TKraftInt32;
+       fCountAliveThreads:TKraftInt32;
        fThreadsTerminated:boolean;
        fOnProcessJob:TKraftJobManagerOnProcessJob;
-       fCountRemainJobs:longint;
-       fGranularity:longint;
+       fCountRemainJobs:TKraftInt32;
+       fGranularity:TKraftInt32;
       public
        constructor Create(const APhysics:TKraft);
        destructor Destroy; override;
@@ -3029,12 +3600,12 @@ type PKraftForceMode=^TKraftForceMode;
        procedure ProcessJobs;
        property Physics:TKraft read fPhysics;
        property Threads:TKraftJobThreads read fThreads;
-       property CountThreads:longint read fCountThreads;
-       property CountAliveThreads:longint read fCountAliveThreads write fCountAliveThreads;
+       property CountThreads:TKraftInt32 read fCountThreads;
+       property CountAliveThreads:TKraftInt32 read fCountAliveThreads write fCountAliveThreads;
        property ThreadsTerminated:boolean read fThreadsTerminated write fThreadsTerminated;
        property OnProcessJob:TKraftJobManagerOnProcessJob read fOnProcessJob write fOnProcessJob;
-       property CountRemainJobs:longint read fCountRemainJobs write fCountRemainJobs;
-       property Granularity:longint read fGranularity write fGranularity;
+       property CountRemainJobs:TKraftInt32 read fCountRemainJobs write fCountRemainJobs;
+       property Granularity:TKraftInt32 read fGranularity write fGranularity;
      end;
 {$endif}
 
@@ -3043,6 +3614,8 @@ type PKraftForceMode=^TKraftForceMode;
      TKraftOnRayCastFilterHook=function(const aPoint,aNormal:TKraftVector3;const aTime:TKraftScalar;const aShape:TKraftShape):boolean of object;
 
      TKraftOnSphereCastFilterHook=function(const aPoint,aNormal:TKraftVector3;const aTime:TKraftScalar;const aShape:TKraftShape):boolean of object;
+
+     TKraftDebugDrawLine=procedure(const aP0,aP1:TKraftVector3;const aColor:TKraftVector4) of object;
 
      TKraft=class(TPersistent)
       private
@@ -3055,12 +3628,12 @@ type PKraftForceMode=^TKraftForceMode;
 
        fHighResolutionTimer:TKraftHighResolutionTimer;
 
-       fBroadPhaseTime:int64;
-       fMidPhaseTime:int64;
-       fNarrowPhaseTime:int64;
-       fSolverTime:int64;
-       fContinuousTime:int64;
-       fTotalTime:int64;
+       fBroadPhaseTime:TKraftInt64;
+       fMidPhaseTime:TKraftInt64;
+       fNarrowPhaseTime:TKraftInt64;
+       fSolverTime:TKraftInt64;
+       fContinuousTime:TKraftInt64;
+       fTotalTime:TKraftInt64;
 
        fNewShapes:boolean;
 
@@ -3073,23 +3646,23 @@ type PKraftForceMode=^TKraftForceMode;
        fConstraintFirst:TKraftConstraint;
        fConstraintLast:TKraftConstraint;
 
-       fCountRigidBodies:longint;
+       fCountRigidBodies:TKraftInt32;
        fRigidBodyIDCounter:uint64;
 
        fRigidBodyFirst:TKraftRigidBody;
        fRigidBodyLast:TKraftRigidBody;
 
-       fStaticRigidBodyCount:longint;
+       fStaticRigidBodyCount:TKraftInt32;
 
        fStaticRigidBodyFirst:TKraftRigidBody;
        fStaticRigidBodyLast:TKraftRigidBody;
 
-       fDynamicRigidBodyCount:longint;
+       fDynamicRigidBodyCount:TKraftInt32;
 
        fDynamicRigidBodyFirst:TKraftRigidBody;
        fDynamicRigidBodyLast:TKraftRigidBody;
 
-       fKinematicRigidBodyCount:longint;
+       fKinematicRigidBodyCount:TKraftInt32;
 
        fKinematicRigidBodyFirst:TKraftRigidBody;
        fKinematicRigidBodyLast:TKraftRigidBody;
@@ -3100,7 +3673,7 @@ type PKraftForceMode=^TKraftForceMode;
        fKinematicAABBTree:TKraftDynamicAABBTree;
 
        fIslands:TKraftIslands;
-       fCountIslands:longint;
+       fCountIslands:TKraftInt32;
 
        fBroadPhase:TKraftBroadPhase;
 
@@ -3117,6 +3690,10 @@ type PKraftForceMode=^TKraftForceMode;
        fAllowSleep:boolean;
 
        fAllowedPenetration:TKraftScalar;
+
+       fGravityMode:TKraftGravityMode;
+
+       fGravitySpeed:TKraftScalar;
 
        fGravity:TKraftVector3;
 
@@ -3156,21 +3733,21 @@ type PKraftForceMode=^TKraftForceMode;
 
        fTimeOfImpactAlgorithm:TKraftTimeOfImpactAlgorithm;
 
-       fMaximalSubSteps:longint;
+       fMaximalSubSteps:TKraftInt32;
 
        fContactPositionCorrectionMode:TKraftPositionCorrectionMode;
 
        fConstraintPositionCorrectionMode:TKraftPositionCorrectionMode;
 
-       fVelocityIterations:longint;
+       fVelocityIterations:TKraftInt32;
 
-       fPositionIterations:longint;
+       fPositionIterations:TKraftInt32;
 
-       fSpeculativeIterations:longint;
+       fSpeculativeIterations:TKraftInt32;
 
-       fTimeOfImpactIterations:longint;
+       fTimeOfImpactIterations:TKraftInt32;
 
-       fPerturbationIterations:longint;
+       fPerturbationIterations:TKraftInt32;
 
        fPersistentContactManifold:boolean;
 
@@ -3184,7 +3761,7 @@ type PKraftForceMode=^TKraftForceMode;
 
        fContactBreakingThreshold:TKraftScalar;
 
-       fCountThreads:longint;
+       fCountThreads:TKraftInt32;
 
 {$ifndef KraftPasMP}
        fJobManager:TKraftJobManager;
@@ -3195,21 +3772,23 @@ type PKraftForceMode=^TKraftForceMode;
 
        fJobTimeStep:TKraftTimeStep;
 
+       fDebugDrawLine:TKraftDebugDrawLine;
+
        procedure Integrate(var Position:TKraftVector3;var Orientation:TKraftQuaternion;const LinearVelocity,AngularVelocity:TKraftVector3;const DeltaTime:TKraftScalar);
 
        procedure BuildIslands;
 {$ifdef KraftPasMP}
-       procedure ProcessSolveIslandParallelForFunction(const Job:PPasMPJob;const ThreadIndex:longint;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
+       procedure ProcessSolveIslandParallelForFunction(const Job:PPasMPJob;const ThreadIndex:TKraftInt32;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
 {$else}
-       procedure ProcessSolveIslandJob(const JobIndex,ThreadIndex:longint);
+       procedure ProcessSolveIslandJob(const JobIndex,ThreadIndex:TKraftInt32);
 {$endif}
        procedure SolveIslands(const TimeStep:TKraftTimeStep);
 
-       function GetConservativeAdvancementTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:longint;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:longint;var Beta:TKraftScalar):boolean;
+       function GetConservativeAdvancementTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:TKraftInt32;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:TKraftInt32;var Beta:TKraftScalar):boolean;
 
-       function GetBilateralAdvancementTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:longint;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:longint;var Beta:TKraftScalar):boolean;
+       function GetBilateralAdvancementTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:TKraftInt32;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:TKraftInt32;var Beta:TKraftScalar):boolean;
 
-       function GetTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:longint;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:longint;var Beta:TKraftScalar):boolean;
+       function GetTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:TKraftInt32;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:TKraftInt32;var Beta:TKraftScalar):boolean;
 
        procedure Solve(const TimeStep:TKraftTimeStep);
 
@@ -3228,7 +3807,7 @@ type PKraftForceMode=^TKraftForceMode;
 {$ifdef KraftPasMP}
        constructor Create(const APasMP:TPasMP);
 {$else}
-       constructor Create(const ACountThreads:longint=-1);
+       constructor Create(const ACountThreads:TKraftInt32=-1);
 {$endif}
        destructor Destroy; override;
 
@@ -3238,26 +3817,32 @@ type PKraftForceMode=^TKraftForceMode;
 
        procedure InterpolateWorldTransforms(const Alpha:TKraftScalar);
 
+       procedure InvalidateShapes;
+
        procedure Step(const ADeltaTime:TKraftScalar=0);
 
        function TestPoint(const Point:TKraftVector3):TKraftShape;
 
-       function RayCast(const Origin,Direction:TKraftVector3;const MaxTime:TKraftScalar;var Shape:TKraftShape;var Time:TKraftScalar;var Point,Normal:TKraftVector3;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const aOnRayCastFilterHook:TKraftOnRayCastFilterHook=nil):boolean;
+       function RayCast(const Origin,Direction:TKraftVector3;const MaxTime:TKraftScalar;var Shape:TKraftShape;var Time:TKraftScalar;var Point,Normal:TKraftVector3;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const aOnRayCastFilterHook:TKraftOnRayCastFilterHook=nil):boolean; overload;
 
-       function SphereCast(const Origin:TKraftVector3;const Radius:TKraftScalar;const Direction:TKraftVector3;const MaxTime:TKraftScalar;var Shape:TKraftShape;var Time:TKraftScalar;var Point,Normal:TKraftVector3;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const aOnSphereCastFilterHook:TKraftOnSphereCastFilterHook=nil):boolean;
+       function RayCast(const Source,Target:TKraftVector3;var Shape:TKraftShape;var Time:TKraftScalar;var Point,Normal:TKraftVector3;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const aOnRayCastFilterHook:TKraftOnRayCastFilterHook=nil):boolean; overload;
 
-       function PushSphere(var Center:TKraftVector3;const Radius:TKraftScalar;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const TryIterations:longint=4;const OnPushSphereShapeContactHook:TKraftOnPushSphereShapeContactHook=nil):boolean;
+       function SphereCast(const Origin:TKraftVector3;const Radius:TKraftScalar;const Direction:TKraftVector3;const MaxTime:TKraftScalar;var Shape:TKraftShape;var Time:TKraftScalar;var Point,Normal:TKraftVector3;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const aOnSphereCastFilterHook:TKraftOnSphereCastFilterHook=nil):boolean; overload;
+
+       function SphereCast(const Source:TKraftVector3;const Radius:TKraftScalar;const Target:TKraftVector3;var Shape:TKraftShape;var Time:TKraftScalar;var Point,Normal:TKraftVector3;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const aOnSphereCastFilterHook:TKraftOnSphereCastFilterHook=nil):boolean; overload;
+
+       function PushSphere(var Center:TKraftVector3;const Radius:TKraftScalar;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const TryIterations:TKraftInt32=4;const OnPushSphereShapeContactHook:TKraftOnPushSphereShapeContactHook=nil):boolean;
 
        function GetDistance(const ShapeA,ShapeB:TKraftShape):TKraftScalar;
 
        property HighResolutionTimer:TKraftHighResolutionTimer read fHighResolutionTimer;
 
-       property BroadPhaseTime:int64 read fBroadPhaseTime;
-       property MidPhaseTime:int64 read fMidPhaseTime;
-       property NarrowPhaseTime:int64 read fNarrowPhaseTime;
-       property SolverTime:int64 read fSolverTime;
-       property ContinuousTime:int64 read fContinuousTime;
-       property TotalTime:int64 read fTotalTime;
+       property BroadPhaseTime:TKraftInt64 read fBroadPhaseTime;
+       property MidPhaseTime:TKraftInt64 read fMidPhaseTime;
+       property NarrowPhaseTime:TKraftInt64 read fNarrowPhaseTime;
+       property SolverTime:TKraftInt64 read fSolverTime;
+       property ContinuousTime:TKraftInt64 read fContinuousTime;
+       property TotalTime:TKraftInt64 read fTotalTime;
 
        property NewShapes:boolean read fNewShapes;
 
@@ -3270,23 +3855,23 @@ type PKraftForceMode=^TKraftForceMode;
        property ConstraintFirst:TKraftConstraint read fConstraintFirst;
        property ConstraintLast:TKraftConstraint read fConstraintLast;
 
-       property CountRigidBodies:longint read fCountRigidBodies;
+       property CountRigidBodies:TKraftInt32 read fCountRigidBodies;
        property RigidBodyIDCounter:uint64 read fRigidBodyIDCounter;
 
        property RigidBodyFirst:TKraftRigidBody read fRigidBodyFirst;
        property RigidBodyLast:TKraftRigidBody read fRigidBodyLast;
 
-       property StaticRigidBodyCount:longint read fStaticRigidBodyCount;
+       property StaticRigidBodyCount:TKraftInt32 read fStaticRigidBodyCount;
 
        property StaticRigidBodyFirst:TKraftRigidBody read fStaticRigidBodyFirst;
        property StaticRigidBodyLast:TKraftRigidBody read fStaticRigidBodyLast;
 
-       property DynamicRigidBodyCount:longint read fDynamicRigidBodyCount;
+       property DynamicRigidBodyCount:TKraftInt32 read fDynamicRigidBodyCount;
 
        property DynamicRigidBodyFirst:TKraftRigidBody read fDynamicRigidBodyFirst;
        property DynamicRigidBodyLast:TKraftRigidBody read fDynamicRigidBodyLast;
 
-       property KinematicRigidBodyCount:longint read fKinematicRigidBodyCount;
+       property KinematicRigidBodyCount:TKraftInt32 read fKinematicRigidBodyCount;
 
        property KinematicRigidBodyFirst:TKraftRigidBody read fKinematicRigidBodyFirst;
        property KinematicRigidBodyLast:TKraftRigidBody read fKinematicRigidBodyLast;
@@ -3297,7 +3882,7 @@ type PKraftForceMode=^TKraftForceMode;
        property KinematicAABBTree:TKraftDynamicAABBTree read fKinematicAABBTree;
 
        property Islands:TKraftIslands read fIslands;
-       property CountIslands:longint read fCountIslands;
+       property CountIslands:TKraftInt32 read fCountIslands;
 
        property BroadPhase:TKraftBroadPhase read fBroadPhase;
 
@@ -3309,7 +3894,7 @@ type PKraftForceMode=^TKraftForceMode;
 
        property LastInverseDeltaTime:TKraftScalar read fLastInverseDeltaTime;
 
-       property CountThreads:longint read fCountThreads;
+       property CountThreads:TKraftInt32 read fCountThreads;
 
 {$ifndef KraftPasMP}
        property JobManager:TKraftJobManager read fJobManager;
@@ -3324,6 +3909,10 @@ type PKraftForceMode=^TKraftForceMode;
        property AllowSleep:boolean read fAllowSleep write fAllowSleep;
 
        property AllowedPenetration:TKraftScalar read fAllowedPenetration write fAllowedPenetration;
+
+       property GravityMode:TKraftGravityMode read fGravityMode write fGravityMode;
+
+       property GravitySpeed:TKraftScalar read fGravitySpeed write fGravitySpeed;
 
        property Gravity:TKraftVector3Property read fGravityProperty;
 
@@ -3361,21 +3950,21 @@ type PKraftForceMode=^TKraftForceMode;
 
        property TimeOfImpactAlgorithm:TKraftTimeOfImpactAlgorithm read fTimeOfImpactAlgorithm write fTimeOfImpactAlgorithm;
 
-       property MaximalSubSteps:longint read fMaximalSubSteps write fMaximalSubSteps;
+       property MaximalSubSteps:TKraftInt32 read fMaximalSubSteps write fMaximalSubSteps;
 
        property ContactPositionCorrectionMode:TKraftPositionCorrectionMode read fContactPositionCorrectionMode write fContactPositionCorrectionMode;
 
        property ConstraintPositionCorrectionMode:TKraftPositionCorrectionMode read fConstraintPositionCorrectionMode write fConstraintPositionCorrectionMode;
 
-       property VelocityIterations:longint read fVelocityIterations write fVelocityIterations;
+       property VelocityIterations:TKraftInt32 read fVelocityIterations write fVelocityIterations;
 
-       property PositionIterations:longint read fPositionIterations write fPositionIterations;
+       property PositionIterations:TKraftInt32 read fPositionIterations write fPositionIterations;
 
-       property SpeculativeIterations:longint read fSpeculativeIterations write fSpeculativeIterations;
+       property SpeculativeIterations:TKraftInt32 read fSpeculativeIterations write fSpeculativeIterations;
 
-       property TimeOfImpactIterations:longint read fTimeOfImpactIterations write fTimeOfImpactIterations;
+       property TimeOfImpactIterations:TKraftInt32 read fTimeOfImpactIterations write fTimeOfImpactIterations;
 
-       property PerturbationIterations:longint read fPerturbationIterations write fPerturbationIterations;
+       property PerturbationIterations:TKraftInt32 read fPerturbationIterations write fPerturbationIterations;
 
        property PersistentContactManifold:boolean read fPersistentContactManifold write fPersistentContactManifold;
 
@@ -3389,9 +3978,16 @@ type PKraftForceMode=^TKraftForceMode;
 
        property ContactBreakingThreshold:TKraftScalar read fContactBreakingThreshold write fContactBreakingThreshold;
 
+       property DebugDrawLine:TKraftDebugDrawLine read fDebugDrawLine write fDebugDrawLine;
+
      end;
 
-const Vector2Origin:TKraftVector2=(x:0.0;y:0.0);
+const KraftSignatureConvexHull:TKraftSignature=('K','R','P','H','C','O','H','U');
+      KraftSignatureMesh:TKraftSignature=('K','R','P','H','M','E','S','T');
+
+      KraftFileFormatVersion:TKraftUInt32=2;
+
+      Vector2Origin:TKraftVector2=(x:0.0;y:0.0);
       Vector2XAxis:TKraftVector2=(x:1.0;y:0.0);
       Vector2YAxis:TKraftVector2=(x:0.0;y:1.0);
       Vector2ZAxis:TKraftVector2=(x:0.0;y:0.0);
@@ -3437,311 +4033,270 @@ const Vector2Origin:TKraftVector2=(x:0.0;y:0.0);
 
       QuaternionIdentity:TKraftQuaternion=(x:0.0;y:0.0;z:0.0;w:1.0);
 
-function Vector2(x,y:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
-function Vector3(x,y,z:TKraftScalar):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3(const v:TKraftVector4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Matrix3x3(const m:TKraftMatrix4x4):TKraftMatrix3x3; overload; {$ifdef caninline}inline;{$endif}
-function Plane(Normal:TKraftVector3;Distance:TKraftScalar):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
-function Quaternion(w,x,y,z:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function SpatialHashVector(const aX,aY,aZ:TKraftInt32{;const aW:TKraftInt32=0}):TKraftUInt32;
 
-function Vector2Compare(const v1,v2:TKraftVector2):boolean; {$ifdef caninline}inline;{$endif}
-function Vector2CompareEx(const v1,v2:TKraftVector2;const Threshold:TKraftScalar=EPSILON):boolean; {$ifdef caninline}inline;{$endif}
-function Vector2Add(const v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
-function Vector2Sub(const v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
-function Vector2Avg(const v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
-function Vector2ScalarMul(const v:TKraftVector2;s:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
-function Vector2Dot(const v1,v2:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector2Neg(const v:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
-procedure Vector2Scale(var v:TKraftVector2;s:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
-procedure Vector2Scale(var v:TKraftVector2;sx,sy:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
-function Vector2Mul(const v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
-function Vector2Length(const v:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector2Dist(const v1,v2:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector2LengthSquared(const v:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector2Angle(const v1,v2,v3:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector2(const x,y:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector3(const x,y,z:TKraftScalar):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftRawVector3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector4(const x,y,z,w:TKraftScalar):TKraftVector4; overload; {$ifdef caninline}inline;{$endif}
+function Matrix3x3({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftMatrix3x3; overload; {$ifdef caninline}inline;{$endif}
+function Plane({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif}Normal:TKraftVector3;const Distance:TKraftScalar):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
+function Quaternion(const w,x,y,z:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+
+function Vector2Compare({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):boolean; {$ifdef caninline}inline;{$endif}
+function Vector2CompareEx({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2;const Threshold:TKraftScalar=EPSILON):boolean; {$ifdef caninline}inline;{$endif}
+function Vector2Add({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Sub({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Avg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2ScalarMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2;const s:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Dot({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector2Neg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+procedure Vector2Scale(var v:TKraftVector2;const s:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
+procedure Vector2Scale(var v:TKraftVector2;const sx,sy:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
+function Vector2Mul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Length({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector2Dist({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector2LengthSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector2Angle({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2,v3:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
 procedure Vector2Normalize(var v:TKraftVector2); {$ifdef caninline}inline;{$endif}
-function Vector2Norm(const v:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
-procedure Vector2Rotate(var v:TKraftVector2;a:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
-procedure Vector2Rotate(var v:TKraftVector2;const Center:TKraftVector2;a:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
-procedure Vector2MatrixMul(var v:TKraftVector2;const m:TKraftMatrix2x2); {$ifdef caninline}inline;{$endif}
-function Vector2TermMatrixMul(const v:TKraftVector2;const m:TKraftMatrix2x2):TKraftVector2; {$ifdef caninline}inline;{$endif}
-function Vector2Lerp(const v1,v2:TKraftVector2;w:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Norm({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+procedure Vector2Rotate(var v:TKraftVector2;const a:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
+procedure Vector2Rotate(var v:TKraftVector2;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Center:TKraftVector2;const a:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
+procedure Vector2MatrixMul(var v:TKraftVector2;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix2x2); {$ifdef caninline}inline;{$endif}
+function Vector2TermMatrixMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix2x2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Lerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2;const w:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
 
-{$ifdef SIMD}
-function Vector3Flip(const v:TKraftVector3):TKraftVector3;
-function Vector3Abs(const v:TKraftVector3):TKraftVector3;
-function Vector3Compare(const v1,v2:TKraftVector3):boolean;
-function Vector3CompareEx(const v1,v2:TKraftVector3;const Threshold:TKraftScalar=EPSILON):boolean;
-procedure Vector3DirectAdd(var v1:TKraftVector3;const v2:TKraftVector3);
-procedure Vector3DirectSub(var v1:TKraftVector3;const v2:TKraftVector3);
-function Vector3Add(const v1,v2:TKraftVector3):TKraftVector3;
-function Vector3Sub(const v1,v2:TKraftVector3):TKraftVector3;
-function Vector3Avg(const v1,v2:TKraftVector3):TKraftVector3; overload;
-function Vector3Avg(const v1,v2,v3:TKraftVector3):TKraftVector3; overload;
-function Vector3Avg(const va:PKraftVector3s;Count:longint):TKraftVector3; overload;
-function Vector3ScalarMul(const v:TKraftVector3;const s:TKraftScalar):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-function Vector3Dot(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-function Vector3Cos(const v1,v2:TKraftVector3):TKraftScalar;
-function Vector3GetOneUnitOrthogonalVector(const v:TKraftVector3):TKraftVector3;
-function Vector3Cross(const v1,v2:TKraftVector3):TKraftVector3;
-function Vector3Neg(const v:TKraftVector3):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-procedure Vector3Scale(var v:TKraftVector3;const sx,sy,sz:TKraftScalar); overload; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-procedure Vector3Scale(var v:TKraftVector3;const s:TKraftScalar); overload; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-function Vector3Mul(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-function Vector3Length(const v:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-function Vector3Dist(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-function Vector3LengthSquared(const v:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-function Vector3DistSquared(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-function Vector3Angle(const v1,v2,v3:TKraftVector3):TKraftScalar;
-function Vector3LengthNormalize(var v:TKraftVector3):TKraftScalar;
-procedure Vector3Normalize(var v:TKraftVector3);
-procedure Vector3NormalizeEx(var v:TKraftVector3);
-function Vector3SafeNorm(const v:TKraftVector3):TKraftVector3;
-function Vector3Norm(const v:TKraftVector3):TKraftVector3;
-function Vector3NormEx(const v:TKraftVector3):TKraftVector3; 
-procedure Vector3RotateX(var v:TKraftVector3;a:TKraftScalar);
-procedure Vector3RotateY(var v:TKraftVector3;a:TKraftScalar);
-procedure Vector3RotateZ(var v:TKraftVector3;a:TKraftScalar);
-procedure Vector3MatrixMul(var v:TKraftVector3;const m:TKraftMatrix3x3); overload;
-procedure Vector3MatrixMul(var v:TKraftVector3;const m:TKraftMatrix4x4); overload; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-procedure Vector3MatrixMulBasis(var v:TKraftVector3;const m:TKraftMatrix4x4); overload;
-procedure Vector3MatrixMulInverted(var v:TKraftVector3;const m:TKraftMatrix4x4); overload;
-function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload;
-function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-function Vector3TermMatrixMulInverse(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload;
-function Vector3TermMatrixMulInverted(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload;
-function Vector3TermMatrixMulTransposed(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload;
-function Vector3TermMatrixMulTransposed(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload;
-function Vector3TermMatrixMulTransposedBasis(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload;
-function Vector3TermMatrixMulBasis(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload;
-function Vector3TermMatrixMulHomogen(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3;
-function Vector3Lerp(const v1,v2:TKraftVector3;w:TKraftScalar):TKraftVector3;
-function Vector3Perpendicular(v:TKraftVector3):TKraftVector3;
-function Vector3TermQuaternionRotate(const v:TKraftVector3;const q:TKraftQuaternion):TKraftVector3;
-function Vector3ProjectToBounds(const v:TKraftVector3;const MinVector,MaxVector:TKraftVector3):TKraftScalar;
-{$else}
-function Vector3Flip(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Abs(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Compare(const v1,v2:TKraftVector3):boolean; {$ifdef caninline}inline;{$endif}
-function Vector3CompareEx(const v1,v2:TKraftVector3;const Threshold:TKraftScalar=EPSILON):boolean; {$ifdef caninline}inline;{$endif}
-function Vector3DirectAdd(var v1:TKraftVector3;const v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3DirectSub(var v1:TKraftVector3;const v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Add(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Sub(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Avg(const v1,v2:TKraftVector3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3Avg(const v1,v2,v3:TKraftVector3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3Avg(const va:PKraftVector3s;Count:longint):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3ScalarMul(const v:TKraftVector3;const s:TKraftScalar):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Dot(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector3Cos(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector3GetOneUnitOrthogonalVector(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Cross(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Neg(const v:TKraftVector3):TKraftVector3;  {$ifdef caninline}inline;{$endif}
-procedure Vector3Scale(var v:TKraftVector3;const sx,sy,sz:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
-procedure Vector3Scale(var v:TKraftVector3;const s:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
-function Vector3Mul(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Length(const v:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector3Dist(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector3LengthSquared(const v:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector3DistSquared(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector3Angle(const v1,v2,v3:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Vector3LengthNormalize(var v:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-procedure Vector3Normalize(var v:TKraftVector3); {$ifdef caninline}inline;{$endif}
-procedure Vector3NormalizeEx(var v:TKraftVector3); {$ifdef caninline}inline;{$endif}
-function Vector3SafeNorm(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Norm(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3NormEx(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-procedure Vector3RotateX(var v:TKraftVector3;a:TKraftScalar); {$ifdef caninline}inline;{$endif}
-procedure Vector3RotateY(var v:TKraftVector3;a:TKraftScalar); {$ifdef caninline}inline;{$endif}
-procedure Vector3RotateZ(var v:TKraftVector3;a:TKraftScalar); {$ifdef caninline}inline;{$endif}
-procedure Vector3MatrixMul(var v:TKraftVector3;const m:TKraftMatrix3x3); overload; {$ifdef caninline}inline;{$endif}
-procedure Vector3MatrixMul(var v:TKraftVector3;const m:TKraftMatrix4x4); overload; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-procedure Vector3MatrixMulBasis(var v:TKraftVector3;const m:TKraftMatrix4x4); overload; {$ifdef caninline}inline;{$endif}
-procedure Vector3MatrixMulInverted(var v:TKraftVector3;const m:TKraftMatrix4x4); overload; {$ifdef caninline}inline;{$endif}
-function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef CPU386ASMForSinglePrecision}assembler;{$endif}
-function Vector3TermMatrixMulInverse(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3TermMatrixMulInverted(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3TermMatrixMulTransposed(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3TermMatrixMulTransposed(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3TermMatrixMulTransposedBasis(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3TermMatrixMulBasis(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-function Vector3TermMatrixMulHomogen(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3Lerp(const v1,v2:TKraftVector3;w:TKraftScalar):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function Vector3Flip({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function Vector3Abs({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Compare({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):boolean; {$ifdef caninline}inline;{$endif}
+function Vector3CompareEx({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3;const Threshold:TKraftScalar=EPSILON):boolean; {$ifdef caninline}inline;{$endif}
+procedure Vector3DirectAdd(var v1:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v2:TKraftVector3); {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector3DirectSub(var v1:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v2:TKraftVector3); {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Add({$ifdef USE_CONSTREF}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Sub({$ifdef USE_CONSTREF}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Avg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; overload; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Avg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2,v3:TKraftVector3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3Avg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} va:PKraftVector3s;Count:TKraftInt32):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3ScalarMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;const s:TKraftScalar):TKraftVector3; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Dot({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftScalar; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Cos({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector3Project({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Vector,OnNormal:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function Vector3GetOneUnitOrthogonalVector({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function Vector3Cross({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Neg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3;  {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector3Scale(var v:TKraftVector3;const sx,sy,sz:TKraftScalar); overload; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector3Scale(var v:TKraftVector3;const s:TKraftScalar); overload; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Mul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Div({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Length({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftScalar; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Dist({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftScalar; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3LengthSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftScalar; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3DistSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftScalar; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3Angle({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2,v3:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector3LengthNormalize(var v:TKraftVector3):TKraftScalar; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend}
+procedure Vector3Normalize(var v:TKraftVector3); {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend}
+procedure Vector3NormalizeEx(var v:TKraftVector3); {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend}
+function Vector3SafeNorm({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function Vector3Norm({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3NormEx({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector3RotateX(var v:TKraftVector3;const a:TKraftScalar); {$ifdef caninline}inline;{$endif}
+procedure Vector3RotateY(var v:TKraftVector3;const a:TKraftScalar); {$ifdef caninline}inline;{$endif}
+procedure Vector3RotateZ(var v:TKraftVector3;const a:TKraftScalar); {$ifdef caninline}inline;{$endif}
+procedure Vector3MatrixMul(var v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3); overload; {$ifdef caninline}inline;{$endif} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector3MatrixMul(var v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4); overload; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector3MatrixMulBasis(var v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4); overload; {$ifdef caninline}inline;{$endif}
+procedure Vector3MatrixMulInverted(var v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4); overload; {$ifdef caninline}inline;{$endif}
+function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3TermMatrixMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; overload; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3TermMatrixMulInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3TermMatrixMulInverted({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3TermMatrixMulTransposed({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3TermMatrixMulTransposed({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3TermMatrixMulTransposedBasis({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3TermMatrixMulBasis({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; overload; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3TermMatrixMulHomogen({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function Vector3Lerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3;const w:TKraftScalar):TKraftVector3; {$ifdef caninline}inline;{$endif}
 function Vector3Perpendicular(v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3TermQuaternionRotate(const v:TKraftVector3;const q:TKraftQuaternion):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Vector3ProjectToBounds(const v:TKraftVector3;const MinVector,MaxVector:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-{$endif}
-function Vector3FlushZero(const v:TKraftVector3):TKraftVector3;
+function Vector3TermQuaternionRotate({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q:TKraftQuaternion):TKraftVector3; {$if defined(caninline) and not defined(SIMDASM)}inline;{$ifend} {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector3ProjectToBounds({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} MinVector,MaxVector:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector3FlushZero({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3;
 
-function Vector4Compare(const v1,v2:TKraftVector4):boolean;
-function Vector4CompareEx(const v1,v2:TKraftVector4;const Threshold:TKraftScalar=EPSILON):boolean;
-function Vector4Add(const v1,v2:TKraftVector4):TKraftVector4;
-function Vector4Sub(const v1,v2:TKraftVector4):TKraftVector4;
-function Vector4ScalarMul(const v:TKraftVector4;s:TKraftScalar):TKraftVector4;
-function Vector4Dot(const v1,v2:TKraftVector4):TKraftScalar;
-function Vector4Cross(const v1,v2:TKraftVector4):TKraftVector4;
-function Vector4Neg(const v:TKraftVector4):TKraftVector4;
-procedure Vector4Scale(var v:TKraftVector4;sx,sy,sz:TKraftScalar); overload;
-procedure Vector4Scale(var v:TKraftVector4;s:TKraftScalar); overload;
-function Vector4Mul(const v1,v2:TKraftVector4):TKraftVector4;
-function Vector4Length(const v:TKraftVector4):TKraftScalar;
-function Vector4Dist(const v1,v2:TKraftVector4):TKraftScalar;
-function Vector4LengthSquared(const v:TKraftVector4):TKraftScalar;
-function Vector4DistSquared(const v1,v2:TKraftVector4):TKraftScalar;
-function Vector4Angle(const v1,v2,v3:TKraftVector4):TKraftScalar;
-procedure Vector4Normalize(var v:TKraftVector4);
-function Vector4Norm(const v:TKraftVector4):TKraftVector4;
-procedure Vector4RotateX(var v:TKraftVector4;a:TKraftScalar);
-procedure Vector4RotateY(var v:TKraftVector4;a:TKraftScalar);
-procedure Vector4RotateZ(var v:TKraftVector4;a:TKraftScalar);
-procedure Vector4MatrixMul(var v:TKraftVector4;const m:TKraftMatrix4x4); {$ifdef CPU386ASMForSinglePrecision}register;{$endif}
-function Vector4TermMatrixMul(const v:TKraftVector4;const m:TKraftMatrix4x4):TKraftVector4; {$ifdef CPU386ASMForSinglePrecision}register;{$endif}
-function Vector4TermMatrixMulHomogen(const v:TKraftVector4;const m:TKraftMatrix4x4):TKraftVector4;
-procedure Vector4Rotate(var v:TKraftVector4;const Axis:TKraftVector4;a:TKraftScalar);
-function Vector4Lerp(const v1,v2:TKraftVector4;w:TKraftScalar):TKraftVector4;
+function Vector4Compare({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):boolean; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4CompareEx({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4;const Threshold:TKraftScalar=EPSILON):boolean; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Add({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftVector4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Sub({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftVector4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4ScalarMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4;const s:TKraftScalar):TKraftVector4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Dot({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Cross({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftVector4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Neg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftVector4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector4Scale(var v:TKraftVector4;const sx,sy,sz:TKraftScalar); overload; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector4Scale(var v:TKraftVector4;const s:TKraftScalar); overload; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Mul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftVector4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Length({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Dist({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4LengthSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4DistSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Angle({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2,v3:TKraftVector4):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector4Normalize(var v:TKraftVector4); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Norm({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftVector4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector4RotateX(var v:TKraftVector4;const a:TKraftScalar); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector4RotateY(var v:TKraftVector4;const a:TKraftScalar); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector4RotateZ(var v:TKraftVector4;const a:TKraftScalar); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector4MatrixMul(var v:TKraftVector4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4);
+function Vector4TermMatrixMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4TermMatrixMulHomogen({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Vector4Rotate(var v:TKraftVector4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Axis:TKraftVector4;const a:TKraftScalar); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Vector4Lerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4;const w:TKraftScalar):TKraftVector4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
 
-function Matrix2x2Inverse(var mr:TKraftMatrix2x2;const ma:TKraftMatrix2x2):boolean;
-function Matrix2x2TermInverse(const m:TKraftMatrix2x2):TKraftMatrix2x2;
+function Matrix2x2Inverse(var mr:TKraftMatrix2x2;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix2x2):boolean; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix2x2TermInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix2x2):TKraftMatrix2x2; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
 
-function Matrix3x3RotateX(Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
-function Matrix3x3RotateY(Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
-function Matrix3x3RotateZ(Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
-function Matrix3x3Rotate(Angle:TKraftScalar;Axis:TKraftVector3):TKraftMatrix3x3; overload;
-function Matrix3x3Scale(sx,sy,sz:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
-procedure Matrix3x3Add(var m1:TKraftMatrix3x3;const m2:TKraftMatrix3x3); {$ifdef caninline}inline;{$endif}
-procedure Matrix3x3Sub(var m1:TKraftMatrix3x3;const m2:TKraftMatrix3x3); {$ifdef caninline}inline;{$endif}
-procedure Matrix3x3Mul(var m1:TKraftMatrix3x3;const m2:TKraftMatrix3x3);
-function Matrix3x3TermAdd(const m1,m2:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
-function Matrix3x3TermSub(const m1,m2:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
-function Matrix3x3TermMul(const m1,m2:TKraftMatrix3x3):TKraftMatrix3x3;
-function Matrix3x3TermMulTranspose(const m1,m2:TKraftMatrix3x3):TKraftMatrix3x3;
+function Matrix3x3RotateX(const Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3RotateY(const Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3RotateZ(const Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3Rotate(const Angle:TKraftScalar;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif}Axis:TKraftVector3):TKraftMatrix3x3; overload; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix3x3Scale(const sx,sy,sz:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+procedure Matrix3x3Add(var m1:TKraftMatrix3x3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix3x3); {$ifdef caninline}inline;{$endif}
+procedure Matrix3x3Sub(var m1:TKraftMatrix3x3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix3x3); {$ifdef caninline}inline;{$endif}
+procedure Matrix3x3Mul(var m1:TKraftMatrix3x3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix3x3); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix3x3TermAdd({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix3x3):TKraftMatrix3x3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend} {$ifdef caninline}inline;{$endif}
+function Matrix3x3TermSub({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3TermMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix3x3):TKraftMatrix3x3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix3x3TermMulTranspose({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix3x3):TKraftMatrix3x3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
 procedure Matrix3x3ScalarMul(var m:TKraftMatrix3x3;s:TKraftScalar); {$ifdef caninline}inline;{$endif}
-function Matrix3x3TermScalarMul(const m:TKraftMatrix3x3;s:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3TermScalarMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3;const s:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 procedure Matrix3x3Transpose(var m:TKraftMatrix3x3); {$ifdef caninline}inline;{$endif}
-function Matrix3x3TermTranspose(const m:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
-function Matrix3x3Determinant(const m:TKraftMatrix3x3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-function Matrix3x3EulerAngles(const m:TKraftMatrix3x3):TKraftVector3;
-procedure Matrix3x3SetColumn(var m:TKraftMatrix3x3;const c:longint;const v:TKraftVector3); {$ifdef caninline}inline;{$endif}
-function Matrix3x3GetColumn(const m:TKraftMatrix3x3;const c:longint):TKraftVector3; {$ifdef caninline}inline;{$endif}
-procedure Matrix3x3SetRow(var m:TKraftMatrix3x3;const r:longint;const v:TKraftVector3); {$ifdef caninline}inline;{$endif}
-function Matrix3x3GetRow(const m:TKraftMatrix3x3;const r:longint):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function Matrix3x3Compare(const m1,m2:TKraftMatrix3x3):boolean;
-function Matrix3x3Inverse(var mr:TKraftMatrix3x3;const ma:TKraftMatrix3x3):boolean;
-function Matrix3x3TermInverse(const m:TKraftMatrix3x3):TKraftMatrix3x3;
-procedure Matrix3x3OrthoNormalize(var m:TKraftMatrix3x3);
-function Matrix3x3Slerp(const a,b:TKraftMatrix3x3;x:TKraftScalar):TKraftMatrix3x3;
-function Matrix3x3FromToRotation(const FromDirection,ToDirection:TKraftVector3):TKraftMatrix3x3;
-function Matrix3x3Construct(const Forwards,Up:TKraftVector3):TKraftMatrix3x3;
-function Matrix3x3OuterProduct(const u,v:TKraftVector3):TKraftMatrix3x3;
+function Matrix3x3TermTranspose({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3Determinant({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Matrix3x3EulerAngles({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftVector3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Matrix3x3SetColumn(var m:TKraftMatrix3x3;const c:TKraftInt32;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3); {$ifdef caninline}inline;{$endif}
+function Matrix3x3GetColumn({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3;const c:TKraftInt32):TKraftVector3; {$ifdef caninline}inline;{$endif}
+procedure Matrix3x3SetRow(var m:TKraftMatrix3x3;const r:TKraftInt32;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3); {$ifdef caninline}inline;{$endif}
+function Matrix3x3GetRow({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3;const r:TKraftInt32):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3Compare({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix3x3):boolean; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix3x3Inverse(var mr:TKraftMatrix3x3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix3x3):boolean; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix3x3TermInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftMatrix3x3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Matrix3x3OrthoNormalize(var m:TKraftMatrix3x3); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix3x3Slerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} a,b:TKraftMatrix3x3;const x:TKraftScalar):TKraftMatrix3x3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix3x3FromToRotation({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} FromDirection,ToDirection:TKraftVector3):TKraftMatrix3x3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix3x3Construct({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Forwards,Up:TKraftVector3):TKraftMatrix3x3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix3x3OuterProduct({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} u,v:TKraftVector3):TKraftMatrix3x3;
 
-function Matrix4x4Set(m:TKraftMatrix3x3):TKraftMatrix4x4;
-function Matrix4x4Rotation(m:TKraftMatrix4x4):TKraftMatrix4x4;
-function Matrix4x4RotateX(Angle:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4RotateY(Angle:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4RotateZ(Angle:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4Rotate(Angle:TKraftScalar;Axis:TKraftVector3):TKraftMatrix4x4; overload;
-function Matrix4x4Translate(x,y,z:TKraftScalar):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
-function Matrix4x4Translate(const v:TKraftVector3):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
-function Matrix4x4Translate(const v:TKraftVector4):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
-procedure Matrix4x4Translate(var m:TKraftMatrix4x4;const v:TKraftVector3); overload; {$ifdef caninline}inline;{$endif}
-procedure Matrix4x4Translate(var m:TKraftMatrix4x4;const v:TKraftVector4); overload; {$ifdef caninline}inline;{$endif}
-function Matrix4x4Scale(sx,sy,sz:TKraftScalar):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
-function Matrix4x4Scale(const s:TKraftVector3):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
-procedure Matrix4x4Add(var m1:TKraftMatrix4x4;const m2:TKraftMatrix4x4); {$ifdef caninline}inline;{$endif}
-procedure Matrix4x4Sub(var m1:TKraftMatrix4x4;const m2:TKraftMatrix4x4); {$ifdef caninline}inline;{$endif}
-procedure Matrix4x4Mul(var m1:TKraftMatrix4x4;const m2:TKraftMatrix4x4); overload; {$ifdef CPU386ASMForSinglePrecision}register;{$endif}
-procedure Matrix4x4Mul(var mr:TKraftMatrix4x4;const m1,m2:TKraftMatrix4x4); overload; {$ifdef CPU386ASMForSinglePrecision}register;{$endif}
-function Matrix4x4TermAdd(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
-function Matrix4x4TermSub(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
-function Matrix4x4TermMul(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef CPU386ASMForSinglePrecision}register;{$endif}
-function Matrix4x4TermMulInverted(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
-function Matrix4x4TermMulSimpleInverted(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
-function Matrix4x4TermMulTranspose(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4;
-function Matrix4x4Lerp(const a,b:TKraftMatrix4x4;x:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4Slerp(const a,b:TKraftMatrix4x4;x:TKraftScalar):TKraftMatrix4x4;
-procedure Matrix4x4ScalarMul(var m:TKraftMatrix4x4;s:TKraftScalar); {$ifdef caninline}inline;{$endif}
-procedure Matrix4x4Transpose(var m:TKraftMatrix4x4);
-function Matrix4x4TermTranspose(const m:TKraftMatrix4x4):TKraftMatrix4x4;
-function Matrix4x4Determinant(const m:TKraftMatrix4x4):TKraftScalar;
-procedure Matrix4x4SetColumn(var m:TKraftMatrix4x4;const c:longint;const v:TKraftVector4); {$ifdef caninline}inline;{$endif}
-function Matrix4x4GetColumn(const m:TKraftMatrix4x4;const c:longint):TKraftVector4; {$ifdef caninline}inline;{$endif}
-procedure Matrix4x4SetRow(var m:TKraftMatrix4x4;const r:longint;const v:TKraftVector4); {$ifdef caninline}inline;{$endif}
-function Matrix4x4GetRow(const m:TKraftMatrix4x4;const r:longint):TKraftVector4; {$ifdef caninline}inline;{$endif}
-function Matrix4x4Compare(const m1,m2:TKraftMatrix4x4):boolean;
-function Matrix4x4LengthSquared(const m:TKraftMatrix4x4):TKraftScalar;
-function Matrix4x4Length(const m:TKraftMatrix4x4):TKraftScalar;
-function Matrix4x4DifferenceSquared(const m1,m2:TKraftMatrix4x4):TKraftScalar;
-function Matrix4x4Difference(const m1,m2:TKraftMatrix4x4):TKraftScalar;
-procedure Matrix4x4Reflect(var mr:TKraftMatrix4x4;Plane:TKraftPlane);
-function Matrix4x4TermReflect(Plane:TKraftPlane):TKraftMatrix4x4;
-function Matrix4x4SimpleInverse(var mr:TKraftMatrix4x4;const ma:TKraftMatrix4x4):boolean; {$ifdef caninline}inline;{$endif}
-function Matrix4x4TermSimpleInverse(const ma:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
-function Matrix4x4Inverse(var mr:TKraftMatrix4x4;const ma:TKraftMatrix4x4):boolean;
-function Matrix4x4TermInverse(const ma:TKraftMatrix4x4):TKraftMatrix4x4;
-function Matrix4x4InverseOld(var mr:TKraftMatrix4x4;const ma:TKraftMatrix4x4):boolean;
-function Matrix4x4TermInverseOld(const ma:TKraftMatrix4x4):TKraftMatrix4x4;
-function Matrix4x4GetSubMatrix3x3(const m:TKraftMatrix4x4;i,j:longint):TKraftMatrix3x3;
-function Matrix4x4Frustum(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4Ortho(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4OrthoLH(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4OrthoRH(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4OrthoOffCenterLH(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4OrthoOffCenterRH(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4Perspective(fovy,Aspect,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
-function Matrix4x4LookAt(const Eye,Center,Up:TKraftVector3):TKraftMatrix4x4;
-function Matrix4x4Fill(const Eye,RightVector,UpVector,ForwardVector:TKraftVector3):TKraftMatrix4x4;
-function Matrix4x4ConstructX(const xAxis:TKraftVector3):TKraftMatrix4x4;
-function Matrix4x4ConstructY(const yAxis:TKraftVector3):TKraftMatrix4x4;
-function Matrix4x4ConstructZ(const zAxis:TKraftVector3):TKraftMatrix4x4;
-function Matrix4x4ProjectionMatrixClip(const ProjectionMatrix:TKraftMatrix4x4;const ClipPlane:TKraftPlane):TKraftMatrix4x4;
+function Matrix4x4Set({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4Rotation({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4RotateX(const Angle:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4RotateY(const Angle:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4RotateZ(const Angle:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4Rotate(const Angle:TKraftScalar;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif}Axis:TKraftVector3):TKraftMatrix4x4; overload; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4Translate(const x,y,z:TKraftScalar):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Translate({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Translate({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4Translate(var m:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3); overload; {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4Translate(var m:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4); overload; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Scale(const sx,sy,sz:TKraftScalar):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Scale({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} s:TKraftVector3):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4Add(var m1:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix4x4); {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4Sub(var m1:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix4x4); {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4Mul(var m1:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix4x4); overload; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Matrix4x4Mul(var mr:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4); overload; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4TermAdd({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4TermSub({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4TermMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4TermMulInverted({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4TermMulSimpleInverted({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4TermMulTranspose({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4Lerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} a,b:TKraftMatrix4x4;const x:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4Slerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} a,b:TKraftMatrix4x4;const x:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Matrix4x4ScalarMul(var m:TKraftMatrix4x4;const s:TKraftScalar); {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4Transpose(var m:TKraftMatrix4x4); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4TermTranspose({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4Determinant({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Matrix4x4SetColumn(var m:TKraftMatrix4x4;const c:TKraftInt32;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4); {$ifdef caninline}inline;{$endif}
+function Matrix4x4GetColumn({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4;const c:TKraftInt32):TKraftVector4; {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4SetRow(var m:TKraftMatrix4x4;const r:TKraftInt32;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4); {$ifdef caninline}inline;{$endif}
+function Matrix4x4GetRow({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4;const r:TKraftInt32):TKraftVector4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Compare({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):boolean; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4LengthSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftScalar;
+function Matrix4x4Length({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4DifferenceSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftScalar;
+function Matrix4x4Difference({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure Matrix4x4Reflect(var mr:TKraftMatrix4x4;Plane:TKraftPlane); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4TermReflect(Plane:TKraftPlane):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4SimpleInverse(var mr:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):boolean; {$ifdef caninline}inline;{$endif}
+function Matrix4x4TermSimpleInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Inverse(var mr:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):boolean; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4TermInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4InverseOld(var mr:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):boolean; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4TermInverseOld({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4GetSubMatrix3x3({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4;const i,j:TKraftInt32):TKraftMatrix3x3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4Frustum(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4Ortho(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4OrthoLH(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4OrthoRH(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4OrthoOffCenterLH(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4OrthoOffCenterRH(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4Perspective(const fovy,Aspect,zNear,zFar:TKraftScalar):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4LookAt({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Eye,Center,Up:TKraftVector3):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4Fill({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Eye,RightVector,UpVector,ForwardVector:TKraftVector3):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4ConstructX({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} xAxis:TKraftVector3):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4ConstructY({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} yAxis:TKraftVector3):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4ConstructZ({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} zAxis:TKraftVector3):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function Matrix4x4ProjectionMatrixClip({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ProjectionMatrix:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ClipPlane:TKraftPlane):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
 
 procedure PlaneNormalize(var Plane:TKraftPlane); {$ifdef caninline}inline;{$endif}
-function PlaneMatrixMul(const Plane:TKraftPlane;const Matrix:TKraftMatrix4x4):TKraftPlane;
-function PlaneTransform(const Plane:TKraftPlane;const Matrix:TKraftMatrix4x4):TKraftPlane; overload;
-function PlaneTransform(const Plane:TKraftPlane;const Matrix,NormalMatrix:TKraftMatrix4x4):TKraftPlane; overload;
-function PlaneFastTransform(const Plane:TKraftPlane;const Matrix:TKraftMatrix4x4):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
-function PlaneVectorDistance(const Plane:TKraftPlane;const Point:TKraftVector3):TKraftScalar; overload; {$ifdef caninline}inline;{$endif}
-function PlaneVectorDistance(const Plane:TKraftPlane;const Point:TKraftVector4):TKraftScalar; overload; {$ifdef caninline}inline;{$endif}
-function PlaneFromPoints(const p1,p2,p3:TKraftVector3):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
-function PlaneFromPoints(const p1,p2,p3:TKraftVector4):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
+function PlaneMatrixMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Matrix:TKraftMatrix4x4):TKraftPlane; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function PlaneTransform({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Matrix:TKraftMatrix4x4):TKraftPlane; overload; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function PlaneTransform({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Matrix,NormalMatrix:TKraftMatrix4x4):TKraftPlane; overload; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function PlaneFastTransform({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Matrix:TKraftMatrix4x4):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
+function PlaneVectorDistance({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Point:TKraftVector3):TKraftScalar; overload; {$ifdef caninline}inline;{$endif}
+function PlaneVectorDistance({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Point:TKraftVector4):TKraftScalar; overload; {$ifdef caninline}inline;{$endif}
+function PlaneFromPoints({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} p1,p2,p3:TKraftVector3):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
+function PlaneFromPoints({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} p1,p2,p3:TKraftVector4):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
 
-function QuaternionNormal(const AQuaternion:TKraftQuaternion):TKraftScalar;
-function QuaternionLengthSquared(const AQuaternion:TKraftQuaternion):TKraftScalar;
-procedure QuaternionNormalize(var AQuaternion:TKraftQuaternion);
-function QuaternionTermNormalize(const AQuaternion:TKraftQuaternion):TKraftQuaternion;
-function QuaternionNeg(const AQuaternion:TKraftQuaternion):TKraftQuaternion;
-function QuaternionConjugate(const AQuaternion:TKraftQuaternion):TKraftQuaternion;
-function QuaternionInverse(const AQuaternion:TKraftQuaternion):TKraftQuaternion;
-function QuaternionAdd(const q1,q2:TKraftQuaternion):TKraftQuaternion;
-function QuaternionSub(const q1,q2:TKraftQuaternion):TKraftQuaternion;
-function QuaternionScalarMul(const q:TKraftQuaternion;const s:TKraftScalar):TKraftQuaternion;
-function QuaternionMul(const q1,q2:TKraftQuaternion):TKraftQuaternion;
-function QuaternionRotateAroundAxis(const q1,q2:TKraftQuaternion):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
-function QuaternionFromAxisAngle(const Axis:TKraftVector3;Angle:TKraftScalar):TKraftQuaternion; overload; {$ifdef caninline}inline;{$endif}
+function QuaternionNormal({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionLengthSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftScalar; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure QuaternionNormalize(var AQuaternion:TKraftQuaternion); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionTermNormalize({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionNeg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionConjugate({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionAdd({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionSub({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionScalarMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q:TKraftQuaternion;const s:TKraftScalar):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionRotateAroundAxis({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function QuaternionFromAxisAngle({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Axis:TKraftVector3;const Angle:TKraftScalar):TKraftQuaternion; overload; {$ifdef caninline}inline;{$endif}
 function QuaternionFromSpherical(const Latitude,Longitude:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
-procedure QuaternionToSpherical(const q:TKraftQuaternion;var Latitude,Longitude:TKraftScalar);
+procedure QuaternionToSpherical({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q:TKraftQuaternion;var Latitude,Longitude:TKraftScalar); {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
 function QuaternionFromAngles(const Pitch,Yaw,Roll:TKraftScalar):TKraftQuaternion; overload; {$ifdef caninline}inline;{$endif}
-function QuaternionFromAngles(const Angles:TKraftAngles):TKraftQuaternion; overload; {$ifdef caninline}inline;{$endif}
-function QuaternionFromMatrix3x3(const AMatrix:TKraftMatrix3x3):TKraftQuaternion;
-function QuaternionToMatrix3x3(AQuaternion:TKraftQuaternion):TKraftMatrix3x3;
-function QuaternionFromTangentSpaceMatrix3x3(AMatrix:TKraftMatrix3x3):TKraftQuaternion;
-function QuaternionToTangentSpaceMatrix3x3(AQuaternion:TKraftQuaternion):TKraftMatrix3x3;
-function QuaternionFromMatrix4x4(const AMatrix:TKraftMatrix4x4):TKraftQuaternion;
-function QuaternionToMatrix4x4(AQuaternion:TKraftQuaternion):TKraftMatrix4x4;
-function QuaternionToEuler(const AQuaternion:TKraftQuaternion):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function QuaternionFromAngles({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Angles:TKraftAngles):TKraftQuaternion; overload; {$ifdef caninline}inline;{$endif}
+function QuaternionFromMatrix3x3({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AMatrix:TKraftMatrix3x3):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionToMatrix3x3(AQuaternion:TKraftQuaternion):TKraftMatrix3x3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionFromTangentSpaceMatrix3x3(AMatrix:TKraftMatrix3x3):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionToTangentSpaceMatrix3x3(AQuaternion:TKraftQuaternion):TKraftMatrix3x3; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionFromMatrix4x4({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AMatrix:TKraftMatrix4x4):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionToMatrix4x4(AQuaternion:TKraftQuaternion):TKraftMatrix4x4; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionToEuler({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftVector3; {$ifdef caninline}inline;{$endif}
 procedure QuaternionToAxisAngle(AQuaternion:TKraftQuaternion;var Axis:TKraftVector3;var Angle:TKraftScalar); {$ifdef caninline}inline;{$endif}
 function QuaternionGenerator(AQuaternion:TKraftQuaternion):TKraftVector3; {$ifdef caninline}inline;{$endif}
-function QuaternionLerp(const q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
-function QuaternionNlerp(const q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
-function QuaternionSlerp(const q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion;
-function QuaternionIntegrate(const q:TKraftQuaternion;const Omega:TKraftVector3;const DeltaTime:TKraftScalar):TKraftQuaternion;
-function QuaternionSpin(const q:TKraftQuaternion;const Omega:TKraftVector3;const DeltaTime:TKraftScalar):TKraftQuaternion; overload;
-procedure QuaternionDirectSpin(var q:TKraftQuaternion;const Omega:TKraftVector3;const DeltaTime:TKraftScalar); overload;
-function QuaternionFromToRotation(const FromDirection,ToDirection:TKraftVector3):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function QuaternionLerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function QuaternionNlerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function QuaternionSlerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionIntegrate({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q:TKraftQuaternion;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Omega:TKraftVector3;const DeltaTime:TKraftScalar):TKraftQuaternion; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionSpin({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q:TKraftQuaternion;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Omega:TKraftVector3;const DeltaTime:TKraftScalar):TKraftQuaternion; overload; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+procedure QuaternionDirectSpin(var q:TKraftQuaternion;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Omega:TKraftVector3;const DeltaTime:TKraftScalar); overload; {$if defined(fpc) and defined(SIMDASM) and defined(cpuamd64) and not defined(Windows)}ms_abi_default;{$ifend}
+function QuaternionFromToRotation({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} FromDirection,ToDirection:TKraftVector3):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
 
-function InertiaTensorTransform(const Inertia,Transform:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
-function InertiaTensorParallelAxisTheorem(const Center:TKraftVector3;const Mass:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Modulo(x,y:TKraftScalar):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function ModuloPos(x,y:TKraftScalar):TKraftScalar; {$ifdef caninline}inline;{$endif}
+
+function AngleClamp(a:TKraftScalar):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function AngleDiff(a,b:TKraftScalar):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function AngleLerp(a,b,x:TKraftScalar):TKraftScalar; {$ifdef caninline}inline;{$endif}
+
+function InertiaTensorTransform({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Inertia,Transform:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function InertiaTensorParallelAxisTheorem({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Center:TKraftVector3;const Mass:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 
 implementation
 
@@ -3755,9 +4310,9 @@ const daabbtNULLNODE=-1;
 
       AABBExtensionVector:TKraftVector3=(x:AABB_EXTENSION;y:AABB_EXTENSION;z:AABB_EXTENSION);
 
-      AABBEdgeIndices:array[0..23] of longint=(0,1,1,2,2,3,3,0,7,6,6,5,5,4,4,7,1,5,6,2,3,7,4,0);
+      AABBEdgeIndices:array[0..23] of TKraftInt32=(0,1,1,2,2,3,3,0,7,6,6,5,5,4,4,7,1,5,6,2,3,7,4,0);
 
-      AABBTriangleVerticesIndices:array[0..(6*3*2)-1] of longint=
+      AABBTriangleVerticesIndices:array[0..(6*3*2)-1] of TKraftInt32=
        (
         0,1,2, 2,3,0,
         7,6,5, 5,4,7,
@@ -3779,12 +4334,14 @@ const daabbtNULLNODE=-1;
 
       pi2=pi*2.0;
 
-{$ifdef cpu386}
-      {%H-}MMXExt:boolean=false;
-      {%H-}SSEExt:boolean=false;
-      {%H-}SSE2Ext:boolean=false;
-      {%H-}SSE3Ext:boolean=false;
-{$endif}
+      DoubleSidedTriangleVertexOrderIndices:array[boolean,0..2] of TKraftInt32=((0,1,2),(2,1,0));
+
+{$if defined(cpu386) or defined(cpuamd64)}
+var {%H-}MMXExt:longbool=false;
+    {%H-}SSEExt:longbool=false;
+    {%H-}SSE2Ext:longbool=false;
+    {%H-}SSE3Ext:longbool=false;
+{$ifend}
 
 {$ifdef fpc}
  {$undef OldDelphi}
@@ -3803,19 +4360,24 @@ type qword=uint64;
  {$endif}
 {$endif}
 {$ifdef OldDelphi}
-type qword=int64;
+type qword=TKraftInt64;
 {$ifdef cpu64}
      ptruint=qword;
-     ptrint=int64;
+     ptrint=TKraftInt64;
 {$else}
-     ptruint=longword;
-     ptrint=longint;
+     ptruint=TKraftUInt32;
+     ptrint=TKraftInt32;
 {$endif}
 {$endif}
 
+function SpatialHashVector(const aX,aY,aZ:TKraftInt32{;const aW:TKraftInt32=0}):TKraftUInt32;
+begin
+ result:=(((TKraftUInt32(aX)*73856093) xor (TKraftUInt32(aY)*{19349663}19349669)) xor (TKraftUInt32(aZ)*83492791)) {xor (TKraftUInt32(aW)*67867979)};
+end;
+
 {$if defined(fpc) and (defined(cpu386) or defined(cpux64) or defined(cpuamd64))}
 // For to avoid "Fatal: Internal error 200604201" at the FreePascal compiler, when >= -O2 is used
-function Sign(const aValue:single):longint;
+function Sign(const aValue:single):TKraftInt32;
 begin
  if aValue<0.0 then begin
   result:=-1;
@@ -3827,58 +4389,76 @@ begin
 end;
 {$ifend}
 
+function SignNonZero(const aValue:TKraftScalar):TKraftInt32; overload; {$ifdef caninline}inline;{$endif}
+begin
+ if aValue<0.0 then begin
+  result:=-1;
+ end else begin
+  result:=1;
+ end;
+end;
+
+function SignNonZero(const aValue:TKraftInt32):TKraftInt32; overload; {$ifdef caninline}inline;{$endif}
+begin
+ if aValue<0 then begin
+  result:=-1;
+ end else begin
+  result:=1;
+ end;
+end;
+
 type TUInt128=packed record
 {$ifdef BIG_ENDIAN}
-      case byte of
+      case TKraftUInt8 of
        0:(
-        Hi,Lo:qword;
+        Hi,Lo:TKraftUInt64;
        );
        1:(
-        Q3,Q2,Q1,Q0:longword;
+        Q3,Q2,Q1,Q0:TKraftUInt32;
        );
 {$else}
-      case byte of
+      case TKraftUInt8 of
        0:(
-        Lo,Hi:qword;
+        Lo,Hi:TKraftUInt64;
        );
        1:(
-        Q0,Q1,Q2,Q3:longword;
+        Q0,Q1,Q2,Q3:TKraftUInt32;
        );
 {$endif}
      end;
 
-function AddWithCarry(const a,b:longword;var Carry:longword):longword; {$ifdef caninline}inline;{$endif}
-var r:qword;
+function AddWithCarry(const a,b:TKraftUInt32;var Carry:TKraftUInt32):TKraftUInt32; {$ifdef caninline}inline;{$endif}
+var r:TKraftUInt64;
 begin
- r:=qword(a)+qword(b)+qword(Carry);
+ r:=TKraftUInt64(a)+TKraftUInt64(b)+TKraftUInt64(Carry);
  Carry:=(r shr 32) and 1;
  result:=r and $ffffffff;
 end;
 
-function MultiplyWithCarry(const a,b:longword;var Carry:longword):longword; {$ifdef caninline}inline;{$endif}
-var r:qword;
+function MultiplyWithCarry(const a,b:TKraftUInt32;var Carry:TKraftUInt32):TKraftUInt32; {$ifdef caninline}inline;{$endif}
+var r:TKraftUInt64;
 begin
- r:=(qword(a)*qword(b))+qword(Carry);
+ r:=(TKraftUInt64(a)*TKraftUInt64(b))+TKraftUInt64(Carry);
  Carry:=r shr 32;
  result:=r and $ffffffff;
 end;
 
-function DivideWithRemainder(const a,b:longword;var Remainder:longword):longword; {$ifdef caninline}inline;{$endif}
-var r:qword;
+function DivideWithRemainder(const a,b:TKraftUInt32;var Remainder:TKraftUInt32):TKraftUInt32; {$ifdef caninline}inline;{$endif}
+var r:TKraftUInt64;
 begin
- r:=(qword(Remainder) shl 32) or a;
+ r:=(TKraftUInt64(Remainder) shl 32) or a;
  Remainder:=r mod b;
  result:=r div b;
 end;
 
-procedure UInt64ToUInt128(var Dest:TUInt128;const x:qword); {$ifdef caninline}inline;{$endif}
+procedure UInt64ToUInt128(var Dest:TUInt128;const x:TKraftUInt64); {$ifdef caninline}inline;{$endif}
 begin
  Dest.Hi:=0;
  Dest.Lo:=x;
 end;
 
 procedure UInt128Add(var Dest:TUInt128;const x,y:TUInt128); {$ifdef caninline}inline;{$endif}
-var a,b,c,d:qword;
+var a,b,c,d:TKraftUInt64;
 begin
  a:=x.Hi shr 32;
  b:=x.Hi and $ffffffff;
@@ -3893,9 +4473,9 @@ begin
 end;
 
 procedure UInt128Mul(var Dest:TUInt128;const x,y:TUInt128); {$ifdef caninline}inline;{$endif}
-var c,xw,yw,dw:array[0..15] of longword;
-    i,j,k:longint;
-    v:longword;
+var c,xw,yw,dw:array[0..15] of TKraftUInt32;
+    i,j,k:TKraftInt32;
+    v:TKraftUInt32;
 begin
  for i:=0 to 15 do begin
   c[i]:=0;
@@ -3931,14 +4511,14 @@ begin
  for i:=0 to 7 do begin
   dw[i]:=c[8+i];
  end;
- Dest.Hi:=(qword(dw[0] and $ffff) shl 48) or (qword(dw[1] and $ffff) shl 32) or (qword(dw[2] and $ffff) shl 16) or (qword(dw[3] and $ffff) shl 0);
- Dest.Lo:=(qword(dw[4] and $ffff) shl 48) or (qword(dw[5] and $ffff) shl 32) or (qword(dw[6] and $ffff) shl 16) or (qword(dw[7] and $ffff) shl 0);
+ Dest.Hi:=(TKraftUInt64(dw[0] and $ffff) shl 48) or (TKraftUInt64(dw[1] and $ffff) shl 32) or (TKraftUInt64(dw[2] and $ffff) shl 16) or (TKraftUInt64(dw[3] and $ffff) shl 0);
+ Dest.Lo:=(TKraftUInt64(dw[4] and $ffff) shl 48) or (TKraftUInt64(dw[5] and $ffff) shl 32) or (TKraftUInt64(dw[6] and $ffff) shl 16) or (TKraftUInt64(dw[7] and $ffff) shl 0);
 end;
 
-procedure UInt128Div64(var Dest:TUInt128;const Dividend:TUInt128;Divisor:qword); {$ifdef caninline}inline;{$endif}
+procedure UInt128Div64(var Dest:TUInt128;const Dividend:TUInt128;Divisor:TKraftUInt64); {$ifdef caninline}inline;{$endif}
 var Quotient:TUInt128;
-    Remainder:qword;
-    Bit:longint;
+    Remainder:TKraftUInt64;
+    Bit:TKraftInt32;
 begin
  Quotient:=Dividend;
  Remainder:=0;
@@ -3946,8 +4526,8 @@ begin
   Remainder:=(Remainder shl 1) or (ord((Quotient.Hi and $8000000000000000)<>0) and 1);
   Quotient.Hi:=(Quotient.Hi shl 1) or (Quotient.Lo shr 63);
   Quotient.Lo:=Quotient.Lo shl 1;
-  if (longword(Remainder shr 32)>longword(Divisor shr 32)) or
-     ((longword(Remainder shr 32)=longword(Divisor shr 32)) and (longword(Remainder and $ffffffff)>=longword(Divisor and $ffffffff))) then begin
+  if (TKraftUInt32(Remainder shr 32)>TKraftUInt32(Divisor shr 32)) or
+     ((TKraftUInt32(Remainder shr 32)=TKraftUInt32(Divisor shr 32)) and (TKraftUInt32(Remainder and $ffffffff)>=TKraftUInt32(Divisor and $ffffffff))) then begin
    dec(Remainder,Divisor);
    Quotient.Lo:=Quotient.Lo or 1;
   end;
@@ -3955,18 +4535,18 @@ begin
  Dest:=Quotient;
 end;
 
-procedure UInt128Mul64(var Dest:TUInt128;u,v:qword); {$ifdef caninline}inline;{$endif}
-var u0,u1,v0,v1,k,t,w0,w1,w2:qword;
+procedure UInt128Mul64(var Dest:TUInt128;u,v:TKraftUInt64); {$ifdef caninline}inline;{$endif}
+var u0,u1,v0,v1,k,t,w0,w1,w2:TKraftUInt64;
 begin
  u1:=u shr 32;
- u0:=u and qword($ffffffff);
+ u0:=u and TKraftUInt64($ffffffff);
  v1:=v shr 32;
- v0:=v and qword($ffffffff);
+ v0:=v and TKraftUInt64($ffffffff);
  t:=u0*v0;
- w0:=t and qword($ffffffff);
+ w0:=t and TKraftUInt64($ffffffff);
  k:=t shr 32;
  t:=(u1*v0)+k;
- w1:=t and qword($ffffffff);
+ w1:=t and TKraftUInt64($ffffffff);
  w2:=t shr 32;
  t:=(u0*v1)+w1;
  k:=t shr 32;
@@ -3974,7 +4554,7 @@ begin
  Dest.Hi:=((u1*v1)+w2)+k;
 end;
 
-function RoundUpToPowerOfTwo(x:longword):longword; {$ifdef caninline}inline;{$endif}
+function RoundUpToPowerOfTwo(x:TKraftUInt32):TKraftUInt32; {$ifdef caninline}inline;{$endif}
 begin
  dec(x);
  x:=x or (x shr 1);
@@ -3985,29 +4565,36 @@ begin
  result:=x+1;
 end;
 
-function SIMDGetFlags:longword; {$ifdef cpu386}assembler;
+function SIMDGetFlags:TKraftUInt32; {$if defined(cpu386) or defined(cpuamd64)}assembler;
+var Temp:TKraftUInt32;
 asm
- stmxcsr dword ptr result
+ stmxcsr dword ptr [Temp]
+ mov eax,dword ptr [Temp]
 end;
 {$else}
 begin
  result:=0;
 end;
-{$endif}
+{$ifend}
 
-procedure SIMDSetFlags(const Flags:longword); {$ifdef cpu386}register; assembler;
-var Temp:longword;
+procedure SIMDSetFlags(const Flags:TKraftUInt32); {$if defined(cpu386) or defined(cpuamd64)}assembler;
+var Temp:TKraftUInt32;
 asm
- mov dword ptr Temp,eax
- ldmxcsr dword ptr Temp
+{$if defined(cpu386)}
+ mov dword ptr [Temp],eax
+{$elseif defined(Windows)}
+ mov dword ptr [Temp],ecx
+{$else}
+ mov dword ptr [Temp],edi
+{$ifend}
+ ldmxcsr dword ptr [Temp]
 end;
 {$else}
 begin
 end;
-{$endif}
+{$ifend}
 
-procedure SIMDSetOurFlags;
-{$ifdef cpu386}
+procedure SIMDSetOurFlags;{$if defined(cpu386) or defined(cpuamd64)}assembler;
 // Flush to Zero=Bit 15
 // Underflow exception mask=Bit 11
 // Denormals are zeros=Bit 6
@@ -4022,90 +4609,146 @@ const DenormalsAreZero=1 shl 6;
       PrecisionMask=1 shl 12;
       FlushToZero=1 shl 15;
       SIMDFlags=InvalidOperationExceptionMask or DenormalExceptionMask or DivodeByZeroExceptionMask or OverflowExceptionMask or UnderflowExceptionMask or PrecisionMask or FlushToZero or DenormalsAreZero;
-      RoundToNearest=longword(longword($ffffffff) and not ((1 shl 13) or (1 shl 14)));
-var SIMDCtrl:longword;
-begin
- if SSEExt then begin
-  asm
-   push eax
-   stmxcsr dword ptr SIMDCtrl
-   mov eax,dword ptr SIMDCtrl
-   or eax,SIMDFlags
-   and eax,RoundToNearest
-   mov dword ptr SIMDCtrl,eax
-   ldmxcsr dword ptr SIMDCtrl
-   pop eax
-  end;
- end;
+      RoundToNearest=TKraftUInt32(TKraftUInt32($ffffffff) and not ((1 shl 13) or (1 shl 14)));
+var SIMDCtrl:TKraftUInt32;
+asm
+{$if defined(cpuamd64)}
+ push rax
+ mov eax,dword ptr [rip+SSEExt]
+{$else}
+ push eax
+ mov eax,dword ptr [SSEExt]
+{$ifend}
+ test eax,eax
+ jz @Skip
+  stmxcsr dword ptr SIMDCtrl
+  mov eax,dword ptr SIMDCtrl
+  or eax,SIMDFlags
+  and eax,RoundToNearest
+  mov dword ptr SIMDCtrl,eax
+  ldmxcsr dword ptr SIMDCtrl
+ @Skip:
+{$if defined(cpuamd64)}
+ pop rax
+{$else}
+ pop eax
+{$ifend}
 end;
 {$else}
 begin
 end;
-{$endif}
+{$ifend}
 
-procedure CheckCPU;
-{$ifdef cpu386}
-var Features,FeaturesExt:longword;
-{$endif}
-begin
-{$ifdef cpu386}
- Features:=0;
- FeaturesExt:=0;
- asm
-  pushad
+{$if defined(cpu386) or defined(cpuamd64) or defined(cpux86_64) or defined(cpux64)}
+type TCPUIDData=record
+      case TKraftUInt8 of
+       0:(
+        Data:array[0..3] of TKraftUInt32;
+       );
+       1:(
+        EAX,EBX,EDX,ECX:TKraftUInt32;
+       );
+       2:(
+        String_:array[0..15] of AnsiChar;
+       );
+      end;
 
-  // Check for CPUID opcode
-  pushfd
-  pop eax
-  mov edx,eax
-  xor eax,$200000
-  push eax
-  popfd
-  pushfd
-  pop eax
-  xor eax,edx
-  jz @NoCPUID
-   // Get cpu features per CPUID opcode
-   mov eax,1
-   cpuid
-   mov dword ptr FeaturesExt,ecx
-   mov dword ptr Features,edx
-  @NoCPUID:
-  popad
- end;
- MMXExt:=(Features and $00800000)<>0;
- SSEExt:=(Features and $02000000)<>0;
- SSE2Ext:=(Features and $04000000)<>0;
- SSE3Ext:=(FeaturesExt and $00000001)<>0;
+      PCPUIDData=^TCPUIDData;
+
+procedure GetCPUID(Value:TKraftUInt32;out Data:TCPUIDData); assembler;
+asm
+{$if defined(cpuamd64) or defined(cpux86_64) or defined(cpux64)}
+ push rbx
+{$if defined(Windows) or defined(Win32) or defined(Win64)}
+ // Win64 ABI (rcx, rdx, ...)
+ mov eax,ecx
+ mov r8,rdx
 {$else}
-{MMXExt:=false;
- SSEExt:=false;
- SSE2Ext:=false;
- SSE3Ext:=false;{}
-{$endif}
+ // SysV x64 ABI (rdi, rsi, ...)
+ mov eax,edi
+ mov r8,rsi
+{$ifend}
+{$else}
+ // register (eax, edx, ...)
+ push ebx
+ push edi
+ mov edi,edx
+{$ifend}
+ cpuid
+{$if defined(cpuamd64) or defined(cpux86_64) or defined(cpux64)}
+ mov dword ptr [r8+0],eax
+ mov dword ptr [r8+4],ebx
+ mov dword ptr [r8+8],edx
+ mov dword ptr [r8+12],ecx
+ pop rbx
+{$else}
+ mov dword ptr [edi+0],eax
+ mov dword ptr [edi+4],ebx
+ mov dword ptr [edi+8],edx
+ mov dword ptr [edi+12],ecx
+ pop edi
+ pop ebx
+{$ifend}
 end;
+{$ifend}
 
-function Vector2(x,y:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
+procedure CheckCPU;{$if defined(cpu386) or defined(cpuamd64)}
+var Data:TCPUIDData;
+begin
+ GetCPUID(1,Data);
+ MMXExt:=(Data.EDX and $00800000)<>0;
+ SSEExt:=(Data.EDX and $02000000)<>0;
+ SSE2Ext:=(Data.EDX and $04000000)<>0;
+ SSE3Ext:=(Data.ECX and $00000001)<>0;
+end;
+{$else}
+begin
+end;
+{$ifend}
+
+function Vector2(const x,y:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=x;
  result.y:=y;
 end;
 
-function Vector3(x,y,z:TKraftScalar):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3(const x,y,z:TKraftScalar):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=x;
  result.y:=y;
  result.z:=z;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector3(const v:TKraftVector4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+function Vector3({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftRawVector3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
+begin
+ result.RawVector:=v;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
+end;
+
+function Vector3({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=v.x;
  result.y:=v.y;
  result.z:=v.z;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Matrix3x3(const m:TKraftMatrix4x4):TKraftMatrix3x3; overload; {$ifdef caninline}inline;{$endif}
+function Vector4(const x,y,z,w:TKraftScalar):TKraftVector4; overload; {$ifdef caninline}inline;{$endif}
+begin
+ result.x:=x;
+ result.y:=y;
+ result.z:=z;
+ result.w:=w;
+end;
+
+function Matrix3x3({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftMatrix3x3; overload; {$ifdef caninline}inline;{$endif}
 begin
  result[0,0]:=m[0,0];
  result[0,1]:=m[0,1];
@@ -4127,13 +4770,13 @@ begin
 {$endif}
 end;
 
-function Plane(Normal:TKraftVector3;Distance:TKraftScalar):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
+function Plane({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif}Normal:TKraftVector3;const Distance:TKraftScalar):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
 begin
  result.Normal:=Normal;
  result.Distance:=Distance;
 end;
 
-function Quaternion(w,x,y,z:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function Quaternion(const w,x,y,z:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
 begin
  result.w:=w;
  result.x:=x;
@@ -4141,85 +4784,85 @@ begin
  result.z:=z;
 end;
 
-function Vector2Compare(const v1,v2:TKraftVector2):boolean; {$ifdef caninline}inline;{$endif}
+function Vector2Compare({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):boolean; {$ifdef caninline}inline;{$endif}
 begin
  result:=(abs(v1.x-v2.x)<EPSILON) and (abs(v1.y-v2.y)<EPSILON);
 end;
 
-function Vector2CompareEx(const v1,v2:TKraftVector2;const Threshold:TKraftScalar=EPSILON):boolean; {$ifdef caninline}inline;{$endif}
+function Vector2CompareEx({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2;const Threshold:TKraftScalar=EPSILON):boolean; {$ifdef caninline}inline;{$endif}
 begin
  result:=(abs(v1.x-v2.x)<Threshold) and (abs(v1.y-v2.y)<Threshold);
 end;
 
-function Vector2Add(const v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Add({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=v1.x+v2.x;
  result.y:=v1.y+v2.y;
 end;
 
-function Vector2Sub(const v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Sub({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=v1.x-v2.x;
  result.y:=v1.y-v2.y;
 end;
 
-function Vector2Avg(const v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Avg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=(v1.x+v2.x)*0.5;
  result.y:=(v1.y+v2.y)*0.5;
 end;
 
-function Vector2ScalarMul(const v:TKraftVector2;s:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2ScalarMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2;const s:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=v.x*s;
  result.y:=v.y*s;
 end;
 
-function Vector2Dot(const v1,v2:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector2Dot({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
 begin
  result:=(v1.x*v2.x)+(v1.y*v2.y);
 end;
 
-function Vector2Neg(const v:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Neg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=-v.x;
  result.y:=-v.y;
 end;
 
-procedure Vector2Scale(var v:TKraftVector2;sx,sy:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
+procedure Vector2Scale(var v:TKraftVector2;const sx,sy:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
 begin
  v.x:=v.x*sx;
  v.y:=v.y*sy;
 end;
 
-procedure Vector2Scale(var v:TKraftVector2;s:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
+procedure Vector2Scale(var v:TKraftVector2;const s:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
 begin
  v.x:=v.x*s;
  v.y:=v.y*s;
 end;
 
-function Vector2Mul(const v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Mul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=v1.x*v2.x;
  result.y:=v1.y*v2.y;
 end;
 
-function Vector2Length(const v:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector2Length({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
 begin
  result:=sqrt(sqr(v.x)+sqr(v.y));
 end;
 
-function Vector2Dist(const v1,v2:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector2Dist({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
 begin
  result:=Vector2Length(Vector2Sub(v2,v1));
 end;
 
-function Vector2LengthSquared(const v:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector2LengthSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
 begin
  result:=sqr(v.x)+sqr(v.y);
 end;
 
-function Vector2Angle(const v1,v2,v3:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector2Angle({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2,v3:TKraftVector2):TKraftScalar; {$ifdef caninline}inline;{$endif}
 var A1,A2:TKraftVector2;
     L1,L2:TKraftScalar;
 begin
@@ -4245,7 +4888,7 @@ begin
  end;
 end;
 
-function Vector2Norm(const v:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Norm({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2):TKraftVector2; {$ifdef caninline}inline;{$endif}
 var L:TKraftScalar;
 begin
  L:=Vector2Length(v);
@@ -4256,7 +4899,7 @@ begin
  end;
 end;
 
-procedure Vector2Rotate(var v:TKraftVector2;a:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
+procedure Vector2Rotate(var v:TKraftVector2;const a:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
 var r:TKraftVector2;
 begin
  r.x:=(v.x*cos(a))-(v.y*sin(a));
@@ -4264,7 +4907,7 @@ begin
  v:=r;
 end;
 
-procedure Vector2Rotate(var v:TKraftVector2;const Center:TKraftVector2;a:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
+procedure Vector2Rotate(var v:TKraftVector2;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Center:TKraftVector2;const a:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
 var V0,r:TKraftVector2;
 begin
  V0:=Vector2Sub(v,Center);
@@ -4273,7 +4916,7 @@ begin
  v:=Vector2Add(r,Center);
 end;
 
-procedure Vector2MatrixMul(var v:TKraftVector2;const m:TKraftMatrix2x2); {$ifdef caninline}inline;{$endif}
+procedure Vector2MatrixMul(var v:TKraftVector2;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix2x2); {$ifdef caninline}inline;{$endif}
 var t:TKraftVector2;
 begin
  t.x:=(m[0,0]*v.x)+(m[1,0]*v.y);
@@ -4281,13 +4924,13 @@ begin
  v:=t;
 end;
 
-function Vector2TermMatrixMul(const v:TKraftVector2;const m:TKraftMatrix2x2):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2TermMatrixMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector2;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix2x2):TKraftVector2; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=(m[0,0]*v.x)+(m[1,0]*v.y);
  result.y:=(m[0,1]*v.x)+(m[1,1]*v.y);
 end;
 
-function Vector2Lerp(const v1,v2:TKraftVector2;w:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
+function Vector2Lerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector2;const w:TKraftScalar):TKraftVector2; {$ifdef caninline}inline;{$endif}
 var iw:TKraftScalar;
 begin
  if w<0.0 then begin
@@ -4301,35 +4944,105 @@ begin
  end;
 end;
 
-{$ifdef SIMD}      
-function Vector3Flip(const v:TKraftVector3):TKraftVector3;
+function Vector3Flip({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=v.x;
  result.y:=v.z;
  result.z:=-v.y;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-const Vector3Mask:array[0..3] of longword=($ffffffff,$ffffffff,$ffffffff,$00000000);
+{$ifdef SIMD}
+const Vector3Mask:array[0..3] of TKraftUInt32=($ffffffff,$ffffffff,$ffffffff,$00000000);
+{$endif}
 
-function Vector3Abs(const v:TKraftVector3):TKraftVector3;
+//{$undef SIMDASM}
+
+function Vector3Abs({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3;
+{$if defined(SIMD) and defined(SIMDASM) and defined(cpu386)}assembler;
+asm
+ movss xmm0,dword ptr [v+0]
+ movss xmm1,dword ptr [v+4]
+ movss xmm2,dword ptr [v+8]
+ movlhps xmm0,xmm1
+ shufps xmm0,xmm2,$88
+ xorps xmm3,xmm3
+ xorps xmm1,xmm1
+ subps xmm1,xmm0
+ maxps xmm0,xmm1
+ movaps xmm1,xmm0
+ movaps xmm2,xmm0
+ shufps xmm1,xmm1,$55
+ shufps xmm2,xmm2,$aa
+ movss dword ptr [result+0],xmm0
+ movss dword ptr [result+4],xmm1
+ movss dword ptr [result+8],xmm2
+ movss dword ptr [result+12],xmm3
+end;
+{$elseif defined(SIMD) and defined(SIMDASM) and defined(cpuamd64)}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
+asm
+{$ifndef fpc}
+ .noframe
+{$endif}
+{$if defined(Windows)}
+ movss xmm0,dword ptr [v+0]
+ movss xmm1,dword ptr [v+4]
+ movss xmm2,dword ptr [v+8]
+{$else}
+ movss xmm0,dword ptr [rdi+0]
+ movss xmm1,dword ptr [rdi+4]
+ movss xmm2,dword ptr [rdi+8]
+{$ifend}
+ movlhps xmm0,xmm1
+ shufps xmm0,xmm2,$88
+ xorps xmm3,xmm3
+ xorps xmm1,xmm1
+ subps xmm1,xmm0
+ maxps xmm0,xmm1
+ movaps xmm1,xmm0
+ movaps xmm2,xmm0
+ shufps xmm1,xmm1,$55
+ shufps xmm2,xmm2,$aa
+{$if defined(Windows)}
+movss dword ptr [result+0],xmm0
+movss dword ptr [result+4],xmm1
+movss dword ptr [result+8],xmm2
+movss dword ptr [result+12],xmm3
+{$else}
+ movss dword ptr [rsi+0],xmm0
+ movss dword ptr [rsi+4],xmm1
+ movss dword ptr [rsi+8],xmm2
+ movss dword ptr [rsi+12],xmm3
+{$ifend}
+end;
+{$else}
 begin
  result.x:=abs(v.x);
  result.y:=abs(v.y);
  result.z:=abs(v.z);
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
+{$ifend}
 
-function Vector3Compare(const v1,v2:TKraftVector3):boolean;
+function Vector3Compare({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):boolean;
 begin
  result:=(abs(v1.x-v2.x)<EPSILON) and (abs(v1.y-v2.y)<EPSILON) and (abs(v1.z-v2.z)<EPSILON);
 end;
 
-function Vector3CompareEx(const v1,v2:TKraftVector3;const Threshold:TKraftScalar=EPSILON):boolean;
+function Vector3CompareEx({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3;const Threshold:TKraftScalar=EPSILON):boolean;
 begin
  result:=(abs(v1.x-v2.x)<Threshold) and (abs(v1.y-v2.y)<Threshold) and (abs(v1.z-v2.z)<Threshold);
 end;
 
-procedure Vector3DirectAdd(var v1:TKraftVector3;const v2:TKraftVector3); {$ifdef CPU386ASMForSinglePrecision}assembler;
+procedure Vector3DirectAdd(var v1:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v2:TKraftVector3); {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v1]
  movups xmm1,dqword ptr [v2]
  addps xmm0,xmm1
@@ -4340,11 +5053,17 @@ begin
  v1.x:=v1.x+v2.x;
  v1.y:=v1.y+v2.y;
  v1.z:=v1.z+v2.z;
-end;
+{$ifdef SIMD}
+ v1.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-procedure Vector3DirectSub(var v1:TKraftVector3;const v2:TKraftVector3); {$ifdef CPU386ASMForSinglePrecision}assembler;
+procedure Vector3DirectSub(var v1:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v2:TKraftVector3); {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v1]
  movups xmm1,dqword ptr [v2]
  subps xmm0,xmm1
@@ -4355,11 +5074,17 @@ begin
  v1.x:=v1.x-v2.x;
  v1.y:=v1.y-v2.y;
  v1.z:=v1.z-v2.z;
-end;
+{$ifdef SIMD}
+ v1.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3Add(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3Add({$ifdef USE_CONSTREF}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v1]
  movups xmm1,dqword ptr [v2]
  addps xmm0,xmm1
@@ -4370,11 +5095,17 @@ begin
  result.x:=v1.x+v2.x;
  result.y:=v1.y+v2.y;
  result.z:=v1.z+v2.z;
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3Sub(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3Sub({$ifdef USE_CONSTREF}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v1]
  movups xmm1,dqword ptr [v2]
  subps xmm0,xmm1
@@ -4385,15 +5116,25 @@ begin
  result.x:=v1.x-v2.x;
  result.y:=v1.y-v2.y;
  result.z:=v1.z-v2.z;
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3Avg(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3Avg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 const Half:TKraftVector3=(x:0.5;y:0.5;z:0.5;w:0.0);
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v1]
  movups xmm1,dqword ptr [v2]
+{$if defined(cpuamd64)}
+ movups xmm2,dqword ptr [rip+Half]
+{$else}
  movups xmm2,dqword ptr [Half]
+{$ifend}
  addps xmm0,xmm1
  mulps xmm0,xmm2
  movups dqword ptr [result],xmm0
@@ -4403,18 +5144,24 @@ begin
  result.x:=(v1.x+v2.x)*0.5;
  result.y:=(v1.y+v2.y)*0.5;
  result.z:=(v1.z+v2.z)*0.5;
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3Avg(const v1,v2,v3:TKraftVector3):TKraftVector3;
+function Vector3Avg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2,v3:TKraftVector3):TKraftVector3;
 begin
  result.x:=(v1.x+v2.x+v3.x)/3.0;
  result.y:=(v1.y+v2.y+v3.y)/3.0;
  result.z:=(v1.z+v2.z+v3.z)/3.0;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector3Avg(const va:PKraftVector3s;Count:longint):TKraftVector3;
-var i:longint;
+function Vector3Avg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} va:PKraftVector3s;Count:TKraftInt32):TKraftVector3;
+var i:TKraftInt32;
 begin
  result.x:=0.0;
  result.y:=0.0;
@@ -4429,10 +5176,16 @@ begin
   result.y:=result.y/Count;
   result.z:=result.z/Count;
  end;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector3ScalarMul(const v:TKraftVector3;const s:TKraftScalar):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3ScalarMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;const s:TKraftScalar):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]
  movss xmm1,dword ptr [s]
  shufps xmm1,xmm1,$00
@@ -4444,13 +5197,54 @@ begin
  result.x:=v.x*s;
  result.y:=v.y*s;
  result.z:=v.z*s;
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3Dot(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3Dot({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftScalar; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
+{$if defined(SIMD) and defined(cpu386_)}
 asm
+ movss xmm0,dword ptr [v1+0]
+ movss xmm1,dword ptr [v1+4]
+ movss xmm2,dword ptr [v1+8]
+ mulss xmm0,dword ptr [v2+0]
+ mulss xmm1,dword ptr [v2+4]
+ mulss xmm2,dword ptr [v2+8]
+ addss xmm0,xmm1
+ addss xmm0,xmm2
+ movss dword ptr [result],xmm0
+end;
+{$elseif defined(SIMD) and defined(cpux64_)}
+asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
+ movss xmm0,dword ptr [v1+0]
+ movss xmm1,dword ptr [v1+4]
+ movss xmm2,dword ptr [v1+8]
+ mulss xmm0,dword ptr [v2+0]
+ mulss xmm1,dword ptr [v2+4]
+ mulss xmm2,dword ptr [v2+8]
+ addss xmm0,xmm1
+ addss xmm0,xmm2
+ movss dword ptr [result],xmm0
+end;
+{$else}
+asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v1]
  movups xmm1,dqword ptr [v2]
+{$if defined(cpuamd64)}
+ movups xmm2,dqword ptr [rip+Vector3Mask]
+{$else}
+ movups xmm2,dqword ptr [Vector3Mask]
+{$ifend}
+ andps xmm0,xmm2
+ andps xmm1,xmm2
  mulps xmm0,xmm1         // xmm0 = ?, z1*z2, y1*y2, x1*x2
  movhlps xmm1,xmm0       // xmm1 = ?, ?, ?, z1*z2
  addss xmm1,xmm0         // xmm1 = ?, ?, ?, z1*z2 + x1*x2
@@ -4458,14 +5252,15 @@ asm
  addss xmm1,xmm0         // xmm1 = ?, ?, ?, z1*z2 + y1*y2 + x1*x2
  movss dword ptr [result],xmm1
 end;
+{$ifend}
 {$else}
 begin
  result:=(v1.x*v2.x)+(v1.y*v2.y)+(v1.z*v2.z);
 end;
-{$endif}
+{$ifend}
 
-function Vector3Cos(const v1,v2:TKraftVector3):TKraftScalar;
-var d:extended;
+function Vector3Cos({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftScalar;
+var d:TKraftScalar;
 begin
  d:=sqrt(Vector3LengthSquared(v1)*Vector3LengthSquared(v2));
  if d<>0.0 then begin
@@ -4475,8 +5270,19 @@ begin
  end
 end;
 
-function Vector3GetOneUnitOrthogonalVector(const v:TKraftVector3):TKraftVector3;
-var MinimumAxis:longint;
+function Vector3Project({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Vector,OnNormal:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
+var MagnitudeSquared:TKraftScalar;
+begin
+ MagnitudeSquared:=Vector3Dot(OnNormal,OnNormal);
+ if MagnitudeSquared<EPSILON then begin
+  result:=Vector3Origin;
+ end else begin
+  result:=Vector3ScalarMul(OnNormal,Vector3Dot(Vector,OnNormal)/MagnitudeSquared);
+ end;
+end;
+
+function Vector3GetOneUnitOrthogonalVector({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3;
+var MinimumAxis:TKraftInt32;
     l:TKraftScalar;
 begin
  if abs(v.x)<abs(v.y) then begin
@@ -4512,14 +5318,26 @@ begin
    result.z:=0.0;
   end;
  end;
+{$ifdef SIMD}
  result.w:=0.0;
+{$endif}
 end;
 
-function Vector3Cross(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3Cross({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
 {$ifdef SSEVector3CrossOtherVariant}
  movups xmm0,dqword ptr [v1]
  movups xmm2,dqword ptr [v2]
+{$if defined(cpuamd64)}
+ movups xmm1,dqword ptr [rip+Vector3Mask]
+{$else}
+ movups xmm1,dqword ptr [Vector3Mask]
+{$ifend}
+ andps xmm0,xmm1
+ andps xmm2,xmm1
  movaps xmm1,xmm0
  movaps xmm3,xmm2
  shufps xmm0,xmm0,$c9
@@ -4533,6 +5351,13 @@ asm
 {$else}
  movups xmm0,dqword ptr [v1]
  movups xmm1,dqword ptr [v2]
+{$if defined(cpuamd64)}
+ movups xmm2,dqword ptr [rip+Vector3Mask]
+{$else}
+ movups xmm2,dqword ptr [Vector3Mask]
+{$ifend}
+ andps xmm0,xmm2
+ andps xmm1,xmm2
  movaps xmm2,xmm0
  movaps xmm3,xmm1
  shufps xmm0,xmm0,$12
@@ -4550,11 +5375,17 @@ begin
  result.x:=(v1.y*v2.z)-(v1.z*v2.y);
  result.y:=(v1.z*v2.x)-(v1.x*v2.z);
  result.z:=(v1.x*v2.y)-(v1.y*v2.x);
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3Neg(const v:TKraftVector3):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3Neg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  xorps xmm0,xmm0
  movups xmm1,dqword ptr [v]
  subps xmm0,xmm1
@@ -4565,11 +5396,17 @@ begin
  result.x:=-v.x;
  result.y:=-v.y;
  result.z:=-v.z;
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-procedure Vector3Scale(var v:TKraftVector3;const sx,sy,sz:TKraftScalar); overload; {$ifdef CPU386ASMForSinglePrecision}assembler;
+procedure Vector3Scale(var v:TKraftVector3;const sx,sy,sz:TKraftScalar); overload; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movss xmm0,dword ptr [v+0]
  movss xmm1,dword ptr [v+4]
  movss xmm2,dword ptr [v+8]
@@ -4585,11 +5422,17 @@ begin
  v.x:=v.x*sx;
  v.y:=v.y*sy;
  v.z:=v.z*sz;
-end;
+{$ifdef SIMD}
+ v.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-procedure Vector3Scale(var v:TKraftVector3;const s:TKraftScalar); overload; {$ifdef CPU386ASMForSinglePrecision}assembler;
+procedure Vector3Scale(var v:TKraftVector3;const s:TKraftScalar); overload; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]
  movss xmm1,dword ptr [s]
  shufps xmm1,xmm1,$00
@@ -4601,11 +5444,17 @@ begin
  v.x:=v.x*s;
  v.y:=v.y*s;
  v.z:=v.z*s;
-end;
+{$ifdef SIMD}
+ v.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3Mul(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3Mul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v1]
  movups xmm1,dqword ptr [v2]
  mulps xmm0,xmm1
@@ -4616,11 +5465,38 @@ begin
  result.x:=v1.x*v2.x;
  result.y:=v1.y*v2.y;
  result.z:=v1.z*v2.z;
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3Length(const v:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3Div({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
+ movups xmm0,dqword ptr [v1]
+ movups xmm1,dqword ptr [v2]
+ divps xmm0,xmm1
+ movups dqword ptr [result],xmm0
+end;
+{$else}
+begin
+ result.x:=v1.x/v2.x;
+ result.y:=v1.y/v2.y;
+ result.z:=v1.z/v2.z;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
+end;
+{$ifend}
+
+function Vector3Length({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftScalar; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
+asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]
  mulps xmm0,xmm0         // xmm0 = ?, z*z, y*y, x*x
  movhlps xmm1,xmm0       // xmm1 = ?, ?, ?, z*z
@@ -4634,10 +5510,13 @@ end;
 begin
  result:=sqrt(sqr(v.x)+sqr(v.y)+sqr(v.z));
 end;
-{$endif}
+{$ifend}
 
-function Vector3Dist(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3Dist({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftScalar; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v1]
  movups xmm1,dqword ptr [v2]
  subps xmm0,xmm1
@@ -4653,10 +5532,13 @@ end;
 begin
  result:=sqrt(sqr(v2.x-v1.x)+sqr(v2.y-v1.y)+sqr(v2.z-v1.z));
 end;
-{$endif}
+{$ifend}
 
-function Vector3LengthSquared(const v:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3LengthSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftScalar; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]
  mulps xmm0,xmm0         // xmm0 = ?, z*z, y*y, x*x
  movhlps xmm1,xmm0       // xmm1 = ?, ?, ?, z*z
@@ -4669,10 +5551,13 @@ end;
 begin
  result:=sqr(v.x)+sqr(v.y)+sqr(v.z);
 end;
-{$endif}
+{$ifend}
 
-function Vector3DistSquared(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3DistSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3):TKraftScalar; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v1]
  movups xmm1,dqword ptr [v2]
  subps xmm0,xmm1
@@ -4687,9 +5572,9 @@ end;
 begin
  result:=sqr(v2.x-v1.x)+sqr(v2.y-v1.y)+sqr(v2.z-v1.z);
 end;
-{$endif}
+{$ifend}
 
-function Vector3Angle(const v1,v2,v3:TKraftVector3):TKraftScalar;
+function Vector3Angle({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2,v3:TKraftVector3):TKraftScalar;
 var A1,A2:TKraftVector3;
     L1,L2:TKraftScalar;
 begin
@@ -4704,8 +5589,11 @@ begin
  end;
 end;
 
-function Vector3LengthNormalize(var v:TKraftVector3):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3LengthNormalize(var v:TKraftVector3):TKraftScalar; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]
  movaps xmm1,xmm0
  subps xmm1,xmm0
@@ -4743,11 +5631,17 @@ begin
   v.y:=0.0;
   v.z:=0.0;
  end;
-end;
+{$ifdef SIMD}
+ v.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-procedure Vector3Normalize(var v:TKraftVector3); {$ifdef CPU386ASMForSinglePrecision}assembler;
+procedure Vector3Normalize(var v:TKraftVector3); {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]
  movaps xmm2,xmm0
  mulps xmm0,xmm0         // xmm0 = ?, z*z, y*y, x*x
@@ -4755,9 +5649,9 @@ asm
  addss xmm1,xmm0         // xmm1 = ?, ?, ?, z*z + x*x
  shufps xmm0,xmm0,$55    // xmm0 = ?, ?, ?, y*y
  addss xmm1,xmm0         // xmm1 = ?, ?, ?, z*z + y*y + x*x
- rsqrtss xmm0,xmm1
+ sqrtss xmm0,xmm1        // not rsqrtss! because rsqrtss has only 12-bit accuracy
  shufps xmm0,xmm0,$00
- mulps xmm2,xmm0
+ divps xmm2,xmm0
  movaps xmm1,xmm2
  subps xmm1,xmm2
  cmpps xmm1,xmm2,7
@@ -4778,11 +5672,17 @@ begin
   v.y:=0.0;
   v.z:=0.0;
  end;
-end;
+{$ifdef SIMD}
+ v.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-procedure Vector3NormalizeEx(var v:TKraftVector3); {$ifdef CPU386ASMForSinglePrecision}assembler;
+procedure Vector3NormalizeEx(var v:TKraftVector3); {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]
  movaps xmm2,xmm0
  mulps xmm0,xmm0         // xmm0 = ?, z*z, y*y, x*x
@@ -4790,7 +5690,7 @@ asm
  addss xmm1,xmm0         // xmm1 = ?, ?, ?, z*z + x*x
  shufps xmm0,xmm0,$55    // xmm0 = ?, ?, ?, y*y
  addss xmm1,xmm0         // xmm1 = ?, ?, ?, z*z + y*y + x*x
- sqrtss xmm0,xmm1
+ sqrtss xmm0,xmm1        // not rsqrtss! because rsqrtss has only 12-bit accuracy
  shufps xmm0,xmm0,$00
  divps xmm2,xmm0
  movaps xmm1,xmm2
@@ -4813,10 +5713,13 @@ begin
   v.y:=0.0;
   v.z:=0.0;
  end;
-end;
+{$ifdef SIMD}
+ v.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3SafeNorm(const v:TKraftVector3):TKraftVector3;
+function Vector3SafeNorm({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3;
 var l:TKraftScalar;
 begin
  l:=sqr(v.x)+sqr(v.y)+sqr(v.z);
@@ -4830,10 +5733,16 @@ begin
   result.y:=0.0;
   result.z:=0.0;
  end;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector3Norm(const v:TKraftVector3):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3Norm({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]
  movaps xmm2,xmm0
  mulps xmm0,xmm0         // xmm0 = ?, z*z, y*y, x*x
@@ -4841,9 +5750,9 @@ asm
  addss xmm1,xmm0         // xmm1 = ?, ?, ?, z*z + x*x
  shufps xmm0,xmm0,$55    // xmm0 = ?, ?, ?, y*y
  addss xmm1,xmm0         // xmm1 = ?, ?, ?, z*z + y*y + x*x
- rsqrtss xmm0,xmm1
+ sqrtss xmm0,xmm1        // not rsqrtss! because rsqrtss has only 12-bit accuracy
  shufps xmm0,xmm0,$00
- mulps xmm2,xmm0
+ divps xmm2,xmm0
  movaps xmm1,xmm2
  subps xmm1,xmm2
  cmpps xmm1,xmm2,7
@@ -4864,11 +5773,17 @@ begin
   result.y:=0.0;
   result.z:=0.0;
  end;
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3NormEx(const v:TKraftVector3):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3NormEx({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]
  movaps xmm2,xmm0
  mulps xmm0,xmm0         // xmm0 = ?, z*z, y*y, x*x
@@ -4876,7 +5791,7 @@ asm
  addss xmm1,xmm0         // xmm1 = ?, ?, ?, z*z + x*x
  shufps xmm0,xmm0,$55    // xmm0 = ?, ?, ?, y*y
  addss xmm1,xmm0         // xmm1 = ?, ?, ?, z*z + y*y + x*x
- sqrtss xmm0,xmm1
+ sqrtss xmm0,xmm1        // not rsqrtss! because rsqrtss has only 12-bit accuracy
  shufps xmm0,xmm0,$00
  divps xmm2,xmm0
  movaps xmm1,xmm2
@@ -4899,51 +5814,78 @@ begin
   result.y:=0.0;
   result.z:=0.0;
  end;
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-procedure Vector3RotateX(var v:TKraftVector3;a:TKraftScalar);
+procedure Vector3RotateX(var v:TKraftVector3;const a:TKraftScalar);
 var t:TKraftVector3;
 begin
  t.x:=v.x;
  t.y:=(v.y*cos(a))-(v.z*sin(a));
  t.z:=(v.y*sin(a))+(v.z*cos(a));
+{$ifdef SIMD}
+ t.w:=0.0;
+{$endif}
  v:=t;
 end;
 
-procedure Vector3RotateY(var v:TKraftVector3;a:TKraftScalar);
+procedure Vector3RotateY(var v:TKraftVector3;const a:TKraftScalar);
 var t:TKraftVector3;
 begin
  t.x:=(v.x*cos(a))+(v.z*sin(a));
  t.y:=v.y;
  t.z:=(v.z*cos(a))-(v.x*sin(a));
+{$ifdef SIMD}
+ t.w:=0.0;
+{$endif}
  v:=t;
 end;
 
-procedure Vector3RotateZ(var v:TKraftVector3;a:TKraftScalar);
+procedure Vector3RotateZ(var v:TKraftVector3;const a:TKraftScalar);
 var t:TKraftVector3;
 begin
  t.x:=(v.x*cos(a))-(v.y*sin(a));
  t.y:=(v.x*sin(a))+(v.y*cos(a));
  t.z:=v.z;
+{$ifdef SIMD}
+ t.w:=0.0;
+{$endif}
  v:=t;
 end;
 
-procedure Vector3MatrixMul(var v:TKraftVector3;const m:TKraftMatrix3x3); overload;
+procedure Vector3MatrixMul(var v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3); overload;
 var t:TKraftVector3;
 begin
  t.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z);
  t.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z);
  t.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z);
+{$ifdef SIMD}
+ t.w:=0.0;
+{$endif}
  v:=t;
 end;
 
-procedure Vector3MatrixMul(var v:TKraftVector3;const m:TKraftMatrix4x4); overload; {$ifdef CPU386ASMForSinglePrecision}assembler;
+procedure Vector3MatrixMul(var v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4); overload; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler;
 const cOne:array[0..3] of TKraftScalar=(0.0,0.0,0.0,1.0);
+{$if defined(cpuamd64) and defined(Windows)}
+var StackSave0,StackSave1:array[0..3] of single;
+{$ifend}
 asm
+{$if defined(cpuamd64) and defined(Windows)}
+ movups dqword ptr [StackSave0],xmm6
+ movups dqword ptr [StackSave1],xmm7
+{$ifend}
  movups xmm0,dqword ptr [v]     // d c b a
+{$if defined(cpuamd64)}
+ movups xmm1,dqword ptr [rip+Vector3Mask]
+ movups xmm2,dqword ptr [rip+cOne]
+{$else}
  movups xmm1,dqword ptr [Vector3Mask]
  movups xmm2,dqword ptr [cOne]
+{$ifend}
  andps xmm0,xmm1
  addps xmm0,xmm2
  movaps xmm1,xmm0               // d c b a
@@ -4965,6 +5907,10 @@ asm
  addps xmm2,xmm3
  addps xmm0,xmm2
  movups dqword ptr [v],xmm0
+{$if defined(cpuamd64) and defined(Windows)}
+ movups xmm6,dqword ptr [StackSave0]
+ movups xmm7,dqword ptr [StackSave1]
+{$ifend}
 end;
 {$else}
 var t:TKraftVector3;
@@ -4972,20 +5918,26 @@ begin
  t.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z)+m[3,0];
  t.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z)+m[3,1];
  t.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z)+m[3,2];
+{$ifdef SIMD}
+ t.w:=0.0;
+{$endif}
  v:=t;
 end;
-{$endif}
+{$ifend}
 
-procedure Vector3MatrixMulBasis(var v:TKraftVector3;const m:TKraftMatrix4x4); overload;
+procedure Vector3MatrixMulBasis(var v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4); overload;
 var t:TKraftVector3;
 begin
  t.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z);
  t.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z);
  t.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z);
+{$ifdef SIMD}
+ t.w:=0.0;
+{$endif}
  v:=t;
 end;
 
-procedure Vector3MatrixMulInverted(var v:TKraftVector3;const m:TKraftMatrix4x4); overload;
+procedure Vector3MatrixMulInverted(var v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4); overload;
 var p,t:TKraftVector3;
 begin
  p.x:=v.x-m[3,0];
@@ -4994,12 +5946,15 @@ begin
  t.x:=(m[0,0]*p.x)+(m[0,1]*p.y)+(m[0,2]*p.z);
  t.y:=(m[1,0]*p.x)+(m[1,1]*p.y)+(m[1,2]*p.z);
  t.z:=(m[2,0]*p.x)+(m[2,1]*p.y)+(m[2,2]*p.z);
+{$ifdef SIMD}
+ t.w:=0.0;
+{$endif}
  v:=t;
 end;
 
 (*
 function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload; {$ifdef CPU386ASMForSinglePrecision}assembler;
-const Mask:array[0..3] of longword=($ffffffff,$ffffffff,$ffffffff,$00000000);
+const Mask:array[0..3] of TKraftUInt32=($ffffffff,$ffffffff,$ffffffff,$00000000);
 asm
  movups xmm6,dqword ptr [Mask]
  movups xmm0,dqword ptr [v]     // d c b a
@@ -5029,14 +5984,27 @@ begin
  result.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z);
  result.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z);
  result.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z);
+ result.w:=0.0;
 end;
 {$endif}
 (**)
 
-function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 const cOne:array[0..3] of TKraftScalar=(0.0,0.0,0.0,1.0);
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]     // d c b a
+{$if defined(cpuamd64)}
+ movups xmm1,dqword ptr [rip+Vector3Mask]
+ movups xmm2,dqword ptr [rip+cOne]
+{$else}
+ movups xmm1,dqword ptr [Vector3Mask]
+ movups xmm2,dqword ptr [cOne]
+{$ifend}
+ andps xmm0,xmm1
+ addps xmm0,xmm2
  movaps xmm1,xmm0               // d c b a
  movaps xmm2,xmm0               // d c b a
  shufps xmm0,xmm0,$00           // a a a a 00000000b
@@ -5057,15 +6025,30 @@ begin
  result.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z);
  result.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z);
  result.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z);
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function Vector3TermMatrixMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; overload; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler;
 const cOne:array[0..3] of TKraftScalar=(0.0,0.0,0.0,1.0);
+{$if defined(cpuamd64) and defined(Windows)}
+var StackSave0,StackSave1:array[0..3] of single;
+{$ifend}
 asm
+{$if defined(cpuamd64) and defined(Windows)}
+ movups dqword ptr [StackSave0],xmm6
+ movups dqword ptr [StackSave1],xmm7
+{$ifend}
  movups xmm0,dqword ptr [v]     // d c b a
+{$if defined(cpuamd64)}
+ movups xmm1,dqword ptr [rip+Vector3Mask]
+ movups xmm2,dqword ptr [rip+cOne]
+{$else}
  movups xmm1,dqword ptr [Vector3Mask]
  movups xmm2,dqword ptr [cOne]
+{$ifend}
  andps xmm0,xmm1
  addps xmm0,xmm2
  movaps xmm1,xmm0               // d c b a
@@ -5087,16 +6070,23 @@ asm
  addps xmm2,xmm3
  addps xmm0,xmm2
  movups dqword ptr [result],xmm0
+{$if defined(cpuamd64) and defined(Windows)}
+ movups xmm6,dqword ptr [StackSave0]
+ movups xmm7,dqword ptr [StackSave1]
+{$ifend}
 end;
 {$else}
 begin
  result.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z)+m[3,0];
  result.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z)+m[3,1];
  result.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z)+m[3,2];
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3TermMatrixMulInverse(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload;
+function Vector3TermMatrixMulInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftVector3; overload;
 var Determinant:TKraftScalar;
 begin
  Determinant:=((m[0,0]*((m[1,1]*m[2,2])-(m[2,1]*m[1,2])))-
@@ -5108,9 +6098,12 @@ begin
  result.x:=((v.x*((m[1,1]*m[2,2])-(m[1,2]*m[2,1])))+(v.y*((m[1,2]*m[2,0])-(m[1,0]*m[2,2])))+(v.z*((m[1,0]*m[2,1])-(m[1,1]*m[2,0]))))*Determinant;
  result.y:=((m[0,0]*((v.y*m[2,2])-(v.z*m[2,1])))+(m[0,1]*((v.z*m[2,0])-(v.x*m[2,2])))+(m[0,2]*((v.x*m[2,1])-(v.y*m[2,0]))))*Determinant;
  result.z:=((m[0,0]*((m[1,1]*v.z)-(m[1,2]*v.y)))+(m[0,1]*((m[1,2]*v.x)-(m[1,0]*v.z)))+(m[0,2]*((m[1,0]*v.y)-(m[1,1]*v.x))))*Determinant;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector3TermMatrixMulInverted(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload;
+function Vector3TermMatrixMulInverted({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; overload;
 var p:TKraftVector3;
 begin
  p.x:=v.x-m[3,0];
@@ -5119,30 +6112,42 @@ begin
  result.x:=(m[0,0]*p.x)+(m[0,1]*p.y)+(m[0,2]*p.z);
  result.y:=(m[1,0]*p.x)+(m[1,1]*p.y)+(m[1,2]*p.z);
  result.z:=(m[2,0]*p.x)+(m[2,1]*p.y)+(m[2,2]*p.z);
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector3TermMatrixMulTransposed(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload;
+function Vector3TermMatrixMulTransposed({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftVector3; overload;
 begin
  result.x:=(m[0,0]*v.x)+(m[0,1]*v.y)+(m[0,2]*v.z);
  result.y:=(m[1,0]*v.x)+(m[1,1]*v.y)+(m[1,2]*v.z);
  result.z:=(m[2,0]*v.x)+(m[2,1]*v.y)+(m[2,2]*v.z);
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector3TermMatrixMulTransposed(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload;
+function Vector3TermMatrixMulTransposed({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; overload;
 begin
  result.x:=(m[0,0]*v.x)+(m[0,1]*v.y)+(m[0,2]*v.z)+m[0,3];
  result.y:=(m[1,0]*v.x)+(m[1,1]*v.y)+(m[1,2]*v.z)+m[1,3];
  result.z:=(m[2,0]*v.x)+(m[2,1]*v.y)+(m[2,2]*v.z)+m[2,3];
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector3TermMatrixMulTransposedBasis(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload;
+function Vector3TermMatrixMulTransposedBasis({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; overload;
 begin
  result.x:=(m[0,0]*v.x)+(m[0,1]*v.y)+(m[0,2]*v.z);
  result.y:=(m[1,0]*v.x)+(m[1,1]*v.y)+(m[1,2]*v.z);
  result.z:=(m[2,0]*v.x)+(m[2,1]*v.y)+(m[2,2]*v.z);
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector3TermMatrixMulHomogen(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3;
+function Vector3TermMatrixMulHomogen({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3;
 var result_w:TKraftScalar;
 begin
  result.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z)+m[3,0];
@@ -5152,11 +6157,17 @@ begin
  result.x:=result.x/result_w;
  result.y:=result.y/result_w;
  result.z:=result.z/result_w;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector3TermMatrixMulBasis(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef CPU386ASMForSinglePrecision}assembler;
-const Mask:array[0..3] of longword=($ffffffff,$ffffffff,$ffffffff,$00000000);
+function Vector3TermMatrixMulBasis({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector3; overload; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
+const Mask:array[0..3] of TKraftUInt32=($ffffffff,$ffffffff,$ffffffff,$00000000);
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [v]     // d c b a
  movaps xmm1,xmm0               // d c b a
  movaps xmm2,xmm0               // d c b a
@@ -5166,7 +6177,11 @@ asm
  movups xmm3,dqword ptr [m+0]
  movups xmm4,dqword ptr [m+16]
  movups xmm5,dqword ptr [m+32]
+{$if defined(cpuamd64)}
+ movups xmm6,dqword ptr [rip+Mask]
+{$else}
  movups xmm6,dqword ptr [Mask]
+{$ifend}
  andps xmm3,xmm6
  andps xmm4,xmm6
  andps xmm5,xmm6
@@ -5182,10 +6197,13 @@ begin
  result.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z);
  result.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z);
  result.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z);
-end;
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
+end;
+{$ifend}
 
-function Vector3Lerp(const v1,v2:TKraftVector3;w:TKraftScalar):TKraftVector3;
+function Vector3Lerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector3;const w:TKraftScalar):TKraftVector3;
 var iw:TKraftScalar;
 begin
  if w<0.0 then begin
@@ -5198,6 +6216,9 @@ begin
   result.y:=(iw*v1.y)+(w*v2.y);
   result.z:=(iw*v1.z)+(w*v2.z);
  end;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
 function Vector3Perpendicular(v:TKraftVector3):TKraftVector3;
@@ -5207,6 +6228,9 @@ begin
  p.x:=abs(v.x);
  p.y:=abs(v.y);
  p.z:=abs(v.z);
+{$ifdef SIMD}
+ p.w:=0.0;
+{$endif}
  if (p.x<=p.y) and (p.x<=p.z) then begin
   p:=Vector3XAxis;
  end else if (p.y<=p.x) and (p.y<=p.z) then begin
@@ -5217,10 +6241,16 @@ begin
  result:=Vector3NormEx(Vector3Sub(p,Vector3ScalarMul(v,Vector3Dot(v,p))));
 end;
 
-function Vector3TermQuaternionRotate(const v:TKraftVector3;const q:TKraftQuaternion):TKraftVector3; {$ifdef CPU386ASMForSinglePrecision}assembler;
-const Mask:array[0..3] of longword=($ffffffff,$ffffffff,$ffffffff,$00000000);
-var t,qv:TKraftVector3;
+function Vector3TermQuaternionRotate({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q:TKraftQuaternion):TKraftVector3; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler;
+const Mask:array[0..3] of TKraftUInt32=($ffffffff,$ffffffff,$ffffffff,$00000000);
+{$if defined(cpuamd64) and defined(Windows)}
+var StackSave0,StackSave1:array[0..3] of single;
+{$ifend}
 asm
+{$if defined(cpuamd64) and defined(Windows)}
+ movups dqword ptr [StackSave0],xmm6
+ movups dqword ptr [StackSave1],xmm7
+{$ifend}
 
  movups xmm4,dqword ptr [q] // xmm4 = q.xyzw
 
@@ -5229,7 +6259,11 @@ asm
  movaps xmm6,xmm4
  shufps xmm6,xmm6,$ff // xmm6 = q.wwww
 
+{$if defined(cpuamd64)}
+ movups xmm7,dqword ptr [rip+Mask] // xmm7 = Mask
+{$else}
  movups xmm7,dqword ptr [Mask] // xmm7 = Mask
+{$ifend}
 
  andps xmm4,xmm7 // xmm4 = q.xyz0
 
@@ -5269,8 +6303,13 @@ asm
 
  movups dqword ptr [result],xmm1
 
+{$if defined(cpuamd64) and defined(Windows)}
+ movups xmm6,dqword ptr [StackSave0]
+ movups xmm7,dqword ptr [StackSave1]
+{$ifend}
+
 end;
-{$else}
+{$elseif defined(SIMD)}
 var t,qv:TKraftVector3;
 begin
  // t = 2 * cross(q.xyz, v)
@@ -5282,519 +6321,7 @@ begin
  t:=Vector3ScalarMul(Vector3Cross(qv,v),2.0);
  result:=Vector3Add(Vector3Add(v,Vector3ScalarMul(t,q.w)),Vector3Cross(qv,t));
 end;
-{$endif}
-
-function Vector3ProjectToBounds(const v:TKraftVector3;const MinVector,MaxVector:TKraftVector3):TKraftScalar;
-begin
- if v.x<0.0 then begin
-  result:=v.x*MaxVector.x;
- end else begin
-  result:=v.x*MinVector.x;
- end;
- if v.y<0.0 then begin
-  result:=result+(v.y*MaxVector.y);
- end else begin
-  result:=result+(v.y*MinVector.y);
- end;
- if v.z<0.0 then begin
-  result:=result+(v.z*MaxVector.z);
- end else begin
-  result:=result+(v.z*MinVector.z);
- end;
-end;
 {$else}
-function Vector3Flip(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=v.x;
- result.y:=v.z;
- result.z:=-v.y;
-end;
-
-function Vector3Abs(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=abs(v.x);
- result.y:=abs(v.y);
- result.z:=abs(v.z);
-end;
-
-function Vector3Compare(const v1,v2:TKraftVector3):boolean; {$ifdef caninline}inline;{$endif}
-begin
- result:=(abs(v1.x-v2.x)<EPSILON) and (abs(v1.y-v2.y)<EPSILON) and (abs(v1.z-v2.z)<EPSILON);
-end;
-
-function Vector3CompareEx(const v1,v2:TKraftVector3;const Threshold:TKraftScalar=EPSILON):boolean; {$ifdef caninline}inline;{$endif}
-begin
- result:=(abs(v1.x-v2.x)<Threshold) and (abs(v1.y-v2.y)<Threshold) and (abs(v1.z-v2.z)<Threshold);
-end;
-
-function Vector3DirectAdd(var v1:TKraftVector3;const v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- v1.x:=v1.x+v2.x;
- v1.y:=v1.y+v2.y;
- v1.z:=v1.z+v2.z;
-end;
-
-function Vector3DirectSub(var v1:TKraftVector3;const v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- v1.x:=v1.x-v2.x;
- v1.y:=v1.y-v2.y;
- v1.z:=v1.z-v2.z;
-end;
-
-function Vector3Add(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=v1.x+v2.x;
- result.y:=v1.y+v2.y;
- result.z:=v1.z+v2.z;
-end;
-
-function Vector3Sub(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=v1.x-v2.x;
- result.y:=v1.y-v2.y;
- result.z:=v1.z-v2.z;
-end;
-
-function Vector3Avg(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=(v1.x+v2.x)*0.5;
- result.y:=(v1.y+v2.y)*0.5;
- result.z:=(v1.z+v2.z)*0.5;
-end;
-
-function Vector3Avg(const v1,v2,v3:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=(v1.x+v2.x+v3.x)/3.0;
- result.y:=(v1.y+v2.y+v3.y)/3.0;
- result.z:=(v1.z+v2.z+v3.z)/3.0;
-end;
-
-function Vector3Avg(const va:PKraftVector3s;Count:longint):TKraftVector3; {$ifdef caninline}inline;{$endif}
-var i:longint;
-begin
- result.x:=0.0;
- result.y:=0.0;
- result.z:=0.0;
- if Count>0 then begin
-  for i:=0 to Count-1 do begin
-   result.x:=result.x+va^[i].x;
-   result.y:=result.y+va^[i].y;
-   result.z:=result.z+va^[i].z;
-  end;
-  result.x:=result.x/Count;
-  result.y:=result.y/Count;
-  result.z:=result.z/Count;
- end;
-end;
-
-function Vector3ScalarMul(const v:TKraftVector3;const s:TKraftScalar):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=v.x*s;
- result.y:=v.y*s;
- result.z:=v.z*s;
-end;
-
-function Vector3Dot(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-begin
- result:=(v1.x*v2.x)+(v1.y*v2.y)+(v1.z*v2.z);
-end;
-
-function Vector3Cos(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-var d:extended;
-begin
- d:=SQRT(Vector3LengthSquared(v1)*Vector3LengthSquared(v2));
- if d<>0.0 then begin
-  result:=((v1.x*v2.x)+(v1.y*v2.y)+(v1.z*v2.z))/d; //result:=Vector3Dot(v1,v2)/d;
- end else begin
-  result:=0.0;
- end
-end;
-
-function Vector3GetOneUnitOrthogonalVector(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-var MinimumAxis:longint;
-    l:TKraftScalar;
-begin
- if abs(v.x)<abs(v.y) then begin
-  if abs(v.x)<abs(v.z) then begin
-   MinimumAxis:=0;
-  end else begin
-   MinimumAxis:=2;
-  end;
- end else begin
-  if abs(v.y)<abs(v.z) then begin
-   MinimumAxis:=1;
-  end else begin
-   MinimumAxis:=2;
-  end;
- end;
- case MinimumAxis of
-  0:begin
-   l:=sqrt(sqr(v.y)+sqr(v.z));
-   result.x:=0.0;
-   result.y:=-(v.z/l);
-   result.z:=v.y/l;
-  end;
-  1:begin
-   l:=sqrt(sqr(v.x)+sqr(v.z));
-   result.x:=-(v.z/l);
-   result.y:=0.0;
-   result.z:=v.x/l;
-  end;
-  else begin
-   l:=sqrt(sqr(v.x)+sqr(v.y));
-   result.x:=-(v.y/l);
-   result.y:=v.x/l;
-   result.z:=0.0;
-  end;
- end;
-end;
-
-function Vector3Cross(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=(v1.y*v2.z)-(v1.z*v2.y);
- result.y:=(v1.z*v2.x)-(v1.x*v2.z);
- result.z:=(v1.x*v2.y)-(v1.y*v2.x);
-end;
-
-function Vector3Neg(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=-v.x;
- result.y:=-v.y;
- result.z:=-v.z;
-end;
-
-procedure Vector3Scale(var v:TKraftVector3;const sx,sy,sz:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
-begin
- v.x:=v.x*sx;
- v.y:=v.y*sy;
- v.z:=v.z*sz;
-end;
-
-procedure Vector3Scale(var v:TKraftVector3;const s:TKraftScalar); overload; {$ifdef caninline}inline;{$endif}
-begin
- v.x:=v.x*s;
- v.y:=v.y*s;
- v.z:=v.z*s;
-end;
-
-function Vector3Mul(const v1,v2:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=v1.x*v2.x;
- result.y:=v1.y*v2.y;
- result.z:=v1.z*v2.z;
-end;
-
-function Vector3Length(const v:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-begin
- result:=sqrt(sqr(v.x)+sqr(v.y)+sqr(v.z));
-end;
-
-function Vector3Dist(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-begin
- result:=sqrt(sqr(v2.x-v1.x)+sqr(v2.y-v1.y)+sqr(v2.z-v1.z));
-end;
-
-function Vector3LengthSquared(const v:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-begin
- result:=sqr(v.x)+sqr(v.y)+sqr(v.z);
-end;
-
-function Vector3DistSquared(const v1,v2:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-begin
- result:=sqr(v2.x-v1.x)+sqr(v2.y-v1.y)+sqr(v2.z-v1.z);
-end;
-
-function Vector3Angle(const v1,v2,v3:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-var A1,A2:TKraftVector3;
-    L1,L2:TKraftScalar;
-begin
- A1:=Vector3Sub(v1,v2);
- A2:=Vector3Sub(v3,v2);
- L1:=Vector3Length(A1);
- L2:=Vector3Length(A2);
- if (L1=0) or (L2=0) then begin
-  result:=0;
- end else begin
-  result:=ArcCos(Vector3Dot(A1,A2)/(L1*L2));
- end;
-end;
-
-function Vector3LengthNormalize(var v:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
-var l:TKraftScalar;
-begin
- result:=sqr(v.x)+sqr(v.y)+sqr(v.z);
- if result>0.0 then begin
-  result:=sqrt(result);
-  l:=1.0/result;
-  v.x:=v.x*l;
-  v.y:=v.y*l;
-  v.z:=v.z*l;
- end else begin
-  result:=0.0;
-  v.x:=0.0;
-  v.y:=0.0;
-  v.z:=0.0;
- end;
-end;
-
-procedure Vector3Normalize(var v:TKraftVector3); {$ifdef caninline}inline;{$endif}
-var l:TKraftScalar;
-begin
- l:=sqr(v.x)+sqr(v.y)+sqr(v.z);
- if l>0.0 then begin
-  l:=1.0/sqrt(l);
-  v.x:=v.x*l;
-  v.y:=v.y*l;
-  v.z:=v.z*l;
- end else begin
-  v.x:=0.0;
-  v.y:=0.0;
-  v.z:=0.0;
- end;
-end;
-
-procedure Vector3NormalizeEx(var v:TKraftVector3); {$ifdef caninline}inline;{$endif}
-var l:single;
-begin
- l:=sqr(v.x)+sqr(v.y)+sqr(v.z);
- if l>0.0 then begin
-  l:=sqrt(l);
-  v.x:=v.x/l;
-  v.y:=v.y/l;
-  v.z:=v.z/l;
- end else begin
-  v.x:=0.0;
-  v.y:=0.0;
-  v.z:=0.0;
- end;
-end;
-
-function Vector3SafeNorm(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-var l:TKraftScalar;
-begin
- l:=sqr(v.x)+sqr(v.y)+sqr(v.z);
- if l>0.0 then begin
-  l:=1.0/sqrt(l);
-  result.x:=v.x*l;
-  result.y:=v.y*l;
-  result.z:=v.z*l;
- end else begin
-  result.x:=1.0;
-  result.y:=0.0;
-  result.z:=0.0;
- end;
-end;
-
-function Vector3Norm(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-var l:TKraftScalar;
-begin
- l:=sqr(v.x)+sqr(v.y)+sqr(v.z);
- if l>0.0 then begin
-  l:=1.0/sqrt(l);
-  result.x:=v.x*l;
-  result.y:=v.y*l;
-  result.z:=v.z*l;
- end else begin
-  result.x:=0.0;
-  result.y:=0.0;
-  result.z:=0.0;
- end;
-end;
-
-function Vector3NormEx(const v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-var l:TKraftScalar;
-begin
- l:=sqr(v.x)+sqr(v.y)+sqr(v.z);
- if l>0.0 then begin
-  l:=sqrt(l);
-  result.x:=v.x/l;
-  result.y:=v.y/l;
-  result.z:=v.z/l;
- end else begin
-  result.x:=0.0;
-  result.y:=0.0;
-  result.z:=0.0;
- end;
-end;
-
-procedure Vector3RotateX(var v:TKraftVector3;a:TKraftScalar); {$ifdef caninline}inline;{$endif}
-var t:TKraftVector3;
-begin
- t.x:=v.x;
- t.y:=(v.y*cos(a))-(v.z*sin(a));
- t.z:=(v.y*sin(a))+(v.z*cos(a));
- v:=t;
-end;
-
-procedure Vector3RotateY(var v:TKraftVector3;a:TKraftScalar); {$ifdef caninline}inline;{$endif}
-var t:TKraftVector3;
-begin
- t.x:=(v.x*cos(a))+(v.z*sin(a));
- t.y:=v.y;
- t.z:=(v.z*cos(a))-(v.x*sin(a));
- v:=t;
-end;
-
-procedure Vector3RotateZ(var v:TKraftVector3;a:TKraftScalar); {$ifdef caninline}inline;{$endif}
-var t:TKraftVector3;
-begin
- t.x:=(v.x*cos(a))-(v.y*sin(a));
- t.y:=(v.x*sin(a))+(v.y*cos(a));
- t.z:=v.z;
- v:=t;
-end;
-
-procedure Vector3MatrixMul(var v:TKraftVector3;const m:TKraftMatrix3x3); overload; {$ifdef caninline}inline;{$endif}
-var t:TKraftVector3;
-begin
- t.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z);
- t.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z);
- t.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z);
- v:=t;
-end;
-
-procedure Vector3MatrixMul(var v:TKraftVector3;const m:TKraftMatrix4x4); overload;
-var t:TKraftVector3;
-begin
- t.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z)+m[3,0];
- t.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z)+m[3,1];
- t.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z)+m[3,2];
- v:=t;
-end;
-
-procedure Vector3MatrixMulBasis(var v:TKraftVector3;const m:TKraftMatrix4x4); overload; {$ifdef caninline}inline;{$endif}
-var t:TKraftVector3;
-begin
- t.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z);
- t.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z);
- t.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z);
- v:=t;
-end;
-
-procedure Vector3MatrixMulInverted(var v:TKraftVector3;const m:TKraftMatrix4x4); overload; {$ifdef caninline}inline;{$endif}
-var p,t:TKraftVector3;
-begin
- p.x:=v.x-m[3,0];
- p.y:=v.y-m[3,1];
- p.z:=v.z-m[3,2];
- t.x:=(m[0,0]*p.x)+(m[0,1]*p.y)+(m[0,2]*p.z);
- t.y:=(m[1,0]*p.x)+(m[1,1]*p.y)+(m[1,2]*p.z);
- t.z:=(m[2,0]*p.x)+(m[2,1]*p.y)+(m[2,2]*p.z);
- v:=t;
-end;
-
-function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z);
- result.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z);
- result.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z);
-end;
-
-function Vector3TermMatrixMulInverse(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-var Determinant:TKraftScalar;
-begin
- Determinant:=((m[0,0]*((m[1,1]*m[2,2])-(m[2,1]*m[1,2])))-
-               (m[0,1]*((m[1,0]*m[2,2])-(m[2,0]*m[1,2]))))+
-               (m[0,2]*((m[1,0]*m[2,1])-(m[2,0]*m[1,1])));
- if Determinant<>0.0 then begin
-  Determinant:=1.0/Determinant;
- end;
- result.x:=((v.x*((m[1,1]*m[2,2])-(m[1,2]*m[2,1])))+(v.y*((m[1,2]*m[2,0])-(m[1,0]*m[2,2])))+(v.z*((m[1,0]*m[2,1])-(m[1,1]*m[2,0]))))*Determinant;
- result.y:=((m[0,0]*((v.y*m[2,2])-(v.z*m[2,1])))+(m[0,1]*((v.z*m[2,0])-(v.x*m[2,2])))+(m[0,2]*((v.x*m[2,1])-(v.y*m[2,0]))))*Determinant;
- result.z:=((m[0,0]*((m[1,1]*v.z)-(m[1,2]*v.y)))+(m[0,1]*((m[1,2]*v.x)-(m[1,0]*v.z)))+(m[0,2]*((m[1,0]*v.y)-(m[1,1]*v.x))))*Determinant;
-end;
-
-function Vector3TermMatrixMulInverted(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-var p:TKraftVector3;
-begin
- p.x:=v.x-m[3,0];
- p.y:=v.y-m[3,1];
- p.z:=v.z-m[3,2];
- result.x:=(m[0,0]*p.x)+(m[0,1]*p.y)+(m[0,2]*p.z);
- result.y:=(m[1,0]*p.x)+(m[1,1]*p.y)+(m[1,2]*p.z);
- result.z:=(m[2,0]*p.x)+(m[2,1]*p.y)+(m[2,2]*p.z);
-end;
-
-function Vector3TermMatrixMulTransposed(const v:TKraftVector3;const m:TKraftMatrix3x3):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=(m[0,0]*v.x)+(m[0,1]*v.y)+(m[0,2]*v.z);
- result.y:=(m[1,0]*v.x)+(m[1,1]*v.y)+(m[1,2]*v.z);
- result.z:=(m[2,0]*v.x)+(m[2,1]*v.y)+(m[2,2]*v.z);
-end;
-
-function Vector3TermMatrixMulTransposed(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=(m[0,0]*v.x)+(m[0,1]*v.y)+(m[0,2]*v.z)+m[0,3];
- result.y:=(m[1,0]*v.x)+(m[1,1]*v.y)+(m[1,2]*v.z)+m[1,3];
- result.z:=(m[2,0]*v.x)+(m[2,1]*v.y)+(m[2,2]*v.z)+m[2,3];
-end;
-
-function Vector3TermMatrixMulTransposedBasis(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=(m[0,0]*v.x)+(m[0,1]*v.y)+(m[0,2]*v.z);
- result.y:=(m[1,0]*v.x)+(m[1,1]*v.y)+(m[1,2]*v.z);
- result.z:=(m[2,0]*v.x)+(m[2,1]*v.y)+(m[2,2]*v.z);
-end;
-
-function Vector3TermMatrixMulHomogen(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; {$ifdef caninline}inline;{$endif}
-var result_w:TKraftScalar;
-begin
- result.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z)+m[3,0];
- result.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z)+m[3,1];
- result.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z)+m[3,2];
- result_w:=(m[0,3]*v.x)+(m[1,3]*v.y)+(m[2,3]*v.z)+m[3,3];
- result.x:=result.x/result_w;
- result.y:=result.y/result_w;
- result.z:=result.z/result_w;
-end;
-
-function Vector3TermMatrixMulBasis(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; {$ifdef caninline}inline;{$endif}
-begin
- result.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z);
- result.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z);
- result.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z);
-end;
-
-function Vector3TermMatrixMul(const v:TKraftVector3;const m:TKraftMatrix4x4):TKraftVector3; overload;
-begin
- result.x:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z)+m[3,0];
- result.y:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z)+m[3,1];
- result.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z)+m[3,2];
-end;
-
-function Vector3Lerp(const v1,v2:TKraftVector3;w:TKraftScalar):TKraftVector3; {$ifdef caninline}inline;{$endif}
-var iw:TKraftScalar;
-begin
- if w<0.0 then begin
-  result:=v1;
- end else if w>1.0 then begin
-  result:=v2;
- end else begin
-  iw:=1.0-w;
-  result.x:=(iw*v1.x)+(w*v2.x);
-  result.y:=(iw*v1.y)+(w*v2.y);
-  result.z:=(iw*v1.z)+(w*v2.z);
- end;
-end;
-
-function Vector3Perpendicular(v:TKraftVector3):TKraftVector3; {$ifdef caninline}inline;{$endif}
-var p:TKraftVector3;
-begin
- Vector3NormalizeEx(v);
- p.x:=abs(v.x);
- p.y:=abs(v.y);
- p.z:=abs(v.z);
- if (p.x<=p.y) and (p.x<=p.z) then begin
-  p:=Vector3XAxis;
- end else if (p.y<=p.x) and (p.y<=p.z) then begin
-  p:=Vector3YAxis;
- end else begin
-  p:=Vector3ZAxis;
- end;
- result:=Vector3NormEx(Vector3Sub(p,Vector3ScalarMul(v,Vector3Dot(v,p))));
-end;
-
-function Vector3TermQuaternionRotate(const v:TKraftVector3;const q:TKraftQuaternion):TKraftVector3; {$ifdef caninline}inline;{$endif}
 var t,qv:TKraftVector3;
 begin
  // t = 2 * cross(q.xyz, v)
@@ -5803,20 +6330,9 @@ begin
  t:=Vector3ScalarMul(Vector3Cross(qv,v),2.0);
  result:=Vector3Add(Vector3Add(v,Vector3ScalarMul(t,q.w)),Vector3Cross(qv,t));
 end;
-{var vn:TKraftVector3;
-vq,rq:TKraftQuaternion;
-begin
- vq.x:=vn.x;
- vq.y:=vn.y;
- vq.z:=vn.z;
- vq.w:=0.0;
- rq:=QuaternionMul(q,QuaternionMul(vq,QuaternionConjugate(q)));
- result.x:=rq.x;
- result.y:=rq.y;
- result.z:=rq.z;
-end;{}
+{$ifend}
 
-function Vector3ProjectToBounds(const v:TKraftVector3;const MinVector,MaxVector:TKraftVector3):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Vector3ProjectToBounds({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} MinVector,MaxVector:TKraftVector3):TKraftScalar;
 begin
  if v.x<0.0 then begin
   result:=v.x*MaxVector.x;
@@ -5834,9 +6350,8 @@ begin
   result:=result+(v.z*MinVector.z);
  end;
 end;
-{$endif}
 
-function Vector3FlushZero(const v:TKraftVector3):TKraftVector3;
+function Vector3FlushZero({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftVector3;
 begin
  if IsZero(v.x) then begin
   result.x:=0.0;
@@ -5853,19 +6368,22 @@ begin
  end else begin
   result.z:=v.z;
  end;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Vector4Compare(const v1,v2:TKraftVector4):boolean;
+function Vector4Compare({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):boolean;
 begin
  result:=(abs(v1.x-v2.x)<EPSILON) and (abs(v1.y-v2.y)<EPSILON) and (abs(v1.z-v2.z)<EPSILON) and (abs(v1.w-v2.w)<EPSILON);
 end;
 
-function Vector4CompareEx(const v1,v2:TKraftVector4;const Threshold:TKraftScalar=EPSILON):boolean;
+function Vector4CompareEx({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4;const Threshold:TKraftScalar=EPSILON):boolean;
 begin
  result:=(abs(v1.x-v2.x)<Threshold) and (abs(v1.y-v2.y)<Threshold) and (abs(v1.z-v2.z)<Threshold) and (abs(v1.w-v2.w)<Threshold);
 end;
 
-function Vector4Add(const v1,v2:TKraftVector4):TKraftVector4;
+function Vector4Add({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftVector4;
 begin
  result.x:=v1.x+v2.x;
  result.y:=v1.y+v2.y;
@@ -5873,7 +6391,7 @@ begin
  result.w:=v1.w+v2.w;
 end;
 
-function Vector4Sub(const v1,v2:TKraftVector4):TKraftVector4;
+function Vector4Sub({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftVector4;
 begin
  result.x:=v1.x-v2.x;
  result.y:=v1.y-v2.y;
@@ -5881,7 +6399,7 @@ begin
  result.w:=v1.w-v2.w;
 end;
 
-function Vector4ScalarMul(const v:TKraftVector4;s:TKraftScalar):TKraftVector4;
+function Vector4ScalarMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4;const s:TKraftScalar):TKraftVector4;
 begin
  result.x:=v.x*s;
  result.y:=v.y*s;
@@ -5889,70 +6407,70 @@ begin
  result.w:=v.w*s;
 end;
 
-function Vector4Dot(const v1,v2:TKraftVector4):TKraftScalar;
+function Vector4Dot({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftScalar;
 begin
  result:=(v1.x*v2.x)+(v1.y*v2.y)+(v1.z*v2.z)+(v1.w*v2.w);
 end;
 
-function Vector4Cross(const v1,v2:TKraftVector4):TKraftVector4;
+function Vector4Cross({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftVector4;
 begin
  result.x:=(v1.y*v2.z)-(v2.y*v1.z);
  result.y:=(v2.x*v1.z)-(v1.x*v2.z);
  result.z:=(v1.x*v2.y)-(v2.x*v1.y);
- result.w:=1;
+ result.w:=1.0;
 end;
 
-function Vector4Neg(const v:TKraftVector4):TKraftVector4;
+function Vector4Neg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftVector4;
 begin
  result.x:=-v.x;
  result.y:=-v.y;
  result.z:=-v.z;
- result.w:=1;
+ result.w:=1.0;
 end;
 
-procedure Vector4Scale(var v:TKraftVector4;sx,sy,sz:TKraftScalar); overload;
+procedure Vector4Scale(var v:TKraftVector4;const sx,sy,sz:TKraftScalar); overload;
 begin
  v.x:=v.x*sx;
  v.y:=v.y*sy;
  v.z:=v.z*sz;
 end;
 
-procedure Vector4Scale(var v:TKraftVector4;s:TKraftScalar); overload;
+procedure Vector4Scale(var v:TKraftVector4;const s:TKraftScalar); overload;
 begin
  v.x:=v.x*s;
  v.y:=v.y*s;
  v.z:=v.z*s;
 end;
 
-function Vector4Mul(const v1,v2:TKraftVector4):TKraftVector4;
+function Vector4Mul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftVector4;
 begin
  result.x:=v1.x*v2.x;
  result.y:=v1.y*v2.y;
  result.z:=v1.z*v2.z;
- result.w:=1;
+ result.w:=1.0;
 end;
 
-function Vector4Length(const v:TKraftVector4):TKraftScalar;
+function Vector4Length({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftScalar;
 begin
  result:=SQRT((v.x*v.x)+(v.y*v.y)+(v.z*v.z));
 end;
 
-function Vector4Dist(const v1,v2:TKraftVector4):TKraftScalar;
+function Vector4Dist({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftScalar;
 begin
  result:=Vector4Length(Vector4Sub(v2,v1));
 end;
 
-function Vector4LengthSquared(const v:TKraftVector4):TKraftScalar;
+function Vector4LengthSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftScalar;
 begin
  result:=sqr(v.x)+sqr(v.y)+sqr(v.z)+sqr(v.w);
 end;
 
-function Vector4DistSquared(const v1,v2:TKraftVector4):TKraftScalar;
+function Vector4DistSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4):TKraftScalar;
 begin
  result:=Vector4LengthSquared(Vector4Sub(v2,v1));
 end;
 
-function Vector4Angle(const v1,v2,v3:TKraftVector4):TKraftScalar;
+function Vector4Angle({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2,v3:TKraftVector4):TKraftScalar;
 var A1,A2:TKraftVector4;
     L1,L2:TKraftScalar;
 begin
@@ -5978,7 +6496,7 @@ begin
  end;
 end;
 
-function Vector4Norm(const v:TKraftVector4):TKraftVector4;
+function Vector4Norm({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftVector4;
 var L:TKraftScalar;
 begin
  L:=Vector4Length(v);
@@ -5989,38 +6507,41 @@ begin
  end;
 end;
 
-procedure Vector4RotateX(var v:TKraftVector4;a:TKraftScalar);
+procedure Vector4RotateX(var v:TKraftVector4;const a:TKraftScalar);
 var t:TKraftVector4;
 begin
  t.x:=v.x;
  t.y:=(v.y*cos(a))+(v.z*-sin(a));
  t.z:=(v.y*sin(a))+(v.z*cos(a));
- t.w:=1;
+ t.w:=1.0;
  v:=t;
 end;
 
-procedure Vector4RotateY(var v:TKraftVector4;a:TKraftScalar);
+procedure Vector4RotateY(var v:TKraftVector4;const a:TKraftScalar);
 var t:TKraftVector4;
 begin
  t.x:=(v.x*cos(a))+(v.z*sin(a));
  t.y:=v.y;
  t.z:=(v.x*-sin(a))+(v.z*cos(a));
- t.w:=1;
+ t.w:=1.0;
  v:=t;
 end;
 
-procedure Vector4RotateZ(var v:TKraftVector4;a:TKraftScalar);
+procedure Vector4RotateZ(var v:TKraftVector4;const a:TKraftScalar);
 var t:TKraftVector4;
 begin
  t.x:=(v.x*cos(a))+(v.y*-sin(a));
  t.y:=(v.x*sin(a))+(v.y*cos(a));
  t.z:=v.z;
- t.w:=1;
+ t.w:=1.0;
  v:=t;
 end;
 
-procedure Vector4MatrixMul(var v:TKraftVector4;const m:TKraftMatrix4x4); {$ifdef CPU386ASMForSinglePrecision}register;
+procedure Vector4MatrixMul(var v:TKraftVector4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4); {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
 {mov eax,v
  mov edx,m}
  movups xmm0,dqword ptr [v]     // d c b a
@@ -6053,14 +6574,17 @@ begin
  t.w:=(m[0,3]*v.x)+(m[1,3]*v.y)+(m[2,3]*v.z)+(m[3,3]*v.w);
  v:=t;
 end;
-{$endif}
+{$ifend}
 
-function Vector4TermMatrixMul(const v:TKraftVector4;const m:TKraftMatrix4x4):TKraftVector4; {$ifdef CPU386ASMForSinglePrecision}register;
+function Vector4TermMatrixMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector4; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
 {mov eax,v
  mov edx,m
  mov ecx,result}
- movups xmm0,[eax]              // d c b a
+ movups xmm0,dqword ptr [v]     // d c b a
  movaps xmm1,xmm0               // d c b a
  movaps xmm2,xmm0               // d c b a
  movaps xmm3,xmm0               // d c b a
@@ -6079,7 +6603,7 @@ asm
  addps xmm0,xmm1
  addps xmm2,xmm3
  addps xmm0,xmm2
- movups [ecx],xmm0
+ movups dqword ptr [result],xmm0
 end;
 {$else}
 begin
@@ -6088,9 +6612,9 @@ begin
  result.z:=(m[0,2]*v.x)+(m[1,2]*v.y)+(m[2,2]*v.z)+(m[3,2]*v.w);
  result.w:=(m[0,3]*v.x)+(m[1,3]*v.y)+(m[2,3]*v.z)+(m[3,3]*v.w);
 end;
-{$endif}
+{$ifend}
 
-function Vector4TermMatrixMulHomogen(const v:TKraftVector4;const m:TKraftMatrix4x4):TKraftVector4;
+function Vector4TermMatrixMulHomogen({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftVector4;
 begin
  result.w:=(m[0,3]*v.x)+(m[1,3]*v.y)+(m[2,3]*v.z)+(m[3,3]*v.w);
  result.x:=((m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z)+(m[3,0]*v.w))/result.w;
@@ -6099,7 +6623,7 @@ begin
  result.w:=1.0;
 end;
 
-procedure Vector4Rotate(var v:TKraftVector4;const Axis:TKraftVector4;a:TKraftScalar);
+procedure Vector4Rotate(var v:TKraftVector4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Axis:TKraftVector4;const a:TKraftScalar);
 var t:TKraftVector3;
 begin
  t.x:=Axis.x;
@@ -6108,7 +6632,7 @@ begin
  Vector4MatrixMul(v,Matrix4x4Rotate(a,t));
 end;
 
-function Vector4Lerp(const v1,v2:TKraftVector4;w:TKraftScalar):TKraftVector4;
+function Vector4Lerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v1,v2:TKraftVector4;const w:TKraftScalar):TKraftVector4;
 var iw:TKraftScalar;
 begin
  if w<0.0 then begin
@@ -6124,7 +6648,7 @@ begin
  end;
 end;
 
-function Matrix2x2Inverse(var mr:TKraftMatrix2x2;const ma:TKraftMatrix2x2):boolean;
+function Matrix2x2Inverse(var mr:TKraftMatrix2x2;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix2x2):boolean;
 var Determinant:TKraftScalar;
 begin
  Determinant:=(ma[0,0]*ma[1,1])-(ma[0,1]*ma[1,0]);
@@ -6141,7 +6665,7 @@ begin
  end;
 end;
 
-function Matrix2x2TermInverse(const m:TKraftMatrix2x2):TKraftMatrix2x2;
+function Matrix2x2TermInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix2x2):TKraftMatrix2x2;
 var Determinant:TKraftScalar;
 begin
  Determinant:=(m[0,0]*m[1,1])-(m[0,1]*m[1,0]);
@@ -6156,7 +6680,7 @@ begin
  end;
 end;
 
-function Matrix3x3RotateX(Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3RotateX(const Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix3x3Identity;
  result[1,1]:=cos(Angle);
@@ -6165,7 +6689,7 @@ begin
  result[2,1]:=-result[1,2];
 end;
 
-function Matrix3x3RotateY(Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3RotateY(const Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix3x3Identity;
  result[0,0]:=cos(Angle);
@@ -6174,7 +6698,7 @@ begin
  result[2,0]:=-result[0,2];
 end;
 
-function Matrix3x3RotateZ(Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3RotateZ(const Angle:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix3x3Identity;
  result[0,0]:=cos(Angle);
@@ -6183,7 +6707,7 @@ begin
  result[1,0]:=-result[0,1];
 end;
 
-function Matrix3x3Rotate(Angle:TKraftScalar;Axis:TKraftVector3):TKraftMatrix3x3; overload;
+function Matrix3x3Rotate(const Angle:TKraftScalar;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Axis:TKraftVector3):TKraftMatrix3x3; overload;
 var m:TKraftMatrix3x3;
     CosinusAngle,SinusAngle:TKraftScalar;
 begin
@@ -6207,7 +6731,7 @@ begin
  result:=m;
 end;
 
-function Matrix3x3Scale(sx,sy,sz:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3Scale(const sx,sy,sz:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix3x3Identity;
  result[0,0]:=sx;
@@ -6215,7 +6739,7 @@ begin
  result[2,2]:=sz;
 end;
 
-procedure Matrix3x3Add(var m1:TKraftMatrix3x3;const m2:TKraftMatrix3x3); {$ifdef caninline}inline;{$endif}
+procedure Matrix3x3Add(var m1:TKraftMatrix3x3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix3x3); {$ifdef caninline}inline;{$endif}
 begin
  m1[0,0]:=m1[0,0]+m2[0,0];
  m1[0,1]:=m1[0,1]+m2[0,1];
@@ -6237,7 +6761,7 @@ begin
 {$endif}
 end;
 
-procedure Matrix3x3Sub(var m1:TKraftMatrix3x3;const m2:TKraftMatrix3x3); {$ifdef caninline}inline;{$endif}
+procedure Matrix3x3Sub(var m1:TKraftMatrix3x3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix3x3); {$ifdef caninline}inline;{$endif}
 begin
  m1[0,0]:=m1[0,0]-m2[0,0];
  m1[0,1]:=m1[0,1]-m2[0,1];
@@ -6259,7 +6783,7 @@ begin
 {$endif}
 end;
 
-procedure Matrix3x3Mul(var m1:TKraftMatrix3x3;const m2:TKraftMatrix3x3);
+procedure Matrix3x3Mul(var m1:TKraftMatrix3x3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix3x3);
 var t:TKraftMatrix3x3;
 begin
  t[0,0]:=(m1[0,0]*m2[0,0])+(m1[0,1]*m2[1,0])+(m1[0,2]*m2[2,0]);
@@ -6282,8 +6806,8 @@ begin
 {$endif}
  m1:=t;
 end;
-          
-function Matrix3x3TermAdd(const m1,m2:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+
+function Matrix3x3TermAdd({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 begin
  result[0,0]:=m1[0,0]+m2[0,0];
  result[0,1]:=m1[0,1]+m2[0,1];
@@ -6305,7 +6829,7 @@ begin
 {$endif}
 end;
 
-function Matrix3x3TermSub(const m1,m2:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3TermSub({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 begin
  result[0,0]:=m1[0,0]-m2[0,0];
  result[0,1]:=m1[0,1]-m2[0,1];
@@ -6327,7 +6851,7 @@ begin
 {$endif}
 end;
 
-function Matrix3x3TermMul(const m1,m2:TKraftMatrix3x3):TKraftMatrix3x3;
+function Matrix3x3TermMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix3x3):TKraftMatrix3x3;
 begin
  result[0,0]:=(m1[0,0]*m2[0,0])+(m1[0,1]*m2[1,0])+(m1[0,2]*m2[2,0]);
  result[0,1]:=(m1[0,0]*m2[0,1])+(m1[0,1]*m2[1,1])+(m1[0,2]*m2[2,1]);
@@ -6349,7 +6873,7 @@ begin
 {$endif}
 end;
 
-function Matrix3x3TermMulTranspose(const m1,m2:TKraftMatrix3x3):TKraftMatrix3x3;
+function Matrix3x3TermMulTranspose({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix3x3):TKraftMatrix3x3;
 begin
  result[0,0]:=(m1[0,0]*m2[0,0])+(m1[0,1]*m2[0,1])+(m1[0,2]*m2[0,2]);
  result[0,1]:=(m1[0,0]*m2[1,0])+(m1[0,1]*m2[1,1])+(m1[0,2]*m2[1,2]);
@@ -6393,7 +6917,7 @@ begin
 {$endif}
 end;
 
-function Matrix3x3TermScalarMul(const m:TKraftMatrix3x3;s:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3TermScalarMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3;const s:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 begin
  result[0,0]:=m[0,0]*s;
  result[0,1]:=m[0,1]*s;
@@ -6435,7 +6959,7 @@ begin
  m:=mt;
 end;
 
-function Matrix3x3TermTranspose(const m:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3TermTranspose({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 begin
  result[0,0]:=m[0,0];
  result[1,0]:=m[0,1];
@@ -6453,14 +6977,14 @@ begin
 {$endif}
 end;
 
-function Matrix3x3Determinant(const m:TKraftMatrix3x3):TKraftScalar; {$ifdef caninline}inline;{$endif}
+function Matrix3x3Determinant({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftScalar; {$ifdef caninline}inline;{$endif}
 begin
  result:=(m[0,0]*((m[1,1]*m[2,2])-(m[2,1]*m[1,2])))-
          (m[0,1]*((m[1,0]*m[2,2])-(m[2,0]*m[1,2])))+
          (m[0,2]*((m[1,0]*m[2,1])-(m[2,0]*m[1,1])));
 end;
 
-function Matrix3x3EulerAngles(const m:TKraftMatrix3x3):TKraftVector3;
+function Matrix3x3EulerAngles({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftVector3;
 var v0,v1:TKraftVector3;
 begin
  if abs((-1.0)-m[0,2])<EPSILON then begin
@@ -6486,36 +7010,42 @@ begin
  end;
 end;
 
-procedure Matrix3x3SetColumn(var m:TKraftMatrix3x3;const c:longint;const v:TKraftVector3); {$ifdef caninline}inline;{$endif}
+procedure Matrix3x3SetColumn(var m:TKraftMatrix3x3;const c:TKraftInt32;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3); {$ifdef caninline}inline;{$endif}
 begin
  m[c,0]:=v.x;
  m[c,1]:=v.y;
  m[c,2]:=v.z;
 end;
 
-function Matrix3x3GetColumn(const m:TKraftMatrix3x3;const c:longint):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3GetColumn({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3;const c:TKraftInt32):TKraftVector3; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=m[c,0];
  result.y:=m[c,1];
  result.z:=m[c,2];
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-procedure Matrix3x3SetRow(var m:TKraftMatrix3x3;const r:longint;const v:TKraftVector3); {$ifdef caninline}inline;{$endif}
+procedure Matrix3x3SetRow(var m:TKraftMatrix3x3;const r:TKraftInt32;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3); {$ifdef caninline}inline;{$endif}
 begin
  m[0,r]:=v.x;
  m[1,r]:=v.y;
  m[2,r]:=v.z;
 end;
 
-function Matrix3x3GetRow(const m:TKraftMatrix3x3;const r:longint):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function Matrix3x3GetRow({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3;const r:TKraftInt32):TKraftVector3; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=m[0,r];
  result.y:=m[1,r];
  result.z:=m[2,r];
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function Matrix3x3Compare(const m1,m2:TKraftMatrix3x3):boolean;
-var r,c:longint;
+function Matrix3x3Compare({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix3x3):boolean;
+var r,c:TKraftInt32;
 begin
  result:=true;
  for r:=0 to 2 do begin
@@ -6528,7 +7058,7 @@ begin
  end;
 end;
 
-function Matrix3x3Inverse(var mr:TKraftMatrix3x3;const ma:TKraftMatrix3x3):boolean;
+function Matrix3x3Inverse(var mr:TKraftMatrix3x3;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix3x3):boolean;
 var Determinant:TKraftScalar;
 begin
  Determinant:=((ma[0,0]*((ma[1,1]*ma[2,2])-(ma[2,1]*ma[1,2])))-
@@ -6561,7 +7091,7 @@ begin
  end;
 end;
 
-function Matrix3x3TermInverse(const m:TKraftMatrix3x3):TKraftMatrix3x3;
+function Matrix3x3TermInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftMatrix3x3;
 var Determinant:TKraftScalar;
 begin
  Determinant:=((m[0,0]*((m[1,1]*m[2,2])-(m[2,1]*m[1,2])))-
@@ -6598,10 +7128,16 @@ begin
  x.x:=m[0,0];
  x.y:=m[0,1];
  x.z:=m[0,2];
+{$ifdef SIMD}
+ x.w:=0.0;
+{$endif}
  Vector3NormalizeEx(x);
  y.x:=m[1,0];
  y.y:=m[1,1];
  y.z:=m[1,2];
+{$ifdef SIMD}
+ y.w:=0.0;
+{$endif}
  z:=Vector3NormEx(Vector3Cross(x,y));
  y:=Vector3NormEx(Vector3Cross(z,x));
  m[0,0]:=x.x;
@@ -6624,7 +7160,7 @@ begin
 {$endif}
 end;
 
-function Matrix3x3Slerp(const a,b:TKraftMatrix3x3;x:TKraftScalar):TKraftMatrix3x3;
+function Matrix3x3Slerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} a,b:TKraftMatrix3x3;const x:TKraftScalar):TKraftMatrix3x3;
 //var ix:TKraftScalar;
 begin
  if x<=0.0 then begin
@@ -6636,7 +7172,7 @@ begin
  end;
 end;
 
-function Matrix3x3FromToRotation(const FromDirection,ToDirection:TKraftVector3):TKraftMatrix3x3;
+function Matrix3x3FromToRotation({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} FromDirection,ToDirection:TKraftVector3):TKraftMatrix3x3;
 var e,h,hvx,hvz,hvxy,hvxz,hvyz:TKraftScalar;
     x,u,v,c:TKraftVector3;
 begin
@@ -6645,6 +7181,9 @@ begin
   x.x:=abs(FromDirection.x);
   x.y:=abs(FromDirection.y);
   x.z:=abs(FromDirection.z);
+{$ifdef SIMD}
+  x.w:=0.0;
+{$endif}
   if x.x<x.y then begin
    if x.x<x.z then begin
     x.x:=1.0;
@@ -6669,12 +7208,21 @@ begin
   u.x:=x.x-FromDirection.x;
   u.y:=x.y-FromDirection.y;
   u.z:=x.z-FromDirection.z;
+{$ifdef SIMD}
+  u.w:=0.0;
+{$endif}
   v.x:=x.x-ToDirection.x;
   v.y:=x.y-ToDirection.y;
   v.z:=x.z-ToDirection.z;
+{$ifdef SIMD}
+  v.w:=0.0;
+{$endif}
   c.x:=2.0/(sqr(u.x)+sqr(u.y)+sqr(u.z));
   c.y:=2.0/(sqr(v.x)+sqr(v.y)+sqr(v.z));
   c.z:=c.x*c.y*((u.x*v.x)+(u.y*v.y)+(u.z*v.z));
+{$ifdef SIMD}
+  c.w:=0.0;
+{$endif}
   result[0,0]:=1.0+((c.z*(v.x*u.x))-((c.y*(v.x*v.x))+(c.x*(u.x*u.x))));
   result[0,1]:=(c.z*(v.x*u.y))-((c.y*(v.x*v.y))+(c.x*(u.x*u.y)));
   result[0,2]:=(c.z*(v.x*u.z))-((c.y*(v.x*v.z))+(c.x*(u.x*u.z)));
@@ -6722,7 +7270,7 @@ begin
  end;
 end;
 
-function Matrix3x3Construct(const Forwards,Up:TKraftVector3):TKraftMatrix3x3;
+function Matrix3x3Construct({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Forwards,Up:TKraftVector3):TKraftMatrix3x3;
 var RightVector,UpVector,ForwardVector:TKraftVector3;
 begin
  ForwardVector:=Vector3NormEx(Vector3Neg(Forwards));
@@ -6748,7 +7296,7 @@ begin
 {$endif}
 end;
 
-function Matrix3x3OuterProduct(const u,v:TKraftVector3):TKraftMatrix3x3;
+function Matrix3x3OuterProduct({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} u,v:TKraftVector3):TKraftMatrix3x3;
 begin
  result[0,0]:=u.x*v.x;
  result[0,1]:=u.x*v.y;
@@ -6770,7 +7318,7 @@ begin
 {$endif}
 end;
 
-function Matrix4x4Set(m:TKraftMatrix3x3):TKraftMatrix4x4;
+function Matrix4x4Set({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix3x3):TKraftMatrix4x4;
 begin
  result[0,0]:=m[0,0];
  result[0,1]:=m[0,1];
@@ -6790,7 +7338,7 @@ begin
  result[3,3]:=1;
 end;
 
-function Matrix4x4Rotation(m:TKraftMatrix4x4):TKraftMatrix4x4;
+function Matrix4x4Rotation({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftMatrix4x4;
 begin
  result[0,0]:=m[0,0];
  result[0,1]:=m[0,1];
@@ -6810,7 +7358,7 @@ begin
  result[3,3]:=1;
 end;
 
-function Matrix4x4RotateX(Angle:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4RotateX(const Angle:TKraftScalar):TKraftMatrix4x4;
 begin
  result:=Matrix4x4Identity;
  result[1,1]:=cos(Angle);
@@ -6819,7 +7367,7 @@ begin
  result[2,1]:=-result[1,2];
 end;
 
-function Matrix4x4RotateY(Angle:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4RotateY(const Angle:TKraftScalar):TKraftMatrix4x4;
 begin
  result:=Matrix4x4Identity;
  result[0,0]:=cos(Angle);
@@ -6828,7 +7376,7 @@ begin
  result[2,0]:=-result[0,2];
 end;
 
-function Matrix4x4RotateZ(Angle:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4RotateZ(const Angle:TKraftScalar):TKraftMatrix4x4;
 begin
  result:=Matrix4x4Identity;
  result[0,0]:=cos(Angle);
@@ -6837,13 +7385,13 @@ begin
  result[1,0]:=-result[0,1];
 end;
 
-function Matrix4x4Rotate(Angle:TKraftScalar;Axis:TKraftVector3):TKraftMatrix4x4; overload;
+function Matrix4x4Rotate(const Angle:TKraftScalar;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif}Axis:TKraftVector3):TKraftMatrix4x4; overload;
 var m:TKraftMatrix4x4;
     CosinusAngle,SinusAngle:TKraftScalar;
 begin
  m:=Matrix4x4Identity;
  CosinusAngle:=cos(Angle);
- SinusAngle:=sin(Angle);    
+ SinusAngle:=sin(Angle);
  m[0,0]:=CosinusAngle+((1-CosinusAngle)*Axis.x*Axis.x);
  m[1,0]:=((1-CosinusAngle)*Axis.x*Axis.y)-(Axis.z*SinusAngle);
  m[2,0]:=((1-CosinusAngle)*Axis.x*Axis.z)+(Axis.y*SinusAngle);
@@ -6856,7 +7404,7 @@ begin
  result:=m;
 end;
 
-function Matrix4x4Translate(x,y,z:TKraftScalar):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Translate(const x,y,z:TKraftScalar):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix4x4Identity;
  result[3,0]:=x;
@@ -6864,7 +7412,7 @@ begin
  result[3,2]:=z;
 end;
 
-function Matrix4x4Translate(const v:TKraftVector3):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Translate({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix4x4Identity;
  result[3,0]:=v.x;
@@ -6872,7 +7420,7 @@ begin
  result[3,2]:=v.z;
 end;
 
-function Matrix4x4Translate(const v:TKraftVector4):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Translate({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix4x4Identity;
  result[3,0]:=v.x;
@@ -6880,7 +7428,7 @@ begin
  result[3,2]:=v.z;
 end;
 
-procedure Matrix4x4Translate(var m:TKraftMatrix4x4;const v:TKraftVector3); overload; {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4Translate(var m:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector3); overload; {$ifdef caninline}inline;{$endif}
 begin
  m[3,0]:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z)+m[3,0];
  m[3,1]:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z)+m[3,1];
@@ -6888,7 +7436,7 @@ begin
  m[3,3]:=(m[0,3]*v.x)+(m[1,3]*v.y)+(m[2,3]*v.z)+m[3,3];
 end;
 
-procedure Matrix4x4Translate(var m:TKraftMatrix4x4;const v:TKraftVector4); overload; {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4Translate(var m:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4); overload; {$ifdef caninline}inline;{$endif}
 begin
  m[3,0]:=(m[0,0]*v.x)+(m[1,0]*v.y)+(m[2,0]*v.z)+(m[3,0]*v.w);
  m[3,1]:=(m[0,1]*v.x)+(m[1,1]*v.y)+(m[2,1]*v.z)+(m[3,1]*v.w);
@@ -6896,7 +7444,7 @@ begin
  m[3,3]:=(m[0,3]*v.x)+(m[1,3]*v.y)+(m[2,3]*v.z)+(m[3,3]*v.w);
 end;
 
-function Matrix4x4Scale(sx,sy,sz:TKraftScalar):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Scale(const sx,sy,sz:TKraftScalar):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix4x4Identity;
  result[0,0]:=sx;
@@ -6904,7 +7452,7 @@ begin
  result[2,2]:=sz;
 end;
 
-function Matrix4x4Scale(const s:TKraftVector3):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
+function Matrix4x4Scale({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} s:TKraftVector3):TKraftMatrix4x4; overload; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix4x4Identity;
  result[0,0]:=s.x;
@@ -6912,7 +7460,7 @@ begin
  result[2,2]:=s.z;
 end;
 
-procedure Matrix4x4Add(var m1:TKraftMatrix4x4;const m2:TKraftMatrix4x4); {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4Add(var m1:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix4x4); {$ifdef caninline}inline;{$endif}
 begin
  m1[0,0]:=m1[0,0]+m2[0,0];
  m1[0,1]:=m1[0,1]+m2[0,1];
@@ -6932,7 +7480,7 @@ begin
  m1[3,3]:=m1[3,3]+m2[3,3];
 end;
 
-procedure Matrix4x4Sub(var m1:TKraftMatrix4x4;const m2:TKraftMatrix4x4); {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4Sub(var m1:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix4x4); {$ifdef caninline}inline;{$endif}
 begin
  m1[0,0]:=m1[0,0]-m2[0,0];
  m1[0,1]:=m1[0,1]-m2[0,1];
@@ -6952,8 +7500,16 @@ begin
  m1[3,3]:=m1[3,3]-m2[3,3];
 end;
 
-procedure Matrix4x4Mul(var m1:TKraftMatrix4x4;const m2:TKraftMatrix4x4); overload; {$ifdef CPU386ASMForSinglePrecision}register;
+procedure Matrix4x4Mul(var m1:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m2:TKraftMatrix4x4); overload; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler;
+{$if defined(cpuamd64) and defined(Windows)}
+var StackSave0,StackSave1:array[0..3] of single;
+{$ifend}
 asm
+{$if defined(cpuamd64) and defined(Windows)}
+ movups dqword ptr [StackSave0],xmm6
+ movups dqword ptr [StackSave1],xmm7
+{$ifend}
+
  movups xmm0,dqword ptr [m2+0]
  movups xmm1,dqword ptr [m2+16]
  movups xmm2,dqword ptr [m2+32]
@@ -7015,6 +7571,11 @@ asm
  addps xmm4,xmm6
  movups dqword ptr [m1+48],xmm4
 
+{$if defined(cpuamd64) and defined(Windows)}
+ movups xmm6,dqword ptr [StackSave0]
+ movups xmm7,dqword ptr [StackSave1]
+{$ifend}
+
 end;
 {$else}
 var t:TKraftMatrix4x4;
@@ -7037,10 +7598,17 @@ begin
  t[3,3]:=(m1[3,0]*m2[0,3])+(m1[3,1]*m2[1,3])+(m1[3,2]*m2[2,3])+(m1[3,3]*m2[3,3]);
  m1:=t;
 end;
-{$endif}
+{$ifend}
 
-procedure Matrix4x4Mul(var mr:TKraftMatrix4x4;const m1,m2:TKraftMatrix4x4); overload; {$ifdef CPU386ASMForSinglePrecision}register;
+procedure Matrix4x4Mul(var mr:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4); overload; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler;
+{$if defined(cpuamd64) and defined(Windows)}
+var StackSave0,StackSave1:array[0..3] of single;
+{$ifend}
 asm
+{$if defined(cpuamd64) and defined(Windows)}
+ movups dqword ptr [StackSave0],xmm6
+ movups dqword ptr [StackSave1],xmm7
+{$ifend}
 
  movups xmm0,dqword ptr [m2+0]
  movups xmm1,dqword ptr [m2+16]
@@ -7103,6 +7671,11 @@ asm
  addps xmm4,xmm6
  movups dqword ptr [mr+48],xmm4
 
+{$if defined(cpuamd64) and defined(Windows)}
+ movups xmm6,dqword ptr [StackSave0]
+ movups xmm7,dqword ptr [StackSave1]
+{$ifend}
+
 end;
 {$else}
 begin
@@ -7123,9 +7696,9 @@ begin
  mr[3,2]:=(m1[3,0]*m2[0,2])+(m1[3,1]*m2[1,2])+(m1[3,2]*m2[2,2])+(m1[3,3]*m2[3,2]);
  mr[3,3]:=(m1[3,0]*m2[0,3])+(m1[3,1]*m2[1,3])+(m1[3,2]*m2[2,3])+(m1[3,3]*m2[3,3]);
 end;
-{$endif}
+{$ifend}
 
-function Matrix4x4TermAdd(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4TermAdd({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
 begin
  result[0,0]:=m1[0,0]+m2[0,0];
  result[0,1]:=m1[0,1]+m2[0,1];
@@ -7145,7 +7718,7 @@ begin
  result[3,3]:=m1[3,3]+m2[3,3];
 end;
 
-function Matrix4x4TermSub(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4TermSub({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
 begin
  result[0,0]:=m1[0,0]-m2[0,0];
  result[0,1]:=m1[0,1]-m2[0,1];
@@ -7165,8 +7738,15 @@ begin
  result[3,3]:=m1[3,3]-m2[3,3];
 end;
 
-function Matrix4x4TermMul(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef CPU386ASMForSinglePrecision}register;
+function Matrix4x4TermMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler;
+{$if defined(cpuamd64) and defined(Windows)}
+var StackSave0,StackSave1:array[0..3] of single;
+{$ifend}
 asm
+{$if defined(cpuamd64) and defined(Windows)}
+ movups dqword ptr [StackSave0],xmm6
+ movups dqword ptr [StackSave1],xmm7
+{$ifend}
 
  movups xmm0,dqword ptr [m2+0]
  movups xmm1,dqword ptr [m2+16]
@@ -7229,6 +7809,11 @@ asm
  addps xmm4,xmm6
  movups dqword ptr [result+48],xmm4
 
+{$if defined(cpuamd64) and defined(Windows)}
+ movups xmm6,dqword ptr [StackSave0]
+ movups xmm7,dqword ptr [StackSave1]
+{$ifend}
+
 end;
 {$else}
 begin
@@ -7249,19 +7834,19 @@ begin
  result[3,2]:=(m1[3,0]*m2[0,2])+(m1[3,1]*m2[1,2])+(m1[3,2]*m2[2,2])+(m1[3,3]*m2[3,2]);
  result[3,3]:=(m1[3,0]*m2[0,3])+(m1[3,1]*m2[1,3])+(m1[3,2]*m2[2,3])+(m1[3,3]*m2[3,3]);
 end;
-{$endif}
+{$ifend}
 
-function Matrix4x4TermMulInverted(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4TermMulInverted({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix4x4TermMul(m1,Matrix4x4TermInverse(m2));
 end;
 
-function Matrix4x4TermMulSimpleInverted(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4TermMulSimpleInverted({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix4x4TermMul(m1,Matrix4x4TermSimpleInverse(m2));
 end;
 
-function Matrix4x4TermMulTranspose(const m1,m2:TKraftMatrix4x4):TKraftMatrix4x4;
+function Matrix4x4TermMulTranspose({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftMatrix4x4;
 begin
  result[0,0]:=(m1[0,0]*m2[0,0])+(m1[0,1]*m2[1,0])+(m1[0,2]*m2[2,0])+(m1[0,3]*m2[3,0]);
  result[1,0]:=(m1[0,0]*m2[0,1])+(m1[0,1]*m2[1,1])+(m1[0,2]*m2[2,1])+(m1[0,3]*m2[3,1]);
@@ -7281,7 +7866,7 @@ begin
  result[3,3]:=(m1[3,0]*m2[0,3])+(m1[3,1]*m2[1,3])+(m1[3,2]*m2[2,3])+(m1[3,3]*m2[3,3]);
 end;
 
-function Matrix4x4Lerp(const a,b:TKraftMatrix4x4;x:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4Lerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} a,b:TKraftMatrix4x4;const x:TKraftScalar):TKraftMatrix4x4;
 var ix:TKraftScalar;
 begin
  if x<=0.0 then begin
@@ -7309,7 +7894,7 @@ begin
  end;
 end;
 
-function Matrix4x4Slerp(const a,b:TKraftMatrix4x4;x:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4Slerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} a,b:TKraftMatrix4x4;const x:TKraftScalar):TKraftMatrix4x4;
 var ix:TKraftScalar;
     m:TKraftMatrix3x3;
 begin
@@ -7339,7 +7924,7 @@ begin
  end;
 end;
 
-procedure Matrix4x4ScalarMul(var m:TKraftMatrix4x4;s:TKraftScalar); {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4ScalarMul(var m:TKraftMatrix4x4;const s:TKraftScalar); {$ifdef caninline}inline;{$endif}
 begin
  m[0,0]:=m[0,0]*s;
  m[0,1]:=m[0,1]*s;
@@ -7359,9 +7944,11 @@ begin
  m[3,3]:=m[3,3]*s;
 end;
 
-procedure Matrix4x4Transpose(var m:TKraftMatrix4x4);
-{$ifdef CPU386ASMForSinglePrecision}
+procedure Matrix4x4Transpose(var m:TKraftMatrix4x4); {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [m+0]
  movups xmm4,dqword ptr [m+16]
  movups xmm2,dqword ptr [m+32]
@@ -7373,15 +7960,15 @@ asm
  unpcklps xmm2,xmm5
  unpckhps xmm3,xmm5
  movaps xmm4,xmm0
- movaps xmm6,xmm1
+ movaps xmm5,xmm1
  shufps xmm0,xmm2,$44 // 01000100b
  shufps xmm4,xmm2,$ee // 11101110b
  shufps xmm1,xmm3,$44 // 01000100b
- shufps xmm6,xmm3,$ee // 11101110b
+ shufps xmm5,xmm3,$ee // 11101110b
  movups dqword ptr [m+0],xmm0
  movups dqword ptr [m+16],xmm4
  movups dqword ptr [m+32],xmm1
- movups dqword ptr [m+48],xmm6
+ movups dqword ptr [m+48],xmm5
 end;
 {$else}
 var mt:TKraftMatrix4x4;
@@ -7404,11 +7991,13 @@ begin
  mt[3,3]:=m[3,3];
  m:=mt;
 end;
-{$endif}
+{$ifend}
 
-function Matrix4x4TermTranspose(const m:TKraftMatrix4x4):TKraftMatrix4x4;
-{$ifdef CPU386ASMForSinglePrecision}
+function Matrix4x4TermTranspose({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftMatrix4x4; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [m+0]
  movups xmm4,dqword ptr [m+16]
  movups xmm2,dqword ptr [m+32]
@@ -7420,15 +8009,15 @@ asm
  unpcklps xmm2,xmm5
  unpckhps xmm3,xmm5
  movaps xmm4,xmm0
- movaps xmm6,xmm1
+ movaps xmm5,xmm1
  shufps xmm0,xmm2,$44 // 01000100b
  shufps xmm4,xmm2,$ee // 11101110b
  shufps xmm1,xmm3,$44 // 01000100b
- shufps xmm6,xmm3,$ee // 11101110b
+ shufps xmm5,xmm3,$ee // 11101110b
  movups dqword ptr [result+0],xmm0
  movups dqword ptr [result+16],xmm4
  movups dqword ptr [result+32],xmm1
- movups dqword ptr [result+48],xmm6
+ movups dqword ptr [result+48],xmm5
 end;
 {$else}
 begin
@@ -7449,11 +8038,18 @@ begin
  result[3,2]:=m[2,3];
  result[3,3]:=m[3,3];
 end;
-{$endif}
+{$ifend}
 
-function Matrix4x4Determinant(const m:TKraftMatrix4x4):TKraftScalar;
-{$ifdef CPU386ASMForSinglePrecision}
+function Matrix4x4Determinant({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftScalar; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler;
+{$if defined(cpuamd64) and defined(Windows)}
+var StackSave0,StackSave1:array[0..3] of single;
+{$ifend}
 asm
+{$if defined(cpuamd64) and defined(Windows)}
+ movups dqword ptr [StackSave0],xmm6
+ movups dqword ptr [StackSave1],xmm7
+{$ifend}
+
  movups xmm0,dqword ptr [m+32]
  movups xmm1,dqword ptr [m+48]
  movups xmm2,dqword ptr [m+16]
@@ -7492,6 +8088,12 @@ asm
  shufps xmm6,xmm6,$01
  addss xmm5,xmm6
  movss dword ptr [result],xmm5
+
+{$if defined(cpuamd64) and defined(Windows)}
+ movups xmm6,dqword ptr [StackSave0]
+ movups xmm7,dqword ptr [StackSave1]
+{$ifend}
+
 end;
 {$else}
 var inv:array[0..15] of TKraftScalar;
@@ -7514,9 +8116,9 @@ begin
  inv[15]:=((((m[0,0]*m[1,1]*m[2,2])-(m[0,0]*m[1,2]*m[2,1]))-(m[1,0]*m[0,1]*m[2,2]))+(m[1,0]*m[0,2]*m[2,1])+(m[2,0]*m[0,1]*m[1,2]))-(m[2,0]*m[0,2]*m[1,1]);
  result:=(m[0,0]*inv[0])+(m[0,1]*inv[4])+(m[0,2]*inv[8])+(m[0,3]*inv[12]);
 end;
-{$endif}
+{$ifend}
 
-procedure Matrix4x4SetColumn(var m:TKraftMatrix4x4;const c:longint;const v:TKraftVector4); {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4SetColumn(var m:TKraftMatrix4x4;const c:TKraftInt32;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4); {$ifdef caninline}inline;{$endif}
 begin
  m[c,0]:=v.x;
  m[c,1]:=v.y;
@@ -7524,7 +8126,7 @@ begin
  m[c,3]:=v.w;
 end;
 
-function Matrix4x4GetColumn(const m:TKraftMatrix4x4;const c:longint):TKraftVector4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4GetColumn({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4;const c:TKraftInt32):TKraftVector4; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=m[c,0];
  result.y:=m[c,1];
@@ -7532,7 +8134,7 @@ begin
  result.w:=m[c,3];
 end;
 
-procedure Matrix4x4SetRow(var m:TKraftMatrix4x4;const r:longint;const v:TKraftVector4); {$ifdef caninline}inline;{$endif}
+procedure Matrix4x4SetRow(var m:TKraftMatrix4x4;const r:TKraftInt32;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} v:TKraftVector4); {$ifdef caninline}inline;{$endif}
 begin
  m[0,r]:=v.x;
  m[1,r]:=v.y;
@@ -7540,7 +8142,7 @@ begin
  m[3,r]:=v.w;
 end;
 
-function Matrix4x4GetRow(const m:TKraftMatrix4x4;const r:longint):TKraftVector4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4GetRow({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4;const r:TKraftInt32):TKraftVector4; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=m[0,r];
  result.y:=m[1,r];
@@ -7548,8 +8150,8 @@ begin
  result.w:=m[3,r];
 end;
 
-function Matrix4x4Compare(const m1,m2:TKraftMatrix4x4):boolean;
-var r,c:longint;
+function Matrix4x4Compare({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):boolean;
+var r,c:TKraftInt32;
 begin
  result:=true;
  for r:=0 to 3 do begin
@@ -7561,8 +8163,8 @@ begin
   end;
  end;
 end;
-                      
-function Matrix4x4LengthSquared(const m:TKraftMatrix4x4):TKraftScalar;
+
+function Matrix4x4LengthSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftScalar;
 begin
  result:=Vector4LengthSquared(PKraftVector4(pointer(@m[0,0]))^)+
          Vector4LengthSquared(PKraftVector4(pointer(@m[1,0]))^)+
@@ -7570,7 +8172,7 @@ begin
          Vector4LengthSquared(PKraftVector4(pointer(@m[3,0]))^);
 end;
 
-function Matrix4x4Length(const m:TKraftMatrix4x4):TKraftScalar;
+function Matrix4x4Length({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4):TKraftScalar;
 begin
  result:=Matrix4x4LengthSquared(m);
  if result>0.0 then begin
@@ -7580,12 +8182,12 @@ begin
  end;
 end;
 
-function Matrix4x4DifferenceSquared(const m1,m2:TKraftMatrix4x4):TKraftScalar;
+function Matrix4x4DifferenceSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftScalar;
 begin
  result:=Matrix4x4LengthSquared(Matrix4x4TermSub(m2,m1));
 end;
 
-function Matrix4x4Difference(const m1,m2:TKraftMatrix4x4):TKraftScalar;
+function Matrix4x4Difference({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m1,m2:TKraftMatrix4x4):TKraftScalar;
 begin
  result:=Matrix4x4Length(Matrix4x4TermSub(m2,m1));
 end;
@@ -7632,7 +8234,7 @@ begin
  result[3,3]:=1.0;
 end;
 
-function Matrix4x4SimpleInverse(var mr:TKraftMatrix4x4;const ma:TKraftMatrix4x4):boolean; {$ifdef caninline}inline;{$endif}
+function Matrix4x4SimpleInverse(var mr:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):boolean; {$ifdef caninline}inline;{$endif}
 begin
  mr[0,0]:=ma[0,0];
  mr[0,1]:=ma[1,0];
@@ -7646,14 +8248,14 @@ begin
  mr[2,1]:=ma[1,2];
  mr[2,2]:=ma[2,2];
  mr[2,3]:=ma[2,3];
- mr[3,0]:=-Vector3Dot(PKraftVector3(pointer(@ma[3,0]))^,Vector3(ma[0,0],ma[0,1],ma[0,2]));
- mr[3,1]:=-Vector3Dot(PKraftVector3(pointer(@ma[3,0]))^,Vector3(ma[1,0],ma[1,1],ma[1,2]));
- mr[3,2]:=-Vector3Dot(PKraftVector3(pointer(@ma[3,0]))^,Vector3(ma[2,0],ma[2,1],ma[2,2]));
+ mr[3,0]:=-Vector3Dot(Vector3(PKraftRawVector3(pointer(@ma[3,0]))^),Vector3(ma[0,0],ma[0,1],ma[0,2]));
+ mr[3,1]:=-Vector3Dot(Vector3(PKraftRawVector3(pointer(@ma[3,0]))^),Vector3(ma[1,0],ma[1,1],ma[1,2]));
+ mr[3,2]:=-Vector3Dot(Vector3(PKraftRawVector3(pointer(@ma[3,0]))^),Vector3(ma[2,0],ma[2,1],ma[2,2]));
  mr[3,3]:=ma[3,3];
  result:=true;
 end;
 
-function Matrix4x4TermSimpleInverse(const ma:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
+function Matrix4x4TermSimpleInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
 begin
  result[0,0]:=ma[0,0];
  result[0,1]:=ma[1,0];
@@ -7667,18 +8269,31 @@ begin
  result[2,1]:=ma[1,2];
  result[2,2]:=ma[2,2];
  result[2,3]:=ma[2,3];
- result[3,0]:=-Vector3Dot(PKraftVector3(pointer(@ma[3,0]))^,Vector3(ma[0,0],ma[0,1],ma[0,2]));
- result[3,1]:=-Vector3Dot(PKraftVector3(pointer(@ma[3,0]))^,Vector3(ma[1,0],ma[1,1],ma[1,2]));
- result[3,2]:=-Vector3Dot(PKraftVector3(pointer(@ma[3,0]))^,Vector3(ma[2,0],ma[2,1],ma[2,2]));
+ result[3,0]:=-Vector3Dot(Vector3(PKraftRawVector3(pointer(@ma[3,0]))^),Vector3(ma[0,0],ma[0,1],ma[0,2]));
+ result[3,1]:=-Vector3Dot(Vector3(PKraftRawVector3(pointer(@ma[3,0]))^),Vector3(ma[1,0],ma[1,1],ma[1,2]));
+ result[3,2]:=-Vector3Dot(Vector3(PKraftRawVector3(pointer(@ma[3,0]))^),Vector3(ma[2,0],ma[2,1],ma[2,2]));
  result[3,3]:=ma[3,3];
 end;
 
-function Matrix4x4Inverse(var mr:TKraftMatrix4x4;const ma:TKraftMatrix4x4):boolean;
-{$ifdef CPU386ASMForSinglePrecision}
+function Matrix4x4Inverse(var mr:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):boolean; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler;
+{$if defined(cpuamd64) and defined(Windows)}
+var StackSave0,StackSave1:array[0..3] of single;
+{$ifend}
 asm
+{$if defined(cpuamd64) and defined(Windows)}
+ movups dqword ptr [StackSave0],xmm6
+ movups dqword ptr [StackSave1],xmm7
+{$ifend}
+
+{$ifdef cpu386}
  mov ecx,esp
  and esp,$fffffff0
  sub esp,$b0
+{$else}
+ mov rax,rsp
+ and rsp,$fffffffffffffff0
+ sub rsp,$b0
+{$endif}
  movlps xmm2,qword ptr [ma+8]
  movlps xmm4,qword ptr [ma+40]
  movhps xmm2,qword ptr [ma+24]
@@ -7710,14 +8325,22 @@ asm
  mulps xmm7,xmm5
  shufps xmm5,xmm5,$4e
  shufps xmm7,xmm7,$b1
+{$ifdef cpu386}
  movaps dqword ptr [esp+16],xmm2
+{$else}
+ movaps dqword ptr [rsp+16],xmm2
+{$endif}
  movaps xmm2,xmm4
  mulps xmm2,xmm7
  addps xmm2,xmm3
  movaps xmm3,xmm7
  shufps xmm7,xmm7,$4e
  mulps xmm3,xmm1
+{$ifdef cpu386}
  movaps dqword ptr [esp+32],xmm3
+{$else}
+ movaps dqword ptr [rsp+32],xmm3
+{$endif}
  movaps xmm3,xmm4
  mulps xmm3,xmm7
  mulps xmm7,xmm1
@@ -7726,14 +8349,22 @@ asm
  shufps xmm3,xmm3,$4e
  mulps xmm3,xmm4
  shufps xmm3,xmm3,$b1
+{$ifdef cpu386}
  movaps dqword ptr [esp+48],xmm7
+{$else}
+ movaps dqword ptr [rsp+48],xmm7
+{$endif}
  movaps xmm7,xmm5
  mulps xmm5,xmm3
  addps xmm5,xmm2
  movaps xmm2,xmm3
  shufps xmm3,xmm3,$4e
  mulps xmm2,xmm1
+{$ifdef cpu386}
  movaps dqword ptr [esp+64],xmm4
+{$else}
+ movaps dqword ptr [rsp+64],xmm4
+{$endif}
  movaps xmm4,xmm7
  mulps xmm7,xmm3
  mulps xmm3,xmm1
@@ -7744,7 +8375,11 @@ asm
  shufps xmm3,xmm3,$4e
  movaps xmm7,xmm1
  shufps xmm1,xmm1,$4e
+{$ifdef cpu386}
  movaps dqword ptr [esp],xmm5
+{$else}
+ movaps dqword ptr [rsp],xmm5
+{$endif}
  addps xmm1,xmm7
  movaps xmm5,xmm1
  shufps xmm1,xmm1,$b1
@@ -7754,9 +8389,15 @@ asm
  shufps xmm5,xmm5,$b1
  movaps xmm7,xmm5
  shufps xmm5,xmm5,$4e
+{$ifdef cpu386}
  movaps dqword ptr [esp+80],xmm4
  movaps xmm4,dqword ptr [esp+64]
  movaps dqword ptr [esp+64],xmm6
+{$else}
+ movaps dqword ptr [rsp+80],xmm4
+ movaps xmm4,dqword ptr [rsp+64]
+ movaps dqword ptr [rsp+64],xmm6
+{$endif}
  movaps xmm6,xmm4
  mulps xmm6,xmm7
  addps xmm6,xmm3
@@ -7766,26 +8407,48 @@ asm
  movaps xmm6,xmm4
  mulps xmm6,xmm2
  shufps xmm6,xmm6,$b1
+{$ifdef cpu386}
  movaps dqword ptr [esp+112],xmm5
  movaps xmm5,dqword ptr [esp+64]
  movaps dqword ptr [esp+128],xmm7
+{$else}
+ movaps dqword ptr [rsp+112],xmm5
+ movaps xmm5,dqword ptr [rsp+64]
+ movaps dqword ptr [rsp+128],xmm7
+{$endif}
  movaps xmm7,xmm6
  mulps xmm7,xmm5
  addps xmm7,xmm3
  movaps xmm3,xmm6
  shufps xmm3,xmm3,$4e
+{$ifdef cpu386}
  movaps dqword ptr [esp+144],xmm4
+{$else}
+ movaps dqword ptr [rsp+144],xmm4
+{$endif}
  movaps xmm4,xmm5
  mulps xmm5,xmm3
+{$ifdef cpu386}
  movaps dqword ptr [esp+160],xmm4
+{$else}
+ movaps dqword ptr [rsp+160],xmm4
+{$endif}
  movaps xmm4,xmm6
  movaps xmm6,xmm7
  subps xmm6,xmm5
  movaps xmm5,xmm0
+{$ifdef cpu386}
  movaps xmm7,dqword ptr [esp+16]
+{$else}
+ movaps xmm7,dqword ptr [rsp+16]
+{$endif}
  subps xmm5,xmm7
  shufps xmm5,xmm5,$4e
+{$ifdef cpu386}
  movaps xmm7,dqword ptr [esp+80]
+{$else}
+ movaps xmm7,dqword ptr [rsp+80]
+{$endif}
  mulps xmm4,xmm7
  mulps xmm3,xmm7
  subps xmm5,xmm4
@@ -7794,7 +8457,11 @@ asm
  shufps xmm2,xmm2,$b1
  movaps xmm4,xmm2
  shufps xmm4,xmm4,$4e
+{$ifdef cpu386}
  movaps xmm5,dqword ptr [esp+144]
+{$else}
+ movaps xmm5,dqword ptr [rsp+144]
+{$endif}
  movaps xmm0,xmm6
  movaps xmm6,xmm5
  mulps xmm5,xmm2
@@ -7803,17 +8470,34 @@ asm
  movaps xmm3,xmm4
  movaps xmm4,xmm5
  subps xmm4,xmm6
+{$ifdef cpu386}
  movaps xmm5,dqword ptr [esp+48]
  movaps xmm6,dqword ptr [esp+32]
+{$else}
+ movaps xmm5,dqword ptr [rsp+48]
+ movaps xmm6,dqword ptr [rsp+32]
+{$endif}
  subps xmm5,xmm6
  shufps xmm5,xmm5,$4e
+{$ifdef cpu386}
  movaps xmm6,[esp+128]
+{$else}
+ movaps xmm6,[rsp+128]
+{$endif}
  mulps xmm6,xmm7
  subps xmm6,xmm5
+{$ifdef cpu386}
  movaps xmm5,dqword ptr [esp+112]
+{$else}
+ movaps xmm5,dqword ptr [rsp+112]
+{$endif}
  mulps xmm7,xmm5
  subps xmm6,xmm7
+{$ifdef cpu386}
  movaps xmm5,dqword ptr [esp+160]
+{$else}
+ movaps xmm5,dqword ptr [rsp+160]
+{$endif}
  mulps xmm2,xmm5
  mulps xmm5,xmm3
  subps xmm6,xmm2
@@ -7821,7 +8505,11 @@ asm
  addps xmm2,xmm6
  movaps xmm6,xmm0
  movaps xmm0,xmm1
+{$ifdef cpu386}
  movaps xmm1,dqword ptr [esp]
+{$else}
+ movaps xmm1,dqword ptr [rsp]
+{$endif}
  movaps xmm3,xmm0
  rcpss xmm5,xmm0
  mulss xmm0,xmm5
@@ -7842,8 +8530,17 @@ asm
  movups dqword ptr [mr+16],xmm4
  movups dqword ptr [mr+32],xmm6
  movups dqword ptr [mr+48],xmm5
+{$ifdef cpu386}
  mov esp,ecx
+{$else}
+ mov rsp,rax
+{$endif}
  mov eax,1
+
+{$if defined(cpuamd64) and defined(Windows)}
+ movups xmm6,dqword ptr [StackSave0]
+ movups xmm7,dqword ptr [StackSave1]
+{$ifend}
 end;
 {$else}
 var inv:array[0..15] of TKraftScalar;
@@ -7889,14 +8586,27 @@ begin
   result:=false;
  end;
 end;
-{$endif}
+{$ifend}
 
-function Matrix4x4TermInverse(const ma:TKraftMatrix4x4):TKraftMatrix4x4;
-{$ifdef CPU386ASMForSinglePrecision}
+function Matrix4x4TermInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):TKraftMatrix4x4; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler;
+{$if defined(cpuamd64) and defined(Windows)}
+var StackSave0,StackSave1:array[0..3] of single;
+{$ifend}
 asm
+{$if defined(cpuamd64) and defined(Windows)}
+ movups dqword ptr [StackSave0],xmm6
+ movups dqword ptr [StackSave1],xmm7
+{$ifend}
+
+{$ifdef cpu386}
  mov ecx,esp
  and esp,$fffffff0
  sub esp,$b0
+{$else}
+ mov rax,rsp
+ and rsp,$fffffffffffffff0
+ sub rsp,$b0
+{$endif}
  movlps xmm2,qword ptr [ma+8]
  movlps xmm4,qword ptr [ma+40]
  movhps xmm2,qword ptr [ma+24]
@@ -7928,14 +8638,22 @@ asm
  mulps xmm7,xmm5
  shufps xmm5,xmm5,$4e
  shufps xmm7,xmm7,$b1
+{$ifdef cpu386}
  movaps dqword ptr [esp+16],xmm2
+{$else}
+ movaps dqword ptr [rsp+16],xmm2
+{$endif}
  movaps xmm2,xmm4
  mulps xmm2,xmm7
  addps xmm2,xmm3
  movaps xmm3,xmm7
  shufps xmm7,xmm7,$4e
  mulps xmm3,xmm1
+{$ifdef cpu386}
  movaps dqword ptr [esp+32],xmm3
+{$else}
+ movaps dqword ptr [rsp+32],xmm3
+{$endif}
  movaps xmm3,xmm4
  mulps xmm3,xmm7
  mulps xmm7,xmm1
@@ -7944,14 +8662,22 @@ asm
  shufps xmm3,xmm3,$4e
  mulps xmm3,xmm4
  shufps xmm3,xmm3,$b1
+{$ifdef cpu386}
  movaps dqword ptr [esp+48],xmm7
+{$else}
+ movaps dqword ptr [rsp+48],xmm7
+{$endif}
  movaps xmm7,xmm5
  mulps xmm5,xmm3
  addps xmm5,xmm2
  movaps xmm2,xmm3
  shufps xmm3,xmm3,$4e
  mulps xmm2,xmm1
+{$ifdef cpu386}
  movaps dqword ptr [esp+64],xmm4
+{$else}
+ movaps dqword ptr [rsp+64],xmm4
+{$endif}
  movaps xmm4,xmm7
  mulps xmm7,xmm3
  mulps xmm3,xmm1
@@ -7962,7 +8688,11 @@ asm
  shufps xmm3,xmm3,$4e
  movaps xmm7,xmm1
  shufps xmm1,xmm1,$4e
+{$ifdef cpu386}
  movaps dqword ptr [esp],xmm5
+{$else}
+ movaps dqword ptr [rsp],xmm5
+{$endif}
  addps xmm1,xmm7
  movaps xmm5,xmm1
  shufps xmm1,xmm1,$b1
@@ -7972,9 +8702,15 @@ asm
  shufps xmm5,xmm5,$b1
  movaps xmm7,xmm5
  shufps xmm5,xmm5,$4e
+{$ifdef cpu386}
  movaps dqword ptr [esp+80],xmm4
  movaps xmm4,dqword ptr [esp+64]
  movaps dqword ptr [esp+64],xmm6
+{$else}
+ movaps dqword ptr [rsp+80],xmm4
+ movaps xmm4,dqword ptr [rsp+64]
+ movaps dqword ptr [rsp+64],xmm6
+{$endif}
  movaps xmm6,xmm4
  mulps xmm6,xmm7
  addps xmm6,xmm3
@@ -7984,26 +8720,48 @@ asm
  movaps xmm6,xmm4
  mulps xmm6,xmm2
  shufps xmm6,xmm6,$b1
+{$ifdef cpu386}
  movaps dqword ptr [esp+112],xmm5
  movaps xmm5,dqword ptr [esp+64]
  movaps dqword ptr [esp+128],xmm7
+{$else}
+ movaps dqword ptr [rsp+112],xmm5
+ movaps xmm5,dqword ptr [rsp+64]
+ movaps dqword ptr [rsp+128],xmm7
+{$endif}
  movaps xmm7,xmm6
  mulps xmm7,xmm5
  addps xmm7,xmm3
  movaps xmm3,xmm6
  shufps xmm3,xmm3,$4e
+{$ifdef cpu386}
  movaps dqword ptr [esp+144],xmm4
+{$else}
+ movaps dqword ptr [rsp+144],xmm4
+{$endif}
  movaps xmm4,xmm5
  mulps xmm5,xmm3
+{$ifdef cpu386}
  movaps dqword ptr [esp+160],xmm4
+{$else}
+ movaps dqword ptr [rsp+160],xmm4
+{$endif}
  movaps xmm4,xmm6
  movaps xmm6,xmm7
  subps xmm6,xmm5
  movaps xmm5,xmm0
+{$ifdef cpu386}
  movaps xmm7,dqword ptr [esp+16]
+{$else}
+ movaps xmm7,dqword ptr [rsp+16]
+{$endif}
  subps xmm5,xmm7
  shufps xmm5,xmm5,$4e
+{$ifdef cpu386}
  movaps xmm7,dqword ptr [esp+80]
+{$else}
+ movaps xmm7,dqword ptr [rsp+80]
+{$endif}
  mulps xmm4,xmm7
  mulps xmm3,xmm7
  subps xmm5,xmm4
@@ -8012,7 +8770,11 @@ asm
  shufps xmm2,xmm2,$b1
  movaps xmm4,xmm2
  shufps xmm4,xmm4,$4e
+{$ifdef cpu386}
  movaps xmm5,dqword ptr [esp+144]
+{$else}
+ movaps xmm5,dqword ptr [rsp+144]
+{$endif}
  movaps xmm0,xmm6
  movaps xmm6,xmm5
  mulps xmm5,xmm2
@@ -8021,17 +8783,34 @@ asm
  movaps xmm3,xmm4
  movaps xmm4,xmm5
  subps xmm4,xmm6
+{$ifdef cpu386}
  movaps xmm5,dqword ptr [esp+48]
  movaps xmm6,dqword ptr [esp+32]
+{$else}
+ movaps xmm5,dqword ptr [rsp+48]
+ movaps xmm6,dqword ptr [rsp+32]
+{$endif}
  subps xmm5,xmm6
  shufps xmm5,xmm5,$4e
+{$ifdef cpu386}
  movaps xmm6,[esp+128]
+{$else}
+ movaps xmm6,[rsp+128]
+{$endif}
  mulps xmm6,xmm7
  subps xmm6,xmm5
+{$ifdef cpu386}
  movaps xmm5,dqword ptr [esp+112]
+{$else}
+ movaps xmm5,dqword ptr [rsp+112]
+{$endif}
  mulps xmm7,xmm5
  subps xmm6,xmm7
+{$ifdef cpu386}
  movaps xmm5,dqword ptr [esp+160]
+{$else}
+ movaps xmm5,dqword ptr [rsp+160]
+{$endif}
  mulps xmm2,xmm5
  mulps xmm5,xmm3
  subps xmm6,xmm2
@@ -8039,7 +8818,11 @@ asm
  addps xmm2,xmm6
  movaps xmm6,xmm0
  movaps xmm0,xmm1
+{$ifdef cpu386}
  movaps xmm1,dqword ptr [esp]
+{$else}
+ movaps xmm1,dqword ptr [rsp]
+{$endif}
  movaps xmm3,xmm0
  rcpss xmm5,xmm0
  mulss xmm0,xmm5
@@ -8060,7 +8843,17 @@ asm
  movups dqword ptr [result+16],xmm4
  movups dqword ptr [result+32],xmm6
  movups dqword ptr [result+48],xmm5
+{$ifdef cpu386}
  mov esp,ecx
+{$else}
+ mov rsp,rax
+{$endif}
+
+{$if defined(cpuamd64) and defined(Windows)}
+ movups xmm6,dqword ptr [StackSave0]
+ movups xmm7,dqword ptr [StackSave1]
+{$ifend}
+
 end;
 {$else}
 var inv:array[0..15] of TKraftScalar;
@@ -8105,9 +8898,9 @@ begin
   result:=ma;
  end;
 end;
-{$endif}
+{$ifend}
 
-function Matrix4x4InverseOld(var mr:TKraftMatrix4x4;const ma:TKraftMatrix4x4):boolean;
+function Matrix4x4InverseOld(var mr:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):boolean;
 var Det,IDet:TKraftScalar;
 begin
  Det:=(ma[0,0]*ma[1,1]*ma[2,2])+
@@ -8141,7 +8934,7 @@ begin
  end;
 end;
 
-function Matrix4x4TermInverseOld(const ma:TKraftMatrix4x4):TKraftMatrix4x4;
+function Matrix4x4TermInverseOld({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ma:TKraftMatrix4x4):TKraftMatrix4x4;
 var Det,IDet:TKraftScalar;
 begin
  Det:=((((ma[0,0]*ma[1,1]*ma[2,2])+
@@ -8173,8 +8966,8 @@ begin
  end;
 end;
 
-function Matrix4x4GetSubMatrix3x3(const m:TKraftMatrix4x4;i,j:longint):TKraftMatrix3x3;
-var di,dj,si,sj:longint;
+function Matrix4x4GetSubMatrix3x3({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} m:TKraftMatrix4x4;const i,j:TKraftInt32):TKraftMatrix3x3;
+var di,dj,si,sj:TKraftInt32;
 begin
  for di:=0 to 2 do begin
   for dj:=0 to 2 do begin
@@ -8198,7 +8991,7 @@ begin
 {$endif}
 end;
 
-function Matrix4x4Frustum(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4Frustum(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
 var rml,tmb,fmn:TKraftScalar;
 begin
  rml:=Right-Left;
@@ -8222,7 +9015,7 @@ begin
  result[3,3]:=0.0;
 end;
 
-function Matrix4x4Ortho(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4Ortho(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
 var rml,tmb,fmn:TKraftScalar;
 begin
  rml:=Right-Left;
@@ -8246,7 +9039,7 @@ begin
  result[3,3]:=1.0;
 end;
 
-function Matrix4x4OrthoLH(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4OrthoLH(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
 var rml,tmb,fmn:TKraftScalar;
 begin
  rml:=Right-Left;
@@ -8270,7 +9063,7 @@ begin
  result[3,3]:=1.0;
 end;
 
-function Matrix4x4OrthoRH(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4OrthoRH(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
 var rml,tmb,fmn:TKraftScalar;
 begin
  rml:=Right-Left;
@@ -8294,7 +9087,7 @@ begin
  result[3,3]:=1.0;
 end;
 
-function Matrix4x4OrthoOffCenterLH(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4OrthoOffCenterLH(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
 var rml,tmb,fmn:TKraftScalar;
 begin
  rml:=Right-Left;
@@ -8316,9 +9109,9 @@ begin
  result[3,1]:=(Top+Bottom)/tmb;
  result[3,2]:=zNear/fmn;
  result[3,3]:=1.0;
-end;            
+end;
 
-function Matrix4x4OrthoOffCenterRH(Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4OrthoOffCenterRH(const Left,Right,Bottom,Top,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
 var rml,tmb,fmn:TKraftScalar;
 begin
  rml:=Right-Left;
@@ -8342,7 +9135,7 @@ begin
  result[3,3]:=1.0;
 end;
 
-function Matrix4x4Perspective(fovy,Aspect,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
+function Matrix4x4Perspective(const fovy,Aspect,zNear,zFar:TKraftScalar):TKraftMatrix4x4;
 (*)var Top,Right:TKraftScalar;
 begin
  Top:=zNear*tan(fovy*pi/360.0);
@@ -8365,7 +9158,7 @@ begin
  end;
 end;{}
 
-function Matrix4x4LookAt(const Eye,Center,Up:TKraftVector3):TKraftMatrix4x4;
+function Matrix4x4LookAt({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Eye,Center,Up:TKraftVector3):TKraftMatrix4x4;
 var RightVector,UpVector,ForwardVector:TKraftVector3;
 begin
  ForwardVector:=Vector3NormEx(Vector3Sub(Eye,Center));
@@ -8389,7 +9182,7 @@ begin
  result[3,3]:=1.0;
 end;
 
-function Matrix4x4Fill(const Eye,RightVector,UpVector,ForwardVector:TKraftVector3):TKraftMatrix4x4;
+function Matrix4x4Fill({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Eye,RightVector,UpVector,ForwardVector:TKraftVector3):TKraftMatrix4x4;
 begin
  result[0,0]:=RightVector.x;
  result[1,0]:=RightVector.y;
@@ -8409,7 +9202,7 @@ begin
  result[3,3]:=1.0;
 end;
 
-function Matrix4x4ConstructX(const xAxis:TKraftVector3):TKraftMatrix4x4;
+function Matrix4x4ConstructX({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} xAxis:TKraftVector3):TKraftMatrix4x4;
 var a,b,c:TKraftVector3;
 begin
  a:=Vector3NormEx(xAxis);
@@ -8434,7 +9227,7 @@ begin
  result[3,3]:=1.0;
 end;{}
 
-function Matrix4x4ConstructY(const yAxis:TKraftVector3):TKraftMatrix4x4;
+function Matrix4x4ConstructY({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} yAxis:TKraftVector3):TKraftMatrix4x4;
 var a,b,c:TKraftVector3;
 begin
  a:=Vector3NormEx(yAxis);
@@ -8458,7 +9251,7 @@ begin
  result[3,3]:=1.0;
 end;
 
-function Matrix4x4ConstructZ(const zAxis:TKraftVector3):TKraftMatrix4x4;
+function Matrix4x4ConstructZ({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} zAxis:TKraftVector3):TKraftMatrix4x4;
 var a,b,c:TKraftVector3;
 begin
  a:=Vector3NormEx(zAxis);
@@ -8483,7 +9276,7 @@ begin
  result[3,3]:=1.0;
 end;
 
-function Matrix4x4ProjectionMatrixClip(const ProjectionMatrix:TKraftMatrix4x4;const ClipPlane:TKraftPlane):TKraftMatrix4x4;
+function Matrix4x4ProjectionMatrixClip({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ProjectionMatrix:TKraftMatrix4x4;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} ClipPlane:TKraftPlane):TKraftMatrix4x4;
 var q,c:TKraftVector4;
 begin
  result:=ProjectionMatrix;
@@ -8502,27 +9295,30 @@ begin
  result[3,2]:=c.w;
 end;
 
-function PlaneMatrixMul(const Plane:TKraftPlane;const Matrix:TKraftMatrix4x4):TKraftPlane;
+function PlaneMatrixMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Matrix:TKraftMatrix4x4):TKraftPlane;
 begin
  result.Normal.x:=(Matrix[0,0]*Plane.Normal.x)+(Matrix[1,0]*Plane.Normal.y)+(Matrix[2,0]*Plane.Normal.z)+(Matrix[3,0]*Plane.Distance);
  result.Normal.y:=(Matrix[0,1]*Plane.Normal.x)+(Matrix[1,1]*Plane.Normal.y)+(Matrix[2,1]*Plane.Normal.z)+(Matrix[3,1]*Plane.Distance);
  result.Normal.z:=(Matrix[0,2]*Plane.Normal.x)+(Matrix[1,2]*Plane.Normal.y)+(Matrix[2,2]*Plane.Normal.z)+(Matrix[3,2]*Plane.Distance);
+{$ifdef SIMD}
+ result.Normal.w:=0.0;
+{$endif}
  result.Distance:=(Matrix[0,3]*Plane.Normal.x)+(Matrix[1,3]*Plane.Normal.y)+(Matrix[2,3]*Plane.Normal.z)+(Matrix[3,3]*Plane.Distance);
 end;
 
-function PlaneTransform(const Plane:TKraftPlane;const Matrix:TKraftMatrix4x4):TKraftPlane; overload;
+function PlaneTransform({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Matrix:TKraftMatrix4x4):TKraftPlane; overload;
 begin
  result.Normal:=Vector3NormEx(Vector3TermMatrixMulBasis(Plane.Normal,Matrix4x4TermTranspose(Matrix4x4TermInverse(Matrix))));
  result.Distance:=-Vector3Dot(result.Normal,Vector3TermMatrixMul(Vector3ScalarMul(Plane.Normal,-Plane.Distance),Matrix));
 end;
 
-function PlaneTransform(const Plane:TKraftPlane;const Matrix,NormalMatrix:TKraftMatrix4x4):TKraftPlane; overload;
+function PlaneTransform({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Matrix,NormalMatrix:TKraftMatrix4x4):TKraftPlane; overload;
 begin
  result.Normal:=Vector3NormEx(Vector3TermMatrixMulBasis(Plane.Normal,NormalMatrix));
  result.Distance:=-Vector3Dot(result.Normal,Vector3TermMatrixMul(Vector3ScalarMul(Plane.Normal,-Plane.Distance),Matrix));
 end;
 
-function PlaneFastTransform(const Plane:TKraftPlane;const Matrix:TKraftMatrix4x4):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
+function PlaneFastTransform({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Matrix:TKraftMatrix4x4):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
 begin
  result.Normal:=Vector3NormEx(Vector3TermMatrixMulBasis(Plane.Normal,Matrix));
  result.Distance:=-Vector3Dot(result.Normal,Vector3TermMatrixMul(Vector3ScalarMul(Plane.Normal,-Plane.Distance),Matrix));
@@ -8537,47 +9333,62 @@ begin
   Plane.Normal.x:=Plane.Normal.x/l;
   Plane.Normal.y:=Plane.Normal.y/l;
   Plane.Normal.z:=Plane.Normal.z/l;
+{$ifdef SIMD}
+  Plane.Normal.w:=0.0;
+{$endif}
   Plane.Distance:=Plane.Distance/l;
  end else begin
   Plane.Normal.x:=0.0;
   Plane.Normal.y:=0.0;
   Plane.Normal.z:=0.0;
+{$ifdef SIMD}
+  Plane.Normal.w:=0.0;
+{$endif}
   Plane.Distance:=0.0;
  end;
 end;
 
-function PlaneVectorDistance(const Plane:TKraftPlane;const Point:TKraftVector3):TKraftScalar; overload; {$ifdef caninline}inline;{$endif}
+function PlaneVectorDistance({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Point:TKraftVector3):TKraftScalar; overload; {$ifdef caninline}inline;{$endif}
 begin
  result:=(Plane.Normal.x*Point.x)+(Plane.Normal.y*Point.y)+(Plane.Normal.z*Point.z)+Plane.Distance;
 end;
 
-function PlaneVectorDistance(const Plane:TKraftPlane;const Point:TKraftVector4):TKraftScalar; overload; {$ifdef caninline}inline;{$endif}
+function PlaneVectorDistance({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Plane:TKraftPlane;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Point:TKraftVector4):TKraftScalar; overload; {$ifdef caninline}inline;{$endif}
 begin
  result:=(Plane.Normal.x*Point.x)+(Plane.Normal.y*Point.y)+(Plane.Normal.z*Point.z)+(Plane.Distance*Point.w);
 end;
 
-function PlaneFromPoints(const p1,p2,p3:TKraftVector3):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
+function PlaneFromPoints({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} p1,p2,p3:TKraftVector3):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
 var n:TKraftVector3;
 begin
  n:=Vector3NormEx(Vector3Cross(Vector3Sub(p2,p1),Vector3Sub(p3,p1)));
  result.Normal.x:=n.x;
  result.Normal.y:=n.y;
  result.Normal.z:=n.z;
+{$ifdef SIMD}
+ result.Normal.w:=0.0;
+{$endif}
  result.Distance:=-((result.Normal.x*p1.x)+(result.Normal.y*p1.y)+(result.Normal.z*p1.z));
 end;
 
-function PlaneFromPoints(const p1,p2,p3:TKraftVector4):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
+function PlaneFromPoints({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} p1,p2,p3:TKraftVector4):TKraftPlane; overload; {$ifdef caninline}inline;{$endif}
 var n:TKraftVector4;
 begin
  n:=Vector4Norm(Vector4Cross(Vector4Sub(p2,p1),Vector4Sub(p3,p1)));
  result.Normal.x:=n.x;
  result.Normal.y:=n.y;
  result.Normal.z:=n.z;
+{$ifdef SIMD}
+ result.Normal.w:=0.0;
+{$endif}
  result.Distance:=-((result.Normal.x*p1.x)+(result.Normal.y*p1.y)+(result.Normal.z*p1.z));
 end;
 
-function QuaternionNormal(const AQuaternion:TKraftQuaternion):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function QuaternionNormal({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftScalar; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [AQuaternion]
  mulps xmm0,xmm0
  movhlps xmm1,xmm0
@@ -8591,10 +9402,13 @@ end;
 begin
  result:=sqrt(sqr(AQuaternion.x)+sqr(AQuaternion.y)+sqr(AQuaternion.z)+sqr(AQuaternion.w));
 end;
-{$endif}
-                            
-function QuaternionLengthSquared(const AQuaternion:TKraftQuaternion):TKraftScalar; {$ifdef CPU386ASMForSinglePrecision}assembler;
+{$ifend}
+
+function QuaternionLengthSquared({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftScalar; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [AQuaternion]
  mulps xmm0,xmm0
  movhlps xmm1,xmm0
@@ -8607,10 +9421,13 @@ end;
 begin
  result:=sqr(AQuaternion.x)+sqr(AQuaternion.y)+sqr(AQuaternion.z)+sqr(AQuaternion.w);
 end;
-{$endif}
+{$ifend}
 
-procedure QuaternionNormalize(var AQuaternion:TKraftQuaternion); {$ifdef CPU386ASMForSinglePrecision}assembler;
+procedure QuaternionNormalize(var AQuaternion:TKraftQuaternion); {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
 {movups xmm2,dqword ptr [AQuaternion]
  movaps xmm0,xmm2
  mulps xmm0,xmm0
@@ -8653,10 +9470,13 @@ begin
  AQuaternion.z:=AQuaternion.z*Normal;
  AQuaternion.w:=AQuaternion.w*Normal;
 end;
-{$endif}
+{$ifend}
 
-function QuaternionTermNormalize(const AQuaternion:TKraftQuaternion):TKraftQuaternion; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function QuaternionTermNormalize({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftQuaternion; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm2,dqword ptr [AQuaternion]
  movaps xmm0,xmm2
  mulps xmm0,xmm0
@@ -8684,10 +9504,13 @@ begin
  result.z:=AQuaternion.z*Normal;
  result.w:=AQuaternion.w*Normal;
 end;
-{$endif}
+{$ifend}
 
-function QuaternionNeg(const AQuaternion:TKraftQuaternion):TKraftQuaternion; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function QuaternionNeg({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftQuaternion; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm1,dqword ptr [AQuaternion]
  xorps xmm0,xmm0
  subps xmm0,xmm1
@@ -8700,13 +9523,20 @@ begin
  result.z:=-AQuaternion.z;
  result.w:=-AQuaternion.w;
 end;
-{$endif}
+{$ifend}
 
-function QuaternionConjugate(const AQuaternion:TKraftQuaternion):TKraftQuaternion; {$ifdef CPU386ASMForSinglePrecision}assembler;
-const XORMask:array[0..3] of longword=($80000000,$80000000,$80000000,$00000000);
+function QuaternionConjugate({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftQuaternion; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
+const XORMask:array[0..3] of TKraftUInt32=($80000000,$80000000,$80000000,$00000000);
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [AQuaternion]
+{$if defined(cpuamd64)}
+ movups xmm1,dqword ptr [rip+XORMask]
+{$else}
  movups xmm1,dqword ptr [XORMask]
+{$ifend}
  xorps xmm0,xmm1
  movups dqword ptr [result],xmm0
 end;
@@ -8717,13 +9547,20 @@ begin
  result.z:=-AQuaternion.z;
  result.w:=AQuaternion.w;
 end;
-{$endif}
+{$ifend}
 
-function QuaternionInverse(const AQuaternion:TKraftQuaternion):TKraftQuaternion; {$ifdef CPU386ASMForSinglePrecision}assembler;
-const XORMask:array[0..3] of longword=($80000000,$80000000,$80000000,$00000000);
+function QuaternionInverse({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftQuaternion; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
+const XORMask:array[0..3] of TKraftUInt32=($80000000,$80000000,$80000000,$00000000);
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm2,dqword ptr [AQuaternion]
+{$if defined(cpuamd64)}
+ movups xmm3,dqword ptr [rip+XORMask]
+{$else}
  movups xmm3,dqword ptr [XORMask]
+{$ifend}
  movaps xmm0,xmm2
  mulps xmm0,xmm0
  movhlps xmm1,xmm0
@@ -8748,10 +9585,13 @@ begin
  result.z:=-(AQuaternion.z*Normal);
  result.w:=(AQuaternion.w*Normal);
 end;
-{$endif}
+{$ifend}
 
-function QuaternionAdd(const q1,q2:TKraftQuaternion):TKraftQuaternion; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function QuaternionAdd({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion):TKraftQuaternion; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [q1]
  movups xmm1,dqword ptr [q2]
  addps xmm0,xmm1
@@ -8764,10 +9604,13 @@ begin
  result.z:=q1.z+q2.z;
  result.w:=q1.w+q2.w;
 end;
-{$endif}
+{$ifend}
 
-function QuaternionSub(const q1,q2:TKraftQuaternion):TKraftQuaternion; {$ifdef CPU386ASMForSinglePrecision}assembler;
+function QuaternionSub({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion):TKraftQuaternion; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [q1]
  movups xmm1,dqword ptr [q2]
  subps xmm0,xmm1
@@ -8780,10 +9623,13 @@ begin
  result.z:=q1.z-q2.z;
  result.w:=q1.w-q2.w;
 end;
-{$endif}
+{$ifend}
 
-function QuaternionScalarMul(const q:TKraftQuaternion;const s:TKraftScalar):TKraftQuaternion; {$ifdef CPU386ASMForSinglePrecision}assembler;
-asm                    
+function QuaternionScalarMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q:TKraftQuaternion;const s:TKraftScalar):TKraftQuaternion; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
+asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm0,dqword ptr [q]
  movss xmm1,dword ptr [s]
  shufps xmm1,xmm1,$00
@@ -8797,11 +9643,14 @@ begin
  result.z:=q.z*s;
  result.w:=q.w*s;
 end;
-{$endif}
+{$ifend}
 
-function QuaternionMul(const q1,q2:TKraftQuaternion):TKraftQuaternion; {$ifdef CPU386ASMForSinglePrecision}assembler;
-const XORMaskW:array[0..3] of longword=($00000000,$00000000,$00000000,$80000000);
+function QuaternionMul({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion):TKraftQuaternion; {$if defined(SIMD) and defined(SIMDASM) and (defined(cpu386) or defined(cpuamd64))}assembler; {$if defined(fpc) and defined(cpuamd64)}nostackframe;{$ifend}
+const XORMaskW:array[0..3] of TKraftUInt32=($00000000,$00000000,$00000000,$80000000);
 asm
+{$if defined(cpuamd64) and not defined(fpc)}
+ .noframe
+{$ifend}
  movups xmm4,dqword ptr [q1]
  movaps xmm0,xmm4
  shufps xmm0,xmm4,$49
@@ -8813,7 +9662,11 @@ asm
  movaps xmm0,xmm4
  shufps xmm0,xmm4,$24 // 000100100b
  shufps xmm1,xmm2,$3f // 000111111b
+{$if defined(cpuamd64)}
+ movups xmm5,dqword ptr [rip+XORMaskW]
+{$else}
  movups xmm5,dqword ptr [XORMaskW]
+{$ifend}
  mulps xmm1,xmm0
  movaps xmm0,xmm4
  shufps xmm0,xmm4,$92 // 001001001b
@@ -8835,9 +9688,9 @@ begin
  result.z:=((q1.w*q2.z)+(q1.z*q2.w)+(q1.x*q2.y))-(q1.y*q2.x);
  result.w:=(q1.w*q2.w)-((q1.x*q2.x)+(q1.y*q2.y)+(q1.z*q2.z));
 end;
-{$endif}
+{$ifend}
 
-function QuaternionRotateAroundAxis(const q1,q2:TKraftQuaternion):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function QuaternionRotateAroundAxis({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=((q1.x*q2.w)+(q1.z*q2.y))-(q1.y*q2.z);
  result.y:=((q1.x*q2.z)+(q1.y*q2.w))-(q1.z*q2.x);
@@ -8845,7 +9698,7 @@ begin
  result.w:=((q1.x*q2.x)+(q1.y*q2.y))+(q1.z*q2.z);
 end;
 
-function QuaternionFromAxisAngle(const Axis:TKraftVector3;Angle:TKraftScalar):TKraftQuaternion; overload; {$ifdef caninline}inline;{$endif}
+function QuaternionFromAxisAngle({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Axis:TKraftVector3;const Angle:TKraftScalar):TKraftQuaternion; overload; {$ifdef caninline}inline;{$endif}
 var sa2:TKraftScalar;
 begin
  result.w:=cos(Angle*0.5);
@@ -8864,7 +9717,7 @@ begin
  result.w:=0.0;
 end;
 
-procedure QuaternionToSpherical(const q:TKraftQuaternion;var Latitude,Longitude:TKraftScalar);
+procedure QuaternionToSpherical({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q:TKraftQuaternion;var Latitude,Longitude:TKraftScalar);
 var y:TKraftScalar;
 begin
  y:=q.y;
@@ -8897,7 +9750,7 @@ begin
  QuaternionNormalize(result);
 end;
 
-function QuaternionFromAngles(const Angles:TKraftAngles):TKraftQuaternion; overload; {$ifdef caninline}inline;{$endif}
+function QuaternionFromAngles({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Angles:TKraftAngles):TKraftQuaternion; overload; {$ifdef caninline}inline;{$endif}
 var sp,sy,sr,cp,cy,cr:TKraftScalar;
 begin
  sp:=sin(Angles.Pitch*0.5);
@@ -8913,7 +9766,7 @@ begin
  QuaternionNormalize(result);
 end;
 
-function QuaternionFromMatrix3x3(const AMatrix:TKraftMatrix3x3):TKraftQuaternion;
+function QuaternionFromMatrix3x3({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AMatrix:TKraftMatrix3x3):TKraftQuaternion;
 var t,s:TKraftScalar;
 begin
  t:=AMatrix[0,0]+(AMatrix[1,1]+AMatrix[2,2]);
@@ -9168,7 +10021,7 @@ begin
 {$endif}
 end;
 
-function QuaternionFromMatrix4x4(const AMatrix:TKraftMatrix4x4):TKraftQuaternion;
+function QuaternionFromMatrix4x4({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AMatrix:TKraftMatrix4x4):TKraftQuaternion;
 var t,s:TKraftScalar;
 begin
  t:=AMatrix[0,0]+(AMatrix[1,1]+AMatrix[2,2]);
@@ -9297,11 +10150,14 @@ begin
  result[3,3]:=1.0;
 end;
 
-function QuaternionToEuler(const AQuaternion:TKraftQuaternion):TKraftVector3; {$ifdef caninline}inline;{$endif}
+function QuaternionToEuler({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} AQuaternion:TKraftQuaternion):TKraftVector3; {$ifdef caninline}inline;{$endif}
 begin
  result.x:=ArcTan2(2.0*((AQuaternion.x*AQuaternion.y)+(AQuaternion.z*AQuaternion.w)),1.0-(2.0*(sqr(AQuaternion.y)+sqr(AQuaternion.z))));
  result.y:=ArcSin(2.0*((AQuaternion.x*AQuaternion.z)-(AQuaternion.y*AQuaternion.w)));
  result.z:=ArcTan2(2.0*((AQuaternion.x*AQuaternion.w)+(AQuaternion.y*AQuaternion.z)),1.0-(2.0*(sqr(AQuaternion.z)+sqr(AQuaternion.w))));
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
 procedure QuaternionToAxisAngle(AQuaternion:TKraftQuaternion;var Axis:TKraftVector3;var Angle:TKraftScalar); {$ifdef caninline}inline;{$endif}
@@ -9316,6 +10172,9 @@ begin
  Axis.x:=AQuaternion.x/SinAngle;
  Axis.y:=AQuaternion.y/SinAngle;
  Axis.z:=AQuaternion.z/SinAngle;
+{$ifdef SIMD}
+ Axis.w:=0.0;
+{$endif}
 end;
 
 function QuaternionGenerator(AQuaternion:TKraftQuaternion):TKraftVector3; {$ifdef caninline}inline;{$endif}
@@ -9325,13 +10184,16 @@ begin
  result.x:=AQuaternion.x;
  result.y:=AQuaternion.y;
  result.z:=AQuaternion.z;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
  if s>0.0 then begin
   result:=Vector3ScalarMul(result,s);
  end;
  result:=Vector3ScalarMul(result,2.0*ArcTan2(s,AQuaternion.w));
 end;
 
-function QuaternionLerp(const q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function QuaternionLerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
 var it,sf:TKraftScalar;
 begin
  if ((q1.x*q2.x)+(q1.y*q2.y)+(q1.z*q2.z)+(q1.w*q2.w))<0.0 then begin
@@ -9346,7 +10208,7 @@ begin
  result.w:=(it*q1.w)+(t*(sf*q2.w));
 end;
 
-function QuaternionNlerp(const q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function QuaternionNlerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
 var it,sf:TKraftScalar;
 begin
  if ((q1.x*q2.x)+(q1.y*q2.y)+(q1.z*q2.z)+(q1.w*q2.w))<0.0 then begin
@@ -9362,7 +10224,7 @@ begin
  QuaternionNormalize(result);
 end;
 
-function QuaternionSlerp(const q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function QuaternionSlerp({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q1,q2:TKraftQuaternion;const t:TKraftScalar):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
 var Omega,co,so,s0,s1,s2:TKraftScalar;
 begin
  co:=(q1.x*q2.x)+(q1.y*q2.y)+(q1.z*q2.z)+(q1.w*q2.w);
@@ -9387,7 +10249,7 @@ begin
  result.w:=(s0*q1.w)+(s1*(s2*q2.w));
 end;
 
-function QuaternionIntegrate(const q:TKraftQuaternion;const Omega:TKraftVector3;const DeltaTime:TKraftScalar):TKraftQuaternion;
+function QuaternionIntegrate({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q:TKraftQuaternion;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Omega:TKraftVector3;const DeltaTime:TKraftScalar):TKraftQuaternion;
 var ThetaLenSquared,ThetaLen,s:TKraftScalar;
     DeltaQ:TKraftQuaternion;
     Theta:TKraftVector3;
@@ -9408,7 +10270,7 @@ begin
  result:=QuaternionMul(DeltaQ,q);
 end;
 
-function QuaternionSpin(const q:TKraftQuaternion;const Omega:TKraftVector3;const DeltaTime:TKraftScalar):TKraftQuaternion; overload;
+function QuaternionSpin({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} q:TKraftQuaternion;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Omega:TKraftVector3;const DeltaTime:TKraftScalar):TKraftQuaternion; overload;
 var wq:TKraftQuaternion;
 begin
  wq.x:=Omega.x*DeltaTime;
@@ -9418,7 +10280,7 @@ begin
  result:=QuaternionTermNormalize(QuaternionAdd(q,QuaternionScalarMul(QuaternionMul(wq,q),0.5)));
 end;
 
-procedure QuaternionDirectSpin(var q:TKraftQuaternion;const Omega:TKraftVector3;const DeltaTime:TKraftScalar); overload;
+procedure QuaternionDirectSpin(var q:TKraftQuaternion;{$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Omega:TKraftVector3;const DeltaTime:TKraftScalar); overload;
 var wq,tq:TKraftQuaternion;
 begin
  wq.x:=Omega.x*DeltaTime;
@@ -9429,7 +10291,7 @@ begin
  q:=QuaternionTermNormalize(tq);
 end;
 
-function QuaternionFromToRotation(const FromDirection,ToDirection:TKraftVector3):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
+function QuaternionFromToRotation({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} FromDirection,ToDirection:TKraftVector3):TKraftQuaternion; {$ifdef caninline}inline;{$endif}
 var t:TKraftVector3;
 begin
  t:=Vector3Cross(Vector3Norm(FromDirection),Vector3Norm(ToDirection));
@@ -9441,20 +10303,82 @@ begin
                ((FromDirection.x*ToDirection.x)+(FromDirection.y*ToDirection.y)+(FromDirection.z*ToDirection.z));
 end;
 
+function Modulo(x,y:TKraftScalar):TKraftScalar; {$ifdef caninline}inline;{$endif}
+begin
+ result:=x-(floor(x/y)*y);
+end;
+
+function ModuloPos(x,y:TKraftScalar):TKraftScalar; {$ifdef caninline}inline;{$endif}
+begin
+ if y>0.0 then begin
+  result:=Modulo(x,y);
+  while result<0.0 do begin
+   result:=result+y;
+  end;
+  while result>=y do begin
+   result:=result-y;
+  end;
+ end else begin
+  result:=x;
+ end;
+end;
+
+function AngleClamp(a:TKraftScalar):TKraftScalar; {$ifdef caninline}inline;{$endif}
+begin
+ a:=ModuloPos(ModuloPos(a+pi,pi2)+pi2,pi2)-pi;
+ while a<(-pi) do begin
+  a:=a+pi2;
+ end;
+ while a>pi do begin
+  a:=a-pi2;
+ end;
+ result:=a;
+end;
+
+function AngleDiff(a,b:TKraftScalar):TKraftScalar; {$ifdef caninline}inline;{$endif}
+begin
+ result:=AngleClamp(AngleClamp(b)-AngleClamp(a));
+end;
+
+function AngleLerp(a,b,x:TKraftScalar):TKraftScalar; {$ifdef caninline}inline;{$endif}
+begin
+{if (b-a)>PI then begin
+  b:=b-TwoPI;
+ end;
+ if (b-a)<(-PI) then begin
+  b:=b+TwoPI;
+ end;
+ result:=a+((b-a)*x);}
+ result:=a+(AngleDiff(a,b)*x);
+end;
+
 function AABBCost(const AABB:TKraftAABB):TKraftScalar; {$ifdef caninline}inline;{$endif}
 begin
 // result:=(AABB.Max.x-AABB.Min.x)+(AABB.Max.y-AABB.Min.y)+(AABB.Max.z-AABB.Min.z); // Manhattan distance
  result:=(AABB.Max.x-AABB.Min.x)*(AABB.Max.y-AABB.Min.y)*(AABB.Max.z-AABB.Min.z); // Volume
 end;
-                    
+
+function AABBArea(const AABB:TKraftAABB):TKraftScalar; {$ifdef caninline}inline;{$endif}
+begin
+ result:=2.0*((abs(AABB.Max.x-AABB.Min.x)*abs(AABB.Max.y-AABB.Min.y))+
+              (abs(AABB.Max.y-AABB.Min.y)*abs(AABB.Max.z-AABB.Min.z))+
+              (abs(AABB.Max.x-AABB.Min.x)*abs(AABB.Max.z-AABB.Min.z)))
+end;
+
 function AABBCombine(const AABB,WithAABB:TKraftAABB):TKraftAABB; {$ifdef caninline}inline;{$endif}
 begin
  result.Min.x:=Min(AABB.Min.x,WithAABB.Min.x);
  result.Min.y:=Min(AABB.Min.y,WithAABB.Min.y);
  result.Min.z:=Min(AABB.Min.z,WithAABB.Min.z);
+{$ifdef SIMD}
+ result.Min.w:=0.0;
+{$endif}
  result.Max.x:=Max(AABB.Max.x,WithAABB.Max.x);
  result.Max.y:=Max(AABB.Max.y,WithAABB.Max.y);
  result.Max.z:=Max(AABB.Max.z,WithAABB.Max.z);
+{$ifdef SIMD}
+ result.Max.w:=0.0;
+{$endif}
 end;
 
 function AABBCombineVector3(const AABB:TKraftAABB;v:TKraftVector3):TKraftAABB; {$ifdef caninline}inline;{$endif}
@@ -9462,12 +10386,18 @@ begin
  result.Min.x:=Min(AABB.Min.x,v.x);
  result.Min.y:=Min(AABB.Min.y,v.y);
  result.Min.z:=Min(AABB.Min.z,v.z);
+{$ifdef SIMD}
+ result.Min.w:=0.0;
+{$endif}
  result.Max.x:=Max(AABB.Max.x,v.x);
  result.Max.y:=Max(AABB.Max.y,v.y);
  result.Max.z:=Max(AABB.Max.z,v.z);
+{$ifdef SIMD}
+ result.Max.w:=0.0;
+{$endif}
 end;
 
-function AABBIntersect(const AABB,WithAABB:TKraftAABB;Threshold:TKraftScalar=EPSILON):boolean; {$ifdef caninline}inline;{$endif}
+function AABBIntersect(const AABB,WithAABB:TKraftAABB;const Threshold:TKraftScalar=EPSILON):boolean; {$ifdef caninline}inline;{$endif}
 begin
  result:=(((AABB.Max.x+Threshold)>=(WithAABB.Min.x-Threshold)) and ((AABB.Min.x-Threshold)<=(WithAABB.Max.x+Threshold))) and
          (((AABB.Max.y+Threshold)>=(WithAABB.Min.y-Threshold)) and ((AABB.Min.y-Threshold)<=(WithAABB.Max.y+Threshold))) and
@@ -9477,12 +10407,12 @@ end;
 function AABBContains(const InAABB,AABB:TKraftAABB):boolean; overload; {$ifdef caninline}inline;{$endif}
 begin
  result:=((InAABB.Min.x-EPSILON)<=(AABB.Min.x+EPSILON)) and ((InAABB.Min.y-EPSILON)<=(AABB.Min.y+EPSILON)) and ((InAABB.Min.z-EPSILON)<=(AABB.Min.z+EPSILON)) and
-         ((InAABB.Max.x+EPSILON)>=(AABB.Min.x+EPSILON)) and ((InAABB.Max.y+EPSILON)>=(AABB.Min.y+EPSILON)) and ((InAABB.Max.z+EPSILON)>=(AABB.Min.z+EPSILON)) and
-         ((InAABB.Min.x-EPSILON)<=(AABB.Max.x-EPSILON)) and ((InAABB.Min.y-EPSILON)<=(AABB.Max.y-EPSILON)) and ((InAABB.Min.z-EPSILON)<=(AABB.Max.z-EPSILON)) and
+         ((InAABB.Max.x+EPSILON)>=(AABB.Min.x-EPSILON)) and ((InAABB.Max.y+EPSILON)>=(AABB.Min.y-EPSILON)) and ((InAABB.Max.z+EPSILON)>=(AABB.Min.z-EPSILON)) and
+         ((InAABB.Min.x-EPSILON)<=(AABB.Max.x+EPSILON)) and ((InAABB.Min.y-EPSILON)<=(AABB.Max.y+EPSILON)) and ((InAABB.Min.z-EPSILON)<=(AABB.Max.z+EPSILON)) and
          ((InAABB.Max.x+EPSILON)>=(AABB.Max.x-EPSILON)) and ((InAABB.Max.y+EPSILON)>=(AABB.Max.y-EPSILON)) and ((InAABB.Max.z+EPSILON)>=(AABB.Max.z-EPSILON));
 end;
 
-function AABBContains(const AABB:TKraftAABB;Vector:TKraftVector3):boolean; overload; {$ifdef caninline}inline;{$endif}
+function AABBContains(const AABB:TKraftAABB;const Vector:TKraftVector3):boolean; overload; {$ifdef caninline}inline;{$endif}
 begin
  result:=((Vector.x>=(AABB.Min.x-EPSILON)) and (Vector.x<=(AABB.Max.x+EPSILON))) and
          ((Vector.y>=(AABB.Min.y-EPSILON)) and (Vector.y<=(AABB.Max.y+EPSILON))) and
@@ -9490,7 +10420,7 @@ begin
 end;
 
 function AABBTransform(const DstAABB:TKraftAABB;const Transform:TKraftMatrix4x4):TKraftAABB; {$ifdef caninline}inline;{$endif}
-var i,j:longint;
+var i,j:TKraftInt32;
     a,b:TKraftScalar;
 begin
  result.Min:=Vector3(Transform[3,0],Transform[3,1],Transform[3,2]);
@@ -9529,12 +10459,21 @@ begin
  end else begin
   InvDirection.z:=0.0;
  end;
+{$ifdef SIMD}
+ InvDirection.w:=0.0;
+{$endif}
  a.x:=(AABB.Min.x-Origin.x)*InvDirection.x;
  a.y:=(AABB.Min.y-Origin.y)*InvDirection.y;
  a.z:=(AABB.Min.z-Origin.z)*InvDirection.z;
+{$ifdef SIMD}
+ a.w:=0.0;
+{$endif}
  b.x:=(AABB.Max.x-Origin.x)*InvDirection.x;
  b.y:=(AABB.Max.y-Origin.y)*InvDirection.y;
  b.z:=(AABB.Max.z-Origin.z)*InvDirection.z;
+{$ifdef SIMD}
+ b.w:=0.0;
+{$endif}
  if a.x<b.x then begin
   AABBMin.x:=a.x;
   AABBMax.x:=b.x;
@@ -9591,7 +10530,82 @@ begin
  end;
 end;
 
-function AABBRayIntersect(const AABB:TKraftAABB;const Origin,Direction:TKraftVector3):boolean; {$ifdef caninline}inline;{$endif}
+// For more details see:
+// https://tavianator.com/2011/ray_box.html
+// https://tavianator.com/2015/ray_box_nan.html
+// https://tavianator.com/2022/ray_box_boundary.html
+function AABBRayIntersectOpt(const AABB:TKraftAABB;const Origin,InvDirection:TKraftVector3):boolean;
+var t0,t1:TKraftVector3;
+begin
+ // Although it might seem this doesn't address edge cases where
+ // Direction.{x,y,z} equals zero, it is indeed correct. This is
+ // because the comparisons still work as expected when infinities
+ // emerge from zero division. Rays that are parallel to an axis
+ // and positioned outside the box will lead to tmin being infinity
+ // or tmax turning into negative infinity, yet for rays located
+ // within the box, the values for tmin and tmax will remain unchanged.
+ t0:=Vector3Mul(Vector3Sub(AABB.Min,Origin),InvDirection);
+ t1:=Vector3Mul(Vector3Sub(AABB.Max,Origin),InvDirection);
+ result:=Max(0.0,Max(Max(Min(Min(t0.x,t1.x),Infinity),
+                         Min(Min(t0.y,t1.y),Infinity)),
+                         Min(Min(t0.z,t1.z),Infinity)))<=
+         Min(Min(Max(Max(t0.x,t1.x),NegInfinity),
+                 Max(Max(t0.y,t1.y),NegInfinity)),
+                 Max(Max(t0.z,t1.z),NegInfinity));
+end;
+
+function AABBRayIntersect(const AABB:TKraftAABB;const Origin,Direction:TKraftVector3):boolean;
+{$if true}
+var t0,t1:TKraftVector3;
+begin
+ // Although it might seem this doesn't address edge cases where
+ // Direction.{x,y,z} equals zero, it is indeed correct. This is
+ // because the comparisons still work as expected when infinities
+ // emerge from zero division. Rays that are parallel to an axis
+ // and positioned outside the box will lead to tmin being infinity
+ // or tmax turning into negative infinity, yet for rays located
+ // within the box, the values for tmin and tmax will remain unchanged.
+ t0:=Vector3Div(Vector3Sub(AABB.Min,Origin),Direction);
+ t1:=Vector3Div(Vector3Sub(AABB.Max,Origin),Direction);
+ result:=Max(0.0,Max(Max(Min(Min(t0.x,t1.x),Infinity),
+                         Min(Min(t0.y,t1.y),Infinity)),
+                         Min(Min(t0.z,t1.z),Infinity)))<=
+         Min(Min(Max(Max(t0.x,t1.x),NegInfinity),
+                 Max(Max(t0.y,t1.y),NegInfinity)),
+                 Max(Max(t0.z,t1.z),NegInfinity));
+end;
+{$else}
+var tmin,tmax,t0,t1:TKraftScalar;
+begin
+
+ // Although it might seem this doesn't address edge cases where
+ // Direction.{x,y,z} equals zero, it is indeed correct. This is
+ // because the comparisons still work as expected when infinities
+ // emerge from zero division. Rays that are parallel to an axis
+ // and positioned outside the box will lead to tmin being infinity
+ // or tmax turning into negative infinity, yet for rays located
+ // within the box, the values for tmin and tmax will remain unchanged.
+
+ t0:=(AABB.Min.x-Origin.x)/Direction.x;
+ t1:=(AABB.Max.x-Origin.x)/Direction.x;
+ tmin:=Min(Min(t0,t1),Infinity);
+ tmax:=Max(Max(t0,t1),NegInfinity);
+
+ t0:=(AABB.Min.y-Origin.y)/Direction.y;
+ t1:=(AABB.Max.y-Origin.y)/Direction.y;
+ tmin:=Max(tmin,Min(Min(t0,t1),Infinity));
+ tmax:=Min(tmax,Max(Max(t0,t1),NegInfinity));
+
+ t0:=(AABB.Min.z-Origin.z)/Direction.z;
+ t1:=(AABB.Max.z-Origin.z)/Direction.z;
+ tmin:=Max(tmin,Min(Min(t0,t1),Infinity));
+ tmax:=Min(tmax,Max(Max(t0,t1),NegInfinity));
+
+ result:=Max(0.0,tmin)<=tmax;
+end;
+{$ifend}
+
+(*function AABBRayIntersect(const AABB:TKraftAABB;const Origin,Direction:TKraftVector3):boolean; {$ifdef caninline}inline;{$endif}
 var Center,BoxExtents,Diff:TKraftVector3;
 begin
  Center:=Vector3ScalarMul(Vector3Add(AABB.Min,AABB.Max),0.5);
@@ -9603,7 +10617,7 @@ begin
               ((abs((Direction.y*Diff.z)-(Direction.z*Diff.y))>((BoxExtents.y*abs(Direction.z))+(BoxExtents.z*abs(Direction.y)))) or
                (abs((Direction.z*Diff.x)-(Direction.x*Diff.z))>((BoxExtents.x*abs(Direction.z))+(BoxExtents.z*abs(Direction.x)))) or
                (abs((Direction.x*Diff.y)-(Direction.y*Diff.x))>((BoxExtents.x*abs(Direction.y))+(BoxExtents.y*abs(Direction.x))))));
-end;
+end;*)
 
 function ClosestPointToAABB(const AABB:TKraftAABB;const Point:TKraftVector3;const ClosestPointOnAABB:PKraftVector3=nil):TKraftScalar; {$ifdef caninline}inline;{$endif}
 var ClosestPoint:TKraftVector3;
@@ -9611,6 +10625,9 @@ begin
  ClosestPoint.x:=Min(Max(Point.x,AABB.Min.x),AABB.Max.x);
  ClosestPoint.y:=Min(Max(Point.y,AABB.Min.y),AABB.Max.y);
  ClosestPoint.z:=Min(Max(Point.z,AABB.Min.z),AABB.Max.z);
+{$ifdef SIMD}
+ ClosestPoint.w:=0.0;
+{$endif}
  if assigned(ClosestPointOnAABB) then begin
   ClosestPointOnAABB^:=ClosestPoint;
  end;
@@ -9623,6 +10640,9 @@ begin
  ClosestPoint.x:=Min(Max(Point.x,AABB.Min.x),AABB.Max.x);
  ClosestPoint.y:=Min(Max(Point.y,AABB.Min.y),AABB.Max.y);
  ClosestPoint.z:=Min(Max(Point.z,AABB.Min.z),AABB.Max.z);
+{$ifdef SIMD}
+ ClosestPoint.w:=0.0;
+{$endif}
  result:=Vector3DistSquared(ClosestPoint,Point);
 end;
 
@@ -9639,56 +10659,89 @@ begin
           sqr(Min(Max(aSphere.Center.z,aAABB.Min.z),aAABB.Max.z)-aSphere.Center.z))<=sqr(aSphere.Radius);
 end;
 
-function RayIntersectTriangle(const RayOrigin,RayDirection,v0,v1,v2:TKraftVector3;var Time,u,v:TKraftScalar):boolean; overload;
-var e0,e1,p,t,q:TKraftVector3;
+function CartesianToBarycentric(const a,b,c,p:TKraftVector3;out u,v,w:TKraftScalar):boolean;
+var v0,v1,v2:TKraftVector3;
+    d00,d01,d11,d20,d21,Denominator:TKraftScalar;
+begin
+ v0:=Vector3Sub(b,a);
+ v1:=Vector3Sub(c,a);
+ v2:=Vector3Sub(p,a);
+ d00:=Vector3Dot(v0,v0);
+ d01:=Vector3Dot(v0,v1);
+ d11:=Vector3Dot(v1,v1);
+ d20:=Vector3Dot(v2,v0);
+ d21:=Vector3Dot(v2,v1);
+ Denominator:=(d00*d11)-sqr(d01);
+ v:=((d11*d20)-(d01*d21))/Denominator;
+ w:=((d00*d21)-(d01*d20))/Denominator;
+ u:=(1.0-u)-w;
+ result:=(u>=0.0) and (v>=0.0) and ((u+v)<=1.0);
+end;
+
+function RayIntersectTriangle(const RayOrigin,RayDirection,v0,v1,v2:TKraftVector3;var Time,u,v,w:TKraftScalar):boolean; overload;
+const EPSILON={$ifdef KraftUseDouble}1e-16{$else}1e-7{$endif};
+var v0v1,v0v2,p,t,q:TKraftVector3;
     Determinant,InverseDeterminant:TKraftScalar;
 begin
  result:=false;
 
- e0.x:=v1.x-v0.x;
- e0.y:=v1.y-v0.y;
- e0.z:=v1.z-v0.z;
- e1.x:=v2.x-v0.x;
- e1.y:=v2.y-v0.y;
- e1.z:=v2.z-v0.z;
+ v0v1.x:=v1.x-v0.x;
+ v0v1.y:=v1.y-v0.y;
+ v0v1.z:=v1.z-v0.z;
+{$ifdef SIMD}
+ v0v1.w:=0.0;
+{$endif}
+ v0v2.x:=v2.x-v0.x;
+ v0v2.y:=v2.y-v0.y;
+ v0v2.z:=v2.z-v0.z;
+{$ifdef SIMD}
+ v0v2.w:=0.0;
+{$endif}
 
- p.x:=(RayDirection.y*e1.z)-(RayDirection.z*e1.y);
- p.y:=(RayDirection.z*e1.x)-(RayDirection.x*e1.z);
- p.z:=(RayDirection.x*e1.y)-(RayDirection.y*e1.x);
+ p.x:=(RayDirection.y*v0v2.z)-(RayDirection.z*v0v2.y);
+ p.y:=(RayDirection.z*v0v2.x)-(RayDirection.x*v0v2.z);
+ p.z:=(RayDirection.x*v0v2.y)-(RayDirection.y*v0v2.x);
+{$ifdef SIMD}
+ p.w:=0.0;
+{$endif}
 
- Determinant:=(e0.x*p.x)+(e0.y*p.y)+(e0.z*p.z);
+ Determinant:=(v0v1.x*p.x)+(v0v1.y*p.y)+(v0v1.z*p.z);
  if Determinant<EPSILON then begin
   exit;
  end;
 
+ InverseDeterminant:=1.0/Determinant;
+
  t.x:=RayOrigin.x-v0.x;
  t.y:=RayOrigin.y-v0.y;
  t.z:=RayOrigin.z-v0.z;
+{$ifdef SIMD}
+ t.w:=0.0;
+{$endif}
 
- u:=(t.x*p.x)+(t.y*p.y)+(t.z*p.z);
- if (u<0.0) or (u>Determinant) then begin
+ v:=((t.x*p.x)+(t.y*p.y)+(t.z*p.z))*InverseDeterminant;
+ if (v<0.0) or (v>1.0) then begin
   exit;
  end;
 
- q.x:=(t.y*e0.z)-(t.z*e0.y);
- q.y:=(t.z*e0.x)-(t.x*e0.z);
- q.z:=(t.x*e0.y)-(t.y*e0.x);
+ q.x:=(t.y*v0v1.z)-(t.z*v0v1.y);
+ q.y:=(t.z*v0v1.x)-(t.x*v0v1.z);
+ q.z:=(t.x*v0v1.y)-(t.y*v0v1.x);
+{$ifdef SIMD}
+ q.w:=0.0;
+{$endif}
 
- v:=(RayDirection.x*q.x)+(RayDirection.y*q.y)+(RayDirection.z*q.z);
- if (v<0.0) or ((u+v)>Determinant) then begin
+ w:=((RayDirection.x*q.x)+(RayDirection.y*q.y)+(RayDirection.z*q.z))*InverseDeterminant;
+ if (w<0.0) or ((v+w)>1.0) then begin
   exit;
  end;
 
- Time:=(e1.x*q.x)+(e1.y*q.y)+(e1.z*q.z);
- if abs(Determinant)<EPSILON then begin
-  Determinant:=0.01;
- end;
- InverseDeterminant:=1.0/Determinant;
- Time:=Time*InverseDeterminant;
- u:=u*InverseDeterminant;
- v:=v*InverseDeterminant;
+ Time:=((v0v2.x*q.x)+(v0v2.y*q.y)+(v0v2.z*q.z))*InverseDeterminant;
+
+ u:=1.0-(v+w);
 
  result:=true;
+
 end;
 
 function IsPointsSameSide(const p0,p1,Origin,Direction:TKraftVector3):boolean; overload; {$ifdef caninline}inline;{$endif}
@@ -9712,7 +10765,63 @@ begin
          IsPointsSameSide(p,p2,p0,Vector3Sub(p1,p0));
 end;
 
-function SquaredDistanceFromPointToTriangle(const p,a,b,c:TKraftVector3):TKraftScalar;
+function PointInTriangleFast(const p0,p1,p2,p:TKraftVector3):boolean; {$ifdef caninline}inline;{$endif}
+var e10,e20,vp:TKraftVector3;
+    a,b,c,ac_bb,d,e,x,y,z:TKraftScalar;
+begin
+ e10:=Vector3Sub(p1,p0);
+ e20:=Vector3Sub(p2,p0);
+ a:=Vector3Dot(e10,e10);
+ b:=Vector3Dot(e10,e20);
+ c:=Vector3Dot(e20,e20);
+ ac_bb:=(a*c)-sqr(b);
+ vp:=Vector3Sub(p,p0);
+ d:=Vector3Dot(vp,e10);
+ e:=Vector3Dot(vp,e20);
+ x:=(d*c)-(e*b);
+ y:=(e*a)-(d*b);
+ z:=(x+y)-ac_bb;
+{$ifdef KraftUseDouble}
+ result:=((PKraftUInt64(pointer(@z))^ and not (PKraftUInt64(pointer(@x))^ or PKraftUInt64(pointer(@y))^)) and TKraftUInt64($8000000000000000))<>0;
+{$else}
+ result:=((PKraftUInt32(pointer(@z))^ and not (PKraftUInt32(pointer(@x))^ or PKraftUInt32(pointer(@y))^)) and TKraftUInt32($80000000))<>0;
+{$endif}
+end;
+
+function GetLowestRoot(a,b,c,maxR:TKraftScalar;out Root:TKraftScalar):boolean;
+var Determinant,r1,r2,t:TKraftScalar;
+begin
+
+ Determinant:=sqr(b)-(4.0*(a*c));
+
+ if Determinant<0.0 then begin
+  result:=false;
+  exit;
+ end;
+
+ Determinant:=sqrt(Determinant);
+ r1:=((-b)-Determinant)/(a*2.0);
+ r2:=((-b)+Determinant)/(a*2.0);
+
+ if r1>r2 then begin
+  t:=r1;
+  r1:=r2;
+  r2:=t;
+ end;
+
+ if (r1>0.0) and (r1<maxR) then begin
+  Root:=r1;
+  result:=true;
+ end else if (r2>0.0) and (r2<maxR) then begin
+  Root:=r2;
+  result:=true;
+ end else begin
+  result:=false;
+ end;
+
+end;
+
+function SquaredDistanceFromPointToTriangle(const p,a,b,c:TKraftVector3):TKraftScalar; overload;
 var ab,ac,bc,pa,pb,pc,ap,bp,cp,n:TKraftVector3;
     snom,sdenom,tnom,tdenom,unom,udenom,vc,vb,va,u,v,w:TKraftScalar;
 begin
@@ -9720,26 +10829,44 @@ begin
  ab.x:=b.x-a.x;
  ab.y:=b.y-a.y;
  ab.z:=b.z-a.z;
+{$ifdef SIMD}
+ ab.w:=0.0;
+{$endif}
 
  ac.x:=c.x-a.x;
  ac.y:=c.y-a.y;
  ac.z:=c.z-a.z;
+{$ifdef SIMD}
+ ac.w:=0.0;
+{$endif}
 
  bc.x:=c.x-b.x;
  bc.y:=c.y-b.y;
  bc.z:=c.z-b.z;
+{$ifdef SIMD}
+ bc.w:=0.0;
+{$endif}
 
  pa.x:=p.x-a.x;
  pa.y:=p.y-a.y;
  pa.z:=p.z-a.z;
+{$ifdef SIMD}
+ pa.w:=0.0;
+{$endif}
 
  pb.x:=p.x-b.x;
  pb.y:=p.y-b.y;
  pb.z:=p.z-b.z;
+{$ifdef SIMD}
+ pb.w:=0.0;
+{$endif}
 
  pc.x:=p.x-c.x;
  pc.y:=p.y-c.y;
  pc.z:=p.z-c.z;
+{$ifdef SIMD}
+ pc.w:=0.0;
+{$endif}
 
  // Determine the parametric position s for the projection of P onto AB (i.e. PPU2 = A+s*AB, where
  // s = snom/(snom+sdenom), and then parametric position t for P projected onto AC
@@ -9773,12 +10900,21 @@ begin
  n.x:=(ab.y*ac.z)-(ab.z*ac.y);
  n.y:=(ab.z*ac.x)-(ab.x*ac.z);
  n.z:=(ab.x*ac.y)-(ab.y*ac.x);
+{$ifdef SIMD}
+ n.w:=0.0;
+{$endif}
  ap.x:=a.x-p.x;
  ap.y:=a.y-p.y;
  ap.z:=a.z-p.z;
+{$ifdef SIMD}
+ ap.w:=0.0;
+{$endif}
  bp.x:=b.x-p.x;
  bp.y:=b.y-p.y;
  bp.z:=b.z-p.z;
+{$ifdef SIMD}
+ bp.w:=0.0;
+{$endif}
  vc:=(n.x*((ap.y*bp.z)-(ap.z*bp.y)))+(n.y*((ap.z*bp.x)-(ap.x*bp.z)))+(n.z*((ap.x*bp.y)-(ap.y*bp.x)));
 
  // If P is outside of AB (signed area <= 0) and within voronoi feature region, then return
@@ -9793,6 +10929,145 @@ begin
  cp.x:=c.x-p.x;
  cp.y:=c.y-p.y;
  cp.z:=c.z-p.z;
+{$ifdef SIMD}
+ cp.w:=0.0;
+{$endif}
+ va:=(n.x*((bp.y*cp.z)-(bp.z*cp.y)))+(n.y*((bp.z*cp.x)-(bp.x*cp.z)))+(n.z*((bp.x*cp.y)-(bp.y*cp.x)));
+ if (va<=0.0) and (unom>=0.0) and (udenom>=0.0) then begin
+  v:=unom/(unom+udenom);
+  result:=sqr((b.x+(bc.x*v))-p.x)+sqr((b.y+(bc.y*v))-p.y)+sqr((b.z+(bc.z*v))-p.z);
+  exit;
+ end;
+
+ // Repeat the same test for P onto CA
+ vb:=(n.x*((cp.y*ap.z)-(cp.z*ap.y)))+(n.y*((cp.z*ap.x)-(cp.x*ap.z)))+(n.z*((cp.x*ap.y)-(cp.y*ap.x)));
+ if (vb<=0.0) and (tnom>=0.0) and (tdenom>=0.0) then begin
+  w:=tnom/(tnom+tdenom);
+  result:=sqr((a.x+(ac.x*w))-p.x)+sqr((a.y+(ac.y*w))-p.y)+sqr((a.z+(ac.z*w))-p.z);
+  exit;
+ end;
+
+ // P must project onto inside face. Find closest point using the barycentric coordinates
+ w:=1.0/(va+vb+vc);
+ u:=va*w;
+ v:=vb*w;
+ w:=(1.0-u)-v;
+
+ result:=sqr(((a.x*u)+(b.x*v)+(c.x*w))-p.x)+sqr(((a.y*u)+(b.y*v)+(c.y*w))-p.y)+sqr(((a.z*u)+(b.z*v)+(c.z*w))-p.z);
+
+end;
+
+function SquaredDistanceFromPointToTriangle(const p,a,b,c:TKraftVector3;out u,v,w:TKraftScalar):TKraftScalar; overload;
+var ab,ac,bc,pa,pb,pc,ap,bp,cp,n:TKraftVector3;
+    snom,sdenom,tnom,tdenom,unom,udenom,vc,vb,va:TKraftScalar;
+begin
+
+ ab.x:=b.x-a.x;
+ ab.y:=b.y-a.y;
+ ab.z:=b.z-a.z;
+{$ifdef SIMD}
+ ab.w:=0.0;
+{$endif}
+
+ ac.x:=c.x-a.x;
+ ac.y:=c.y-a.y;
+ ac.z:=c.z-a.z;
+{$ifdef SIMD}
+ ac.w:=0.0;
+{$endif}
+
+ bc.x:=c.x-b.x;
+ bc.y:=c.y-b.y;
+ bc.z:=c.z-b.z;
+{$ifdef SIMD}
+ bc.w:=0.0;
+{$endif}
+
+ pa.x:=p.x-a.x;
+ pa.y:=p.y-a.y;
+ pa.z:=p.z-a.z;
+{$ifdef SIMD}
+ pa.w:=0.0;
+{$endif}
+
+ pb.x:=p.x-b.x;
+ pb.y:=p.y-b.y;
+ pb.z:=p.z-b.z;
+{$ifdef SIMD}
+ pb.w:=0.0;
+{$endif}
+
+ pc.x:=p.x-c.x;
+ pc.y:=p.y-c.y;
+ pc.z:=p.z-c.z;
+{$ifdef SIMD}
+ pc.w:=0.0;
+{$endif}
+
+ // Determine the parametric position s for the projection of P onto AB (i.e. PPU2 = A+s*AB, where
+ // s = snom/(snom+sdenom), and then parametric position t for P projected onto AC
+ snom:=(ab.x*pa.x)+(ab.y*pa.y)+(ab.z*pa.z);
+ sdenom:=(pb.x*(a.x-b.x))+(pb.y*(a.y-b.y))+(pb.z*(a.z-b.z));
+ tnom:=(ac.x*pa.x)+(ac.y*pa.y)+(ac.z*pa.z);
+ tdenom:=(pc.x*(a.x-c.x))+(pc.y*(a.y-c.y))+(pc.z*(a.z-c.z));
+ if (snom<=0.0) and (tnom<=0.0) then begin
+  // Vertex voronoi region hit early out
+  result:=sqr(a.x-p.x)+sqr(a.y-p.y)+sqr(a.z-p.z);
+  exit;
+ end;
+
+ // Parametric position u for P projected onto BC
+ unom:=(bc.x*pb.x)+(bc.y*pb.y)+(bc.z*pb.z);
+ udenom:=(pc.x*(b.x-c.x))+(pc.y*(b.y-c.y))+(pc.z*(b.z-c.z));
+ if (sdenom<=0.0) and (unom<=0.0) then begin
+  // Vertex voronoi region hit early out
+  result:=sqr(b.x-p.x)+sqr(b.y-p.y)+sqr(b.z-p.z);
+  exit;
+ end;
+ if (tdenom<=0.0) and (udenom<=0.0) then begin
+  // Vertex voronoi region hit early out
+  result:=sqr(c.x-p.x)+sqr(c.y-p.y)+sqr(c.z-p.z);
+  exit;
+ end;
+
+ // Determine if P is outside (or on) edge AB by finding the area formed by vectors PA, PB and
+ // the triangle normal. A scalar triple product is used. P is outside (or on) AB if the triple
+ // scalar product [N PA PB] <= 0
+ n.x:=(ab.y*ac.z)-(ab.z*ac.y);
+ n.y:=(ab.z*ac.x)-(ab.x*ac.z);
+ n.z:=(ab.x*ac.y)-(ab.y*ac.x);
+{$ifdef SIMD}
+ n.w:=0.0;
+{$endif}
+ ap.x:=a.x-p.x;
+ ap.y:=a.y-p.y;
+ ap.z:=a.z-p.z;
+{$ifdef SIMD}
+ ap.w:=0.0;
+{$endif}
+ bp.x:=b.x-p.x;
+ bp.y:=b.y-p.y;
+ bp.z:=b.z-p.z;
+{$ifdef SIMD}
+ bp.w:=0.0;
+{$endif}
+ vc:=(n.x*((ap.y*bp.z)-(ap.z*bp.y)))+(n.y*((ap.z*bp.x)-(ap.x*bp.z)))+(n.z*((ap.x*bp.y)-(ap.y*bp.x)));
+
+ // If P is outside of AB (signed area <= 0) and within voronoi feature region, then return
+ // projection of P onto AB
+ if (vc<=0.0) and (snom>=0.0) and (sdenom>=0.0) then begin
+  u:=snom/(snom+sdenom);
+  result:=sqr((a.x+(ab.x*u))-p.x)+sqr((a.y+(ab.y*u))-p.y)+sqr((a.z+(ab.z*u))-p.z);
+  exit;
+ end;
+
+ // Repeat the same test for P onto BC
+ cp.x:=c.x-p.x;
+ cp.y:=c.y-p.y;
+ cp.z:=c.z-p.z;
+{$ifdef SIMD}
+ cp.w:=0.0;
+{$endif}
  va:=(n.x*((bp.y*cp.z)-(bp.z*cp.y)))+(n.y*((bp.z*cp.x)-(bp.x*cp.z)))+(n.z*((bp.x*cp.y)-(bp.y*cp.x)));
  if (va<=0.0) and (unom>=0.0) and (udenom>=0.0) then begin
   v:=unom/(unom+udenom);
@@ -10362,65 +11637,75 @@ begin
  result:=(Time>=0.0) and (Time<=1.0);
 end;
 
-function SIMDTriangleClosestPointTo(const Triangle:TKraftTriangle;const Point:TKraftVector3;out ClosestPoint:TKraftVector3):boolean; overload;
+function SIMDTriangleClosestPointTo(const pA,pB,pC,Point:TKraftVector3;out ClosestPoint:TKraftVector3):boolean; overload;
 var u,v,w,d1,d2,d3,d4,d5,d6,Denominator:TKraftScalar;
     vAB,vAC,vAp,vBp,vCp:TKraftVector3;
 begin
  result:=false;
 
- vAB:=Vector3Sub(Triangle.Points[1],Triangle.Points[0]);
- vAC:=Vector3Sub(Triangle.Points[2],Triangle.Points[0]);
- vAp:=Vector3Sub(Point,Triangle.Points[0]);
+ vAB:=Vector3Sub(pB,pA);
+ vAC:=Vector3Sub(pC,pA);
+ vAp:=Vector3Sub(Point,pA);
 
  d1:=Vector3Dot(vAB,vAp);
  d2:=Vector3Dot(vAC,vAp);
  if (d1<=0.0) and (d2<=0.0) then begin
-  ClosestPoint:=Triangle.Points[0]; // closest point is vertex A
+  ClosestPoint:=pA; // closest point is vertex A
   exit;
  end;
 
- vBp:=Vector3Sub(Point,Triangle.Points[1]);
+ vBp:=Vector3Sub(Point,pB);
  d3:=Vector3Dot(vAB,vBp);
  d4:=Vector3Dot(vAC,vBp);
  if (d3>=0.0) and (d4<=d3) then begin
-  ClosestPoint:=Triangle.Points[1]; // closest point is vertex B
-  exit;
- end;
-                                  
- w:=(d1*d4)-(d3*d2);
- if (w<=0.0) and (d1>=0.0) and (d3<=0.0) then begin
-   // closest point is along edge 1-2
-  ClosestPoint:=Vector3Add(Triangle.Points[0],Vector3ScalarMul(vAB,d1/(d1-d3)));
+  ClosestPoint:=pB; // closest point is vertex B
   exit;
  end;
 
- vCp:=Vector3Sub(Point,Triangle.Points[2]);
+ w:=(d1*d4)-(d3*d2);
+ if (w<=0.0) and (d1>=0.0) and (d3<=0.0) then begin
+   // closest point is along edge 1-2
+  ClosestPoint:=Vector3Add(pA,Vector3ScalarMul(vAB,d1/(d1-d3)));
+  exit;
+ end;
+
+ vCp:=Vector3Sub(Point,pC);
  d5:=Vector3Dot(vAB,vCp);
  d6:=Vector3Dot(vAC,vCp);
  if (d6>=0.0) and (d5<=d6) then begin
-  ClosestPoint:=Triangle.Points[2]; // closest point is vertex C
+  ClosestPoint:=pC; // closest point is vertex C
   exit;
  end;
 
  v:=(d5*d2)-(d1*d6);
  if (v<=0.0) and (d2>=0.0) and (d6<=0.0) then begin
    // closest point is along edge 1-3
-  ClosestPoint:=Vector3Add(Triangle.Points[0],Vector3ScalarMul(vAC,d2/(d2-d6)));
+  ClosestPoint:=Vector3Add(pA,Vector3ScalarMul(vAC,d2/(d2-d6)));
   exit;
  end;
 
  u:=(d3*d6)-(d5*d4);
  if (u<=0.0) and ((d4-d3)>=0.0) and ((d5-d6)>=0.0) then begin
   // closest point is along edge 2-3
-  ClosestPoint:=Vector3Add(Triangle.Points[1],Vector3ScalarMul(Vector3Sub(Triangle.Points[2],Triangle.Points[1]),(d4-d3)/((d4-d3)+(d5-d6))));
+  ClosestPoint:=Vector3Add(pB,Vector3ScalarMul(Vector3Sub(pC,pB),(d4-d3)/((d4-d3)+(d5-d6))));
   exit;
  end;
 
  Denominator:=1.0/(u+v+w);
 
- ClosestPoint:=Vector3Add(Triangle.Points[0],Vector3Add(Vector3ScalarMul(vAB,v*Denominator),Vector3ScalarMul(vAC,w*Denominator)));
+ ClosestPoint:=Vector3Add(pA,Vector3Add(Vector3ScalarMul(vAB,v*Denominator),Vector3ScalarMul(vAC,w*Denominator)));
 
  result:=true;
+end;
+
+function SIMDTriangleClosestPointTo(const Triangle:TKraftTriangle;const Point:TKraftVector3;out ClosestPoint:TKraftVector3):boolean; overload;
+begin
+ result:=SIMDTriangleClosestPointTo(Triangle.Points[0],Triangle.Points[1],Triangle.Points[2],Point,ClosestPoint);
+end;
+
+function SIMDTriangleClosestPointTo(const Mesh:TKraftMesh;const Triangle:TKraftMeshTriangle;const Point:TKraftVector3;out ClosestPoint:TKraftVector3):boolean; overload;
+begin
+ result:=SIMDTriangleClosestPointTo(Mesh.Vertices[Triangle.Vertices[0]],Mesh.Vertices[Triangle.Vertices[1]],Mesh.Vertices[Triangle.Vertices[2]],Point,ClosestPoint);
 end;
 
 function SIMDTriangleClosestPointTo(const Triangle:TKraftTriangle;const Segment:TKraftSegment;out Time:TKraftScalar;out ClosestPointOnSegment,ClosestPointOnTriangle:TKraftVector3):boolean; overload;
@@ -10525,12 +11810,12 @@ begin
 
 end;
 
-function InertiaTensorTransform(const Inertia,Transform:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function InertiaTensorTransform({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Inertia,Transform:TKraftMatrix3x3):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 begin
  result:=Matrix3x3TermMulTranspose(Matrix3x3TermMul(Transform,Inertia),Transform);
 end;
 
-function InertiaTensorParallelAxisTheorem(const Center:TKraftVector3;const Mass:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
+function InertiaTensorParallelAxisTheorem({$ifdef USE_CONSTREF_EX}constref{$else}const{$endif} Center:TKraftVector3;const Mass:TKraftScalar):TKraftMatrix3x3; {$ifdef caninline}inline;{$endif}
 var CenterDotCenter:TKraftScalar;
 begin
  CenterDotCenter:=sqr(Center.x)+sqr(Center.y)+sqr(Center.z);
@@ -10573,7 +11858,7 @@ begin
  end;
 end;
 
-function IntersectRayCapsuleInternal(const aRayOrigin,aRayDirection,aP0,aP1:TKraftVector3;const aRadius:TKraftScalar;const aS_:PKraftScalars):longint;
+function IntersectRayCapsuleInternal(const aRayOrigin,aRayDirection,aP0,aP1:TKraftVector3;const aRadius:TKraftScalar;const aS_:PKraftScalars):TKraftInt32;
 var kW,kU,kV,kD,kDiff,kP:TKraftVector3;
     fWLength,d0,d1,ApproxLength,fInvLength,fDLength,fInvDLength,fRadiusSqr,
     fAxisDir,fDiscr,fRoot,fA,fB,fC,fInv,fT,fTmp:TKraftScalar;
@@ -10610,6 +11895,9 @@ begin
    kU.y:=kW.z*fInvLength;
    kU.z:=-kW.y*fInvLength;
   end;
+{$ifdef SIMD}
+  kU.w:=0.0;
+{$endif}
  end;
 
  kV:=Vector3Norm(Vector3Cross(kW,kU));
@@ -10617,6 +11905,9 @@ begin
  kD.x:=Vector3Dot(kU,aRayDirection);
  kD.y:=Vector3Dot(kV,aRayDirection);
  kD.z:=Vector3Dot(kW,aRayDirection);
+{$ifdef SIMD}
+ kD.w:=0.0;
+{$endif}
  fDLength:=Vector3Length(kD);
  if fDLength>0.0 then begin
   fInvDLength:=1.0/fDLength;
@@ -10629,6 +11920,9 @@ begin
  kP.x:=Vector3Dot(kU,kDiff);
  kP.y:=Vector3Dot(kV,kDiff);
  kP.z:=Vector3Dot(kW,kDiff);
+{$ifdef SIMD}
+ kP.w:=0.0;
+{$endif}
  fRadiusSqr:=sqr(aRadius);
 
  if (abs(kD.z)>=(1.0-EPSILON)) or (fDLength<EPSILON) then begin
@@ -10800,8 +12094,10 @@ begin
  end;
 end;
 
-function SphereCastTriangle(const RayOrigin:TKraftVector3;const Radius:TKraftScalar;const RayDirection,v0,v1,v2:TKraftVector3;out Time,aU,aV:TKraftScalar):boolean; overload;
- function EdgeOrVertexTest(const aPlaneIntersectPoint:TKraftVector3;const aVertices:PPKraftVector3s;const aVertIntersectCandidate,aVert0,aVert1:longint;out aSecondEdgeVert:longint):boolean;
+{$define AlternativeSphereCastTriangleImplementation}
+function SphereCastTriangle(const RayOrigin:TKraftVector3;const Radius:TKraftScalar;const RayDirection,v0,v1,v2:TKraftVector3;out Time,aU,aV,aW:TKraftScalar):boolean; overload;
+{$ifndef AlternativeSphereCastTriangleImplementation}
+ function EdgeOrVertexTest(const aPlaneIntersectPoint:TKraftVector3;const aVertices:PPKraftVector3s;const aVertIntersectCandidate,aVert0,aVert1:TKraftInt32;out aSecondEdgeVert:TKraftInt32):boolean;
  var Edge,Diff:TKraftVector3;
  begin
   Edge:=Vector3Sub(aVertices^[aVertIntersectCandidate]^,aVertices^[aVert0]^);
@@ -10820,10 +12116,11 @@ function SphereCastTriangle(const RayOrigin:TKraftVector3;const Radius:TKraftSca
    end;
   end;
  end;
+{$endif}
 var Edge10,Edge20,Normal,R,Origin,pvec,tvec,qvec,IntersectPoint:TKraftVector3;
-    u,v,t,Det,OneOverDet:TKraftScalar;
-    TestSphere:boolean;
-    e0,e1:longint;
+    V,W,t,Det,OneOverDet:TKraftScalar;
+    {$ifdef AlternativeSphereCastTriangleImplementation}TestTwoEdges{$else}TestSphere{$endif}:boolean;
+    e0,e1{$ifdef AlternativeSphereCastTriangleImplementation},e2{$endif}:TKraftInt32;
     Vertices:array[0..2] of PKraftVector3;
 begin
 
@@ -10831,22 +12128,33 @@ begin
  Vertices[1]:=@v1;
  Vertices[2]:=@v2;
 
- Edge10:=Vector3Sub(v1,v0);
- Edge20:=Vector3Sub(v2,v0);
-
- if SquaredDistanceFromPointToTriangle(RayOrigin,v0,v1,v2)<=sqr(Radius) then begin
+ if SquaredDistanceFromPointToTriangle(RayOrigin,v0,v1,v2,aU,aV,t)<=sqr(Radius) then begin
   Time:=0.0;
-  aU:=0.0;
-  aV:=0.0;
+  if aU<=0.0 then begin
+   aU:=0.0;
+  end else if aU>=1.0 then begin
+   aU:=1.0;
+  end;
+  if aV<=0.0 then begin
+   aV:=0.0;
+  end else if aV>=1.0 then begin
+   aV:=1.0;
+  end;
+  aW:=1.0-(aU+aV);
   result:=true;
   exit;
  end;
+
+ Edge10:=Vector3Sub(v1,v0);
+ Edge20:=Vector3Sub(v2,v0);
 
  Normal:=Vector3NormEx(Vector3Cross(Edge10,Edge20));
 
  R:=Vector3ScalarMul(Normal,Radius);
  if Vector3Dot(RayDirection,R)>=0.0 then begin
-  R:=Vector3Neg(R);
+//R:=Vector3Neg(R);
+  result:=false;
+  exit;
  end;
 
  begin
@@ -10859,17 +12167,17 @@ begin
   end;
   OneOverDet:=1.0/Det;
   tvec:=Vector3Sub(Origin,v0);
-  U:=Vector3Dot(tvec,pvec)*OneOverDet;
+  V:=Vector3Dot(tvec,pvec)*OneOverDet;
   qvec:=Vector3Cross(tvec,Edge10);
-  V:=Vector3Dot(RayDirection,qvec)*OneOverDet;
-  if not ((U<0) or (U>1.0) or (V<0) or ((U+V)>1.0)) then begin
+  W:=Vector3Dot(RayDirection,qvec)*OneOverDet;
+  if not ((V<0) or (V>1.0) or (W<0) or ((V+W)>1.0)) then begin
    t:=Vector3Dot(Edge20,qvec)*OneOverDet;
    if t<0.0 then begin
     result:=false;
     exit;
    end else begin
-    Time:=-t;
-    aU:=U;
+    Time:=t;
+    aU:=(1.0-V)-W;
     aV:=V;
     result:=true;
     exit;
@@ -10877,14 +12185,64 @@ begin
   end;
  end;
 
- if u<0.0 then begin
-  if v<0.0 then begin
+{$ifdef AlternativeSphereCastTriangleImplementation}
+ if V<0.0 then begin
+  if W<0.0 then begin
+   TestTwoEdges:=true;
    e0:=0;
-   IntersectPoint:=Vector3Add(Vector3Add(Vector3ScalarMul(v1,u),Vector3ScalarMul(v2,v)),Vector3ScalarMul(v0,1.0-(u+v)));
-   TestSphere:=EdgeOrVertexTest(IntersectPoint,@Vertices,0,1,2,e1);
-  end else if (u+v)>1.0 then begin
+   e1:=1;
+   e2:=2;
+  end else if (V+W)>1.0 then begin
+   TestTwoEdges:=true;
    e0:=2;
-   IntersectPoint:=Vector3Add(Vector3Add(Vector3ScalarMul(v1,u),Vector3ScalarMul(v2,v)),Vector3ScalarMul(v0,1.0-(u+v)));
+   e1:=0;
+   e2:=1;
+  end else begin
+   TestTwoEdges:=false;
+   e0:=0;
+   e1:=2;
+   e2:=0;
+  end;
+ end else begin
+  if W<0.0 then begin
+   if (V+W)>1.0 then begin
+    TestTwoEdges:=true;
+    e0:=1;
+    e1:=0;
+    e2:=2;
+   end else begin
+    TestTwoEdges:=false;
+    e0:=0;
+    e1:=1;
+    e2:=0;
+   end;
+  end else begin
+   TestTwoEdges:=false;
+   e0:=1;
+   e1:=2;
+   e2:=0;
+  end;
+ end;
+
+ if IntersectRayCapsule(RayOrigin,RayDirection,Vertices[e0]^,Vertices[e1]^,Radius,t) and (t>=0.0) then begin
+  Time:=t;
+  result:=true;
+ end else if TestTwoEdges and IntersectRayCapsule(RayOrigin,RayDirection,Vertices[e0]^,Vertices[e2]^,Radius,t) and (t>=0.0) then begin
+  Time:=t;
+  result:=true;
+ end else begin
+  result:=false;
+ end;
+
+{$else}
+ if V<0.0 then begin
+  if W<0.0 then begin
+   e0:=0;
+   IntersectPoint:=Vector3Add(Vector3Add(Vector3ScalarMul(v1,V),Vector3ScalarMul(v2,W)),Vector3ScalarMul(v0,1.0-(V+W)));
+   TestSphere:=EdgeOrVertexTest(IntersectPoint,@Vertices,0,1,2,e1);
+  end else if (V+W)>1.0 then begin
+   e0:=2;
+   IntersectPoint:=Vector3Add(Vector3Add(Vector3ScalarMul(v1,V),Vector3ScalarMul(v2,W)),Vector3ScalarMul(v0,1.0-(V+W)));
    TestSphere:=EdgeOrVertexTest(IntersectPoint,@Vertices,2,0,1,e1);
   end else begin
    TestSphere:=false;
@@ -10892,10 +12250,10 @@ begin
    e1:=2;
   end;
  end else begin
-  if v<0.0 then begin
-   if (u+v)>1.0 then begin
+  if W<0.0 then begin
+   if (V+W)>1.0 then begin
     e0:=1;
-    IntersectPoint:=Vector3Add(Vector3Add(Vector3ScalarMul(v1,u),Vector3ScalarMul(v2,v)),Vector3ScalarMul(v0,1.0-(u+v)));
+    IntersectPoint:=Vector3Add(Vector3Add(Vector3ScalarMul(v1,V),Vector3ScalarMul(v2,W)),Vector3ScalarMul(v0,1.0-(V+W)));
     TestSphere:=EdgeOrVertexTest(IntersectPoint,@Vertices,1,0,2,e1);
    end else begin
     TestSphere:=false;
@@ -10915,6 +12273,7 @@ begin
    result:=true;
   end else begin
    result:=false;
+   exit;
   end;
  end else begin
   if IntersectRayCapsule(RayOrigin,RayDirection,Vertices[e0]^,Vertices[e1]^,Radius,t) then begin
@@ -10922,15 +12281,168 @@ begin
    result:=true;
   end else begin
    result:=false;
+   exit;
   end;
  end;
+{$endif}
 
- aU:=Min(Max(U,0.0),1.0);
- aV:=Min(Max(V,0.0),1.0);
+ if V<=0.0 then begin
+  V:=0.0;
+ end else if V>=1.0 then begin
+  V:=1.0;
+ end;
+
+ if W<=0.0 then begin
+  W:=0.0;
+ end else if W>=1.0 then begin
+  W:=1.0;
+ end;
+
+ // Convert A*(1.0-U-V) + B*U + C*V into A*U + B*V + C*W baricentric coordinates, since it more common and more compatible of the rest of the code 
+ // So V is actually U and W is actually V in this procedure respectivly the other way around, depending on the view point
+ aU:=(1.0-V)-W;
+ aV:=V;
+ aW:=W;
 
 end;
 
-constructor TKraftHighResolutionTimer.Create(FrameRate:longint=60);
+{ TKraftQueue<T> }
+
+constructor TKraftQueue<T>.Create;
+begin
+ inherited Create;
+ fItems:=nil;
+ fHead:=0;
+ fTail:=0;
+ fCount:=0;
+ fSize:=0;
+end;
+
+destructor TKraftQueue<T>.Destroy;
+begin
+ Clear;
+ inherited Destroy;
+end;
+
+procedure TKraftQueue<T>.GrowResize(const aSize:TKraftSizeInt);
+var Index,OtherIndex:TKraftSizeInt;
+    NewItems:TQueueItems;
+begin
+ SetLength(NewItems,aSize);
+ OtherIndex:=fHead;
+ for Index:=0 to fCount-1 do begin
+  NewItems[Index]:=fItems[OtherIndex];
+  inc(OtherIndex);
+  if OtherIndex>=fSize then begin
+   OtherIndex:=0;
+  end;
+ end;
+ fItems:=NewItems;
+ fHead:=0;
+ fTail:=fCount;
+ fSize:=aSize;
+end;
+
+procedure TKraftQueue<T>.Clear;
+begin
+ while fCount>0 do begin
+  dec(fCount);
+  System.Finalize(fItems[fHead]);
+  inc(fHead);
+  if fHead>=fSize then begin
+   fHead:=0;
+  end;
+ end;
+ fItems:=nil;
+ fHead:=0;
+ fTail:=0;
+ fCount:=0;
+ fSize:=0;
+end;
+
+function TKraftQueue<T>.IsEmpty:boolean;
+begin
+ result:=fCount=0;
+end;
+
+procedure TKraftQueue<T>.EnqueueAtFront(const aItem:T);
+var Index:TKraftSizeInt;
+begin
+ if fSize<=fCount then begin
+  GrowResize(fCount+1);
+ end;
+ dec(fHead);
+ if fHead<0 then begin
+  inc(fHead,fSize);
+ end;
+ Index:=fHead;
+ fItems[Index]:=aItem;
+ inc(fCount);
+end;
+
+procedure TKraftQueue<T>.Enqueue(const aItem:T);
+var Index:TKraftSizeInt;
+begin
+ if fSize<=fCount then begin
+  GrowResize(fCount+1);
+ end;
+ Index:=fTail;
+ inc(fTail);
+ if fTail>=fSize then begin
+  fTail:=0;
+ end;
+ fItems[Index]:=aItem;
+ inc(fCount);
+end;
+
+function TKraftQueue<T>.Dequeue(out aItem:T):boolean;
+begin
+ result:=fCount>0;
+ if result then begin
+  dec(fCount);
+  aItem:=fItems[fHead];
+  System.Finalize(fItems[fHead]);
+  FillChar(fItems[fHead],SizeOf(T),#0);
+  if fCount=0 then begin
+   fHead:=0;
+   fTail:=0;
+  end else begin
+   inc(fHead);
+   if fHead>=fSize then begin
+    fHead:=0;
+   end;
+  end;
+ end;
+end;
+
+function TKraftQueue<T>.Dequeue:boolean;
+begin
+ result:=fCount>0;
+ if result then begin
+  dec(fCount);
+  System.Finalize(fItems[fHead]);
+  FillChar(fItems[fHead],SizeOf(T),#0);
+  if fCount=0 then begin
+   fHead:=0;
+   fTail:=0;
+  end else begin
+   inc(fHead);
+   if fHead>=fSize then begin
+    fHead:=0;
+   end;
+  end;
+ end;
+end;
+
+function TKraftQueue<T>.Peek(out aItem:T):boolean;
+begin
+ result:=fCount>0;
+ if result then begin
+  aItem:=fItems[fHead];
+ end;
+end;
+
+constructor TKraftHighResolutionTimer.Create(FrameRate:TKraftInt32=60);
 begin
  inherited Create;
  fFrequencyShift:=0;
@@ -10963,19 +12475,19 @@ begin
  inherited Destroy;
 end;
 
-procedure TKraftHighResolutionTimer.SetFrameRate(FrameRate:longint);
+procedure TKraftHighResolutionTimer.SetFrameRate(FrameRate:TKraftInt32);
 begin
  fFrameInterval:=(fFrequency+((abs(FrameRate)+1) shr 1)) div abs(FrameRate);
 end;
 
-function TKraftHighResolutionTimer.GetTime:int64;
+function TKraftHighResolutionTimer.GetTime:TKraftInt64;
 {$if defined(linux) or defined(android)}
 var NowTimeSpec:TimeSpec;
-    ia,ib:int64;
+    ia,ib:TKraftInt64;
 {$elseif defined(unix)}
 var tv:timeval;
     tz:timezone;
-    ia,ib:int64;
+    ia,ib:TKraftInt64;
 {$ifend}
 begin
 {$if defined(windows)}
@@ -10984,14 +12496,14 @@ begin
  end;
 {$elseif defined(linux) or defined(android)}
  clock_gettime(CLOCK_MONOTONIC,@NowTimeSpec);
- ia:=int64(NowTimeSpec.tv_sec)*int64(1000000000);
+ ia:=TKraftInt64(NowTimeSpec.tv_sec)*TKraftInt64(1000000000);
  ib:=NowTimeSpec.tv_nsec;
  result:=ia+ib;
 {$elseif defined(unix)}
   tz.tz_minuteswest:=0;
   tz.tz_dsttime:=0;
   fpgettimeofday(@tv,@tz);
-  ia:=int64(tv.tv_sec)*int64(1000000);
+  ia:=TKraftInt64(tv.tv_sec)*TKraftInt64(1000000);
   ib:=tv.tv_usec;
   result:=ia+ib;
 {$else}
@@ -11000,13 +12512,13 @@ begin
  result:=result shr fFrequencyShift;
 end;
 
-function TKraftHighResolutionTimer.GetEventTime:int64;
+function TKraftHighResolutionTimer.GetEventTime:TKraftInt64;
 begin
  result:=ToNanoseconds(GetTime);
 end;
 
-procedure TKraftHighResolutionTimer.Sleep(Delay:int64);
-var EndTime,NowTime{$ifdef unix},SleepTime{$endif}:int64;
+procedure TKraftHighResolutionTimer.Sleep(Delay:TKraftInt64);
+var EndTime,NowTime{$ifdef unix},SleepTime{$endif}:TKraftInt64;
 {$ifdef unix}
     req,rem:timespec;
 {$endif}
@@ -11086,14 +12598,14 @@ begin
  end;
 end;
 
-function TKraftHighResolutionTimer.ToFixedPointSeconds(Time:int64):int64;
+function TKraftHighResolutionTimer.ToFixedPointSeconds(Time:TKraftInt64):TKraftInt64;
 var a,b:TUInt128;
 begin
  if fFrequency<>0 then begin
-  if ((fFrequency or Time) and int64($ffffffff00000000))=0 then begin
-   result:=int64(qword(qword(Time)*qword($100000000)) div qword(fFrequency));
+  if ((fFrequency or Time) and TKraftInt64($ffffffff00000000))=0 then begin
+   result:=TKraftInt64(TKraftUInt64(TKraftUInt64(Time)*TKraftUInt64($100000000)) div TKraftUInt64(fFrequency));
   end else begin
-   UInt128Mul64(a,Time,qword($100000000));
+   UInt128Mul64(a,Time,TKraftUInt64($100000000));
    UInt128Div64(b,a,fFrequency);
    result:=b.Lo;
   end;
@@ -11102,14 +12614,14 @@ begin
  end;
 end;
 
-function TKraftHighResolutionTimer.ToFixedPointFrames(Time:int64):int64;
+function TKraftHighResolutionTimer.ToFixedPointFrames(Time:TKraftInt64):TKraftInt64;
 var a,b:TUInt128;
 begin
  if fFrameInterval<>0 then begin
-  if ((fFrameInterval or Time) and int64($ffffffff00000000))=0 then begin
-   result:=int64(qword(qword(Time)*qword($100000000)) div qword(fFrameInterval));
+  if ((fFrameInterval or Time) and TKraftInt64($ffffffff00000000))=0 then begin
+   result:=TKraftInt64(TKraftUInt64(TKraftUInt64(Time)*TKraftUInt64($100000000)) div TKraftUInt64(fFrameInterval));
   end else begin
-   UInt128Mul64(a,Time,qword($100000000));
+   UInt128Mul64(a,Time,TKraftUInt64($100000000));
    UInt128Div64(b,a,fFrameInterval);
    result:=b.Lo;
   end;
@@ -11118,7 +12630,7 @@ begin
  end;
 end;
 
-function TKraftHighResolutionTimer.ToFloatSeconds(Time:int64):double;
+function TKraftHighResolutionTimer.ToFloatSeconds(Time:TKraftInt64):double;
 begin
  if fFrequency<>0 then begin
   result:=Time/fFrequency;
@@ -11127,7 +12639,7 @@ begin
  end;
 end;
 
-function TKraftHighResolutionTimer.FromFloatSeconds(Time:double):int64;
+function TKraftHighResolutionTimer.FromFloatSeconds(Time:double):TKraftInt64;
 begin
  if fFrequency<>0 then begin
   result:=trunc(Time*fFrequency);
@@ -11136,7 +12648,7 @@ begin
  end;
 end;
 
-function TKraftHighResolutionTimer.ToMilliseconds(Time:int64):int64;
+function TKraftHighResolutionTimer.ToMilliseconds(Time:TKraftInt64):TKraftInt64;
 begin
  result:=Time;
  if fFrequency<>1000 then begin
@@ -11144,7 +12656,7 @@ begin
  end;
 end;
 
-function TKraftHighResolutionTimer.FromMilliseconds(Time:int64):int64;
+function TKraftHighResolutionTimer.FromMilliseconds(Time:TKraftInt64):TKraftInt64;
 begin
  result:=Time;
  if fFrequency<>1000 then begin
@@ -11152,7 +12664,7 @@ begin
  end;
 end;
 
-function TKraftHighResolutionTimer.ToMicroseconds(Time:int64):int64;
+function TKraftHighResolutionTimer.ToMicroseconds(Time:TKraftInt64):TKraftInt64;
 begin
  result:=Time;
  if fFrequency<>1000000 then begin
@@ -11160,7 +12672,7 @@ begin
  end;
 end;
 
-function TKraftHighResolutionTimer.FromMicroseconds(Time:int64):int64;
+function TKraftHighResolutionTimer.FromMicroseconds(Time:TKraftInt64):TKraftInt64;
 begin
  result:=Time;
  if fFrequency<>1000000 then begin
@@ -11168,7 +12680,7 @@ begin
  end;
 end;
 
-function TKraftHighResolutionTimer.ToNanoseconds(Time:int64):int64;
+function TKraftHighResolutionTimer.ToNanoseconds(Time:TKraftInt64):TKraftInt64;
 begin
  result:=Time;
  if fFrequency<>1000000000 then begin
@@ -11176,7 +12688,7 @@ begin
  end;
 end;
 
-function TKraftHighResolutionTimer.FromNanoseconds(Time:int64):int64;
+function TKraftHighResolutionTimer.FromNanoseconds(Time:TKraftInt64):TKraftInt64;
 begin
  result:=Time;
  if fFrequency<>1000000000 then begin
@@ -11207,10 +12719,14 @@ type TKraftShapeTriangle=class(TKraftShapeConvexHull)
        destructor Destroy; override;
        procedure UpdateShapeAABB; override;
        procedure CalculateMassData; override;
-       function GetSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar; override;
+       function GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3; override;
+       function GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3; override;
        function GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3; override;
-       function GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3; override;
-       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint; override;
+       function GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3; override;
+       function GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32; override;
        function GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3; override;
        function TestPoint(const p:TKraftVector3):boolean; override;
        function RayCast(var RayCastData:TKraftRayCastData):boolean; override;
@@ -11222,7 +12738,7 @@ type TKraftShapeTriangle=class(TKraftShapeConvexHull)
 
 function IsSameValue(const a,b:TKraftScalar):boolean;
 const FuzzFactor=1000.0;
-      Resolution={$ifdef UseDouble}1e-15{$else}1e-7{$endif}*FuzzFactor;
+      Resolution={$ifdef KraftUseDouble}1e-15{$else}1e-7{$endif}*FuzzFactor;
 var EpsilonTolerance:double;
 begin
  EpsilonTolerance:=abs(a);
@@ -11260,7 +12776,7 @@ asm
  pop ebx
 end;
 
-function InterlockedCompareExchange64(var Target:int64;NewValue:int64;Comperand:int64):int64; assembler; register;
+function InterlockedCompareExchange64(var Target:TKraftInt64;NewValue:TKraftInt64;Comperand:TKraftInt64):TKraftInt64; assembler; register;
 asm
  push ebx
  push edi
@@ -11278,7 +12794,7 @@ end;
 
 {$ifndef fpc}
 {$ifdef cpu386}
-function InterlockedDecrement(var Target:longint):longint; assembler; register;
+function InterlockedDecrement(var Target:TKraftInt32):TKraftInt32; assembler; register;
 asm
  mov edx,$ffffffff
  xchg eax,edx
@@ -11286,7 +12802,7 @@ asm
  dec eax
 end;
 
-function InterlockedIncrement(var Target:longint):longint; assembler; register;
+function InterlockedIncrement(var Target:TKraftInt32):TKraftInt32; assembler; register;
 asm
  mov edx,1
  xchg eax,edx
@@ -11294,86 +12810,86 @@ asm
  inc eax
 end;
 
-function InterlockedExchange(var Target:longint;Source:longint):longint; assembler; register;
+function InterlockedExchange(var Target:TKraftInt32;Source:TKraftInt32):TKraftInt32; assembler; register;
 asm
  lock xchg dword ptr [eax],edx
  mov eax,edx
 end;
 
-function InterlockedExchangeAdd(var Target:longint;Source:longint):longint; assembler; register;
+function InterlockedExchangeAdd(var Target:TKraftInt32;Source:TKraftInt32):TKraftInt32; assembler; register;
 asm
  xchg edx,eax
  lock xadd dword ptr [edx],eax
 end;
 
-function InterlockedCompareExchange(var Target:longint;NewValue,Comperand:longint):longint; assembler; register;
+function InterlockedCompareExchange(var Target:TKraftInt32;NewValue,Comperand:TKraftInt32):TKraftInt32; assembler; register;
 asm
  xchg ecx,eax
  lock cmpxchg dword ptr [ecx],edx
 end;
 {$else}
-function InterlockedDecrement(var Target:longint):longint; {$ifdef caninline}inline;{$endif}
+function InterlockedDecrement(var Target:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=Windows.InterlockedDecrement(Target);
 end;
 
-function InterlockedIncrement(var Target:longint):longint; {$ifdef caninline}inline;{$endif}
+function InterlockedIncrement(var Target:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=Windows.InterlockedIncrement(Target);
 end;
 
-function InterlockedExchange(var Target:longint;Source:longint):longint; {$ifdef caninline}inline;{$endif}
+function InterlockedExchange(var Target:TKraftInt32;Source:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=Windows.InterlockedExchange(Target,Source);
 end;
 
-function InterlockedExchangeAdd(var Target:longint;Source:longint):longint; {$ifdef caninline}inline;{$endif}
+function InterlockedExchangeAdd(var Target:TKraftInt32;Source:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=Windows.InterlockedExchangeAdd(Target,Source);
 end;
 
-function InterlockedCompareExchange(var Target:longint;NewValue,Comperand:longint):longint; {$ifdef caninline}inline;{$endif}
+function InterlockedCompareExchange(var Target:TKraftInt32;NewValue,Comperand:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=Windows.InterlockedCompareExchange(Target,NewValue,Comperand);
 end;
 {$endif}
 {$else}
-function InterlockedDecrement(var Target:longint):longint; {$ifdef caninline}inline;{$endif}
+function InterlockedDecrement(var Target:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=System.InterlockedDecrement(Target);
 end;
 
-function InterlockedIncrement(var Target:longint):longint; {$ifdef caninline}inline;{$endif}
+function InterlockedIncrement(var Target:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=System.InterlockedIncrement(Target);
 end;
 
-function InterlockedExchange(var Target:longint;Source:longint):longint; {$ifdef caninline}inline;{$endif}
+function InterlockedExchange(var Target:TKraftInt32;Source:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=System.InterlockedExchange(Target,Source);
 end;
 
-function InterlockedExchangeAdd(var Target:longint;Source:longint):longint; {$ifdef caninline}inline;{$endif}
+function InterlockedExchangeAdd(var Target:TKraftInt32;Source:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=System.InterlockedExchangeAdd(Target,Source);
 end;
 
-function InterlockedCompareExchange(var Target:longint;NewValue,Comperand:longint):longint; {$ifdef caninline}inline;{$endif}
+function InterlockedCompareExchange(var Target:TKraftInt32;NewValue,Comperand:TKraftInt32):TKraftInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=System.InterlockedCompareExchange(Target,NewValue,Comperand);
 end;
 {$endif}
 
-function HashPointer(p:pointer):longword; {$ifdef caninline}inline;{$endif}
+function HashPointer(p:pointer):TKraftUInt32; {$ifdef caninline}inline;{$endif}
 (*{$ifdef cpu64}
-var r:qword;
+var r:TKraftUInt64;
 begin
  r:=ptruint(p);
  r:=r xor (r shr 33);
- r:=r*qword($ff51afd7ed558ccd);
+ r:=r*TKraftUInt64($ff51afd7ed558ccd);
  r:=r xor (r shr 33);
- r:=r*qword($c4ceb9fe1a85ec53);
- result:=longword(ptruint(r xor (r shr 33)));
+ r:=r*TKraftUInt64($c4ceb9fe1a85ec53);
+ result:=TKraftUInt32(ptruint(r xor (r shr 33)));
 end;
 {$else}
 begin
@@ -11394,7 +12910,7 @@ begin
  r:=r*21; // r:=(r+(r shl 2))+(r shl 4);
  r:=r xor (r shr 11);
  r:=r+(r shl 6);
- result:=longword(ptruint(r xor (r shr 22)));
+ result:=TKraftUInt32(ptruint(r xor (r shr 22)));
 end;
 {$else}
 begin
@@ -11407,10 +12923,10 @@ begin
 end;
 {$endif}
 
-function HashTwoLongWords(a,b:longword):longword; {$ifdef caninline}inline;{$endif}
-var r:qword;
+function HashTwoLongWords(a,b:TKraftUInt32):TKraftUInt32; {$ifdef caninline}inline;{$endif}
+var r:TKraftUInt64;
 begin
- r:=(qword(a) shl 32) or b;
+ r:=(TKraftUInt64(a) shl 32) or b;
  r:=(not r)+(r shl 18); // r:=((r shl 18)-r-)1;
  r:=r xor (r shr 31);
 {$ifdef cpu64}
@@ -11420,15 +12936,15 @@ begin
 {$endif}
  r:=r xor (r shr 11);
  r:=r+(r shl 6);
- result:=longword(ptruint(r xor (r shr 22)));
+ result:=TKraftUInt32(ptruint(r xor (r shr 22)));
 end;
 
-function HashTwoPointers(a,b:pointer):longword; {$ifdef caninline}inline;{$endif}
+function HashTwoPointers(a,b:pointer):TKraftUInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=HashTwoLongWords(HashPointer(a),HashPointer(b));
 end;
 
-function HashTwoPointersAndOneLongWord(a,b:pointer;c:longword):longword; {$ifdef caninline}inline;{$endif}
+function HashTwoPointersAndOneLongWord(a,b:pointer;c:TKraftUInt32):TKraftUInt32; {$ifdef caninline}inline;{$endif}
 begin
  result:=HashTwoLongWords(HashTwoLongWords(HashPointer(a),HashPointer(b)),c);
 end;
@@ -11455,9 +12971,13 @@ begin
  end else if d.z>0.0 then begin
   result.Max.z:=result.Max.z+d.z;
  end;
+{$ifdef SIMD}
+ result.Min.w:=0.0;
+ result.Max.w:=0.0;
+{$endif}
 end;
 
-function CompareFloat(const a,b:pointer):longint;
+function CompareFloat(const a,b:pointer):TKraftInt32;
 begin
  if TKraftScalar(a^)<TKraftScalar(b^) then begin
   result:=1;
@@ -11471,7 +12991,7 @@ end;
 function SweepTransform(const Sweep:TKraftSweep;const Beta:TKraftScalar):TKraftMatrix4x4; {$ifdef caninline}inline;{$endif}
 begin
  result:=QuaternionToMatrix4x4(QuaternionSlerp(Sweep.q0,Sweep.q,Beta));
- PKraftVector3(pointer(@result[3,0]))^:=Vector3Sub(Vector3Lerp(Sweep.c0,Sweep.c,Beta),Vector3TermMatrixMulBasis(Sweep.LocalCenter,result));
+ PKraftVector3(pointer(@result[3,0]))^.xyz:=Vector3Sub(Vector3Lerp(Sweep.c0,Sweep.c,Beta),Vector3TermMatrixMulBasis(Sweep.LocalCenter,result)).xyz;
 end;
 
 function SweepTermAdvance(const Sweep:TKraftSweep;const Alpha:TKraftScalar):TKraftSweep; {$ifdef caninline}inline;{$endif}
@@ -11512,8 +13032,8 @@ begin
  QuaternionNormalize(Sweep.q);
 end;
 
-procedure ClipFace(const InVertices,OutVertices:TKraftClipVertexList;const Plane:TKraftPlane;const ReferenceEdgeIndexOffset,ReferenceFaceIndex:longint);
-var Index,CountVertices:longint;
+procedure ClipFace(const InVertices,OutVertices:TKraftClipVertexList;const Plane:TKraftPlane;const ReferenceEdgeIndexOffset,ReferenceFaceIndex:TKraftInt32);
+var Index,CountVertices:TKraftInt32;
     PreviousClipVertexDistance,CurrentClipVertexDistance:TKraftScalar;
     PreviousClipVertex,CurrentClipVertex:PKraftClipVertex;
     FeatureID:TKraftContactFeatureID;
@@ -11631,7 +13151,7 @@ begin
 end;
 
 procedure TKraftClipVertexList.Add(const v:TKraftVector3;const fp:TKraftContactFeatureID);
-var i:longint;
+var i:TKraftInt32;
 begin
  i:=fCount;
  inc(fCount);
@@ -11644,7 +13164,7 @@ begin
 end;
 
 procedure TKraftClipVertexList.Add(const v:TKraftClipVertex);
-var i:longint;
+var i:TKraftInt32;
 begin
  i:=fCount;
  inc(fCount);
@@ -11677,6 +13197,10 @@ begin
   q.y:=n.z*p.x;
   q.z:=a*k;
  end;
+{$ifdef SIMD}
+ p.w:=0.0;
+ q.w:=0.0;
+{$endif}
 end;
 
 procedure ComputeBasis(var a:TKraftVector3;out b,c:TKraftVector3); overload; {$ifdef caninline}inline;{$endif}
@@ -11693,12 +13217,15 @@ begin
   b.y:=a.z;
   b.z:=-a.y;
  end;
+{$ifdef SIMD}
+ b.w:=0.0;
+{$endif}
  Vector3NormalizeEx(a);
  Vector3NormalizeEx(b);
  c:=Vector3NormEx(Vector3Cross(a,b));
 end;
 
-procedure ComputeBasis(const Normal:TKraftVector3;out Matrix:TKraftMatrix3x3;const IndexA:longint=0;const IndexB:longint=1;const IndexC:longint=2); overload; {$ifdef caninline}inline;{$endif}
+procedure ComputeBasis(const Normal:TKraftVector3;out Matrix:TKraftMatrix3x3;const IndexA:TKraftInt32=0;const IndexB:TKraftInt32=1;const IndexC:TKraftInt32=2); overload; {$ifdef caninline}inline;{$endif}
 var a,b,c:TKraftVector3;
 begin
  a:=Normal;
@@ -11783,7 +13310,7 @@ end;
 
 function BoxGetDistanceToPoint(Point:TKraftVector3;const Extents:TKraftVector3;const InverseTransformMatrix,TransformMatrix:TKraftMatrix4x4;var ClosestBoxPoint:TKraftVector3):TKraftScalar;
 var Temp,Direction:TKraftVector3;
-    Overlap:longint;
+    Overlap:TKraftInt32;
 begin
  result:=0;
  ClosestBoxPoint:=Vector3TermMatrixMul(Point,InverseTransformMatrix);
@@ -11816,6 +13343,9 @@ begin
  end else begin
   Overlap:=Overlap or 3;
  end;
+{$ifdef SIMD}
+ ClosestBoxPoint.w:=0.0;
+{$endif}
  if Overlap<>7 then begin
   result:=sqrt(result);
  end else begin
@@ -11823,6 +13353,9 @@ begin
   Direction.x:=ClosestBoxPoint.x/Extents.x;
   Direction.y:=ClosestBoxPoint.y/Extents.y;
   Direction.z:=ClosestBoxPoint.z/Extents.z;
+{$ifdef SIMD}
+  Direction.w:=0.0;
+{$endif}
   if (abs(Direction.x)>abs(Direction.y)) and (abs(Direction.x)>abs(Direction.z)) then begin
    if Direction.x<0.0 then begin
     ClosestBoxPoint.x:=-Extents.x;
@@ -11847,14 +13380,36 @@ begin
  ClosestBoxPoint:=Vector3TermMatrixMul(ClosestBoxPoint,TransformMatrix);
 end;
 
-type TSortCompareFunction=function(const a,b:pointer):longint;
+type TSortCompareFunction=function(const a,b:pointer):TKraftInt32;
 
-function IntLog2(x:longword):longword; {$ifdef cpu386}assembler; register;
+function IntLog2(x:TKraftUInt32):TKraftUInt32; {$if defined(fpc)}{$ifdef CAN_INLINE}inline;{$endif}
+begin
+ if x<>0 then begin
+  result:=BSRWord(x);
+ end else begin
+  result:=0;
+ end;
+end;
+{$elseif defined(cpu386)}
 asm
  test eax,eax
  jz @Done
  bsr eax,eax
  @Done:
+end;
+{$elseif defined(cpux86_64)}
+asm
+{$ifndef fpc}
+ .noframe
+{$endif}
+{$ifdef Windows}
+ bsr eax,ecx
+{$else}
+ bsr eax,edi
+{$endif}
+ jnz @Done
+ xor eax,eax
+@Done:
 end;
 {$else}
 begin
@@ -11864,44 +13419,44 @@ begin
  x:=x or (x shr 8);
  x:=x or (x shr 16);
  x:=x shr 1;
- x:=x-((x shr 1) and $55555555);
+ dec(x,(x shr 1) and $55555555);
  x:=((x shr 2) and $33333333)+(x and $33333333);
  x:=((x shr 4)+x) and $0f0f0f0f;
- x:=x+(x shr 8);
- x:=x+(x shr 16);
+ inc(x,x shr 8);
+ inc(x,x shr 16);
  result:=x and $3f;
 end;
-{$endif}
+{$ifend}
 
-procedure MemorySwap(a,b:pointer;Size:longint);
-var Temp:longint;
+procedure MemorySwap(a,b:pointer;Size:TKraftInt32);
+var Temp:TKraftInt32;
 begin
- while Size>=SizeOf(longint) do begin
-  Temp:=longword(a^);
-  longword(a^):=longword(b^);
-  longword(b^):=Temp;
-  inc(PtrUInt(a),SizeOf(longword));
-  inc(PtrUInt(b),SizeOf(longword));
-  dec(Size,SizeOf(longword));
+ while Size>=SizeOf(TKraftInt32) do begin
+  Temp:=TKraftUInt32(a^);
+  TKraftUInt32(a^):=TKraftUInt32(b^);
+  TKraftUInt32(b^):=Temp;
+  inc(PtrUInt(a),SizeOf(TKraftUInt32));
+  inc(PtrUInt(b),SizeOf(TKraftUInt32));
+  dec(Size,SizeOf(TKraftUInt32));
  end;
- while Size>=SizeOf(byte) do begin
-  Temp:=byte(a^);
-  byte(a^):=byte(b^);
-  byte(b^):=Temp;
-  inc(PtrUInt(a),SizeOf(byte));
-  inc(PtrUInt(b),SizeOf(byte));
-  dec(Size,SizeOf(byte));
+ while Size>=SizeOf(TKraftUInt8) do begin
+  Temp:=TKraftUInt8(a^);
+  TKraftUInt8(a^):=TKraftUInt8(b^);
+  TKraftUInt8(b^):=Temp;
+  inc(PtrUInt(a),SizeOf(TKraftUInt8));
+  inc(PtrUInt(b),SizeOf(TKraftUInt8));
+  dec(Size,SizeOf(TKraftUInt8));
  end;
 end;
 
-procedure DirectIntroSort(Items:pointer;Left,Right,ElementSize:longint;CompareFunc:TSortCompareFunction);
+procedure DirectIntroSort(Items:pointer;Left,Right,ElementSize:TKraftInt32;CompareFunc:TSortCompareFunction);
 type PByteArray=^TByteArray;
-     TByteArray=array[0..$3fffffff] of byte;
+     TByteArray=array[0..$3fffffff] of TKraftUInt8;
      PStackItem=^TStackItem;
      TStackItem=record
-      Left,Right,Depth:longint;
+      Left,Right,Depth:TKraftInt32;
      end;
-var Depth,i,j,Middle,Size,Parent,Child,Pivot,iA,iB,iC:longint;
+var Depth,i,j,Middle,Size,Parent,Child,Pivot,iA,iB,iC:TKraftInt32;
     StackItem:PStackItem;
     Stack:array[0..31] of TStackItem;
 begin
@@ -12021,14 +13576,14 @@ begin
  end;
 end;
 
-procedure IndirectIntroSort(Items:pointer;Left,Right:longint;CompareFunc:TSortCompareFunction);
+procedure IndirectIntroSort(Items:pointer;Left,Right:TKraftInt32;CompareFunc:TSortCompareFunction);
 type PPointers=^TPointers;
      TPointers=array[0..$ffff] of pointer;
      PStackItem=^TStackItem;
      TStackItem=record
-      Left,Right,Depth:longint;
+      Left,Right,Depth:TKraftInt32;
      end;
-var Depth,i,j,Middle,Size,Parent,Child:longint;
+var Depth,i,j,Middle,Size,Parent,Child:TKraftInt32;
     Pivot,Temp:pointer;
     StackItem:PStackItem;
     Stack:array[0..31] of TStackItem;
@@ -12250,6 +13805,7 @@ begin
      TimeDirection:=Vector3ScalarMul(aDirection,aTime);
      CapsuleP0:=Vector3Sub(aCapsuleP0,TimeDirection);
      CapsuleP1:=Vector3Sub(aCapsuleP1,TimeDirection);
+     IntersectionPoint:=Vector3Origin;
      SegmentSqrDistance(CapsuleP0,CapsuleP1,aSphereCenter,@IntersectionPoint);
      Normal:=Vector3Norm(Vector3Sub(IntersectionPoint,aSphereCenter));
      aIntersectionPoint:=Vector3Sub(IntersectionPoint,Vector3ScalarMul(Normal,aCapsuleRadius));
@@ -12263,7 +13819,7 @@ begin
 end;
 
 function MPRIntersection(const ShapeA,ShapeB:TKraftShape;const TransformA,TransformB:TKraftMatrix4x4):boolean;
-var Phase1Iteration,Phase2Iterations:longint;
+var Phase1Iteration,Phase2Iterations:TKraftInt32;
     v0,v1,v2,v3,v4,t,n:TKraftVector3;
 begin
  result:=false;
@@ -12366,7 +13922,7 @@ begin
 end;
 
 function MPRPenetration(const ShapeA,ShapeB:TKraftShape;const TransformA,TransformB:TKraftMatrix4x4;out PositionA,PositionB,Normal:TKraftVector3;out PenetrationDepth:TKraftScalar):boolean;
-var Phase1Iteration,Phase2Iterations:longint;
+var Phase1Iteration,Phase2Iterations:TKraftInt32;
     b0,b1,b2,b3,Sum,Inv:TKraftScalar;
     v0,v0a,v0b,v1,v1a,v1b,v2,v2a,v2b,v3,v3a,v3b,v4,v4a,v4b,t,n:TKraftVector3;
 begin
@@ -12515,10 +14071,16 @@ begin
      PositionA.x:=((v0a.x*b0)+(v1a.x*b1)+(v2a.x*b2)+(v3a.x*b3))*Inv;
      PositionA.y:=((v0a.y*b0)+(v1a.y*b1)+(v2a.y*b2)+(v3a.y*b3))*Inv;
      PositionA.z:=((v0a.z*b0)+(v1a.z*b1)+(v2a.z*b2)+(v3a.z*b3))*Inv;
+{$ifdef SIMD}
+     PositionA.w:=0.0;
+{$endif}
 
      PositionB.x:=((v0b.x*b0)+(v1b.x*b1)+(v2b.x*b2)+(v3b.x*b3))*Inv;
      PositionB.y:=((v0b.y*b0)+(v1b.y*b1)+(v2b.y*b2)+(v3b.y*b3))*Inv;
      PositionB.z:=((v0b.z*b0)+(v1b.z*b1)+(v2b.z*b2)+(v3b.z*b3))*Inv;
+{$ifdef SIMD}
+     PositionB.w:=0.0;
+{$endif}
 
     end;
 
@@ -12577,7 +14139,7 @@ function MPRAreSweptShapesIntersecting(const ShapeA,ShapeB:TKraftShape;const Swe
    result:=Vector3Add(result,Sweep);
   end;
  end;
-var Count:longint;
+var Count:TKraftInt32;
     LocalPointB,v0,v1,v1a,v2,v2a,v3,v3a,v4,v4a,v1v0,v2v0,v3v0,t,n:TKraftVector3;
     Dot,DotV0,BarycentricCoordinate,v0v1v2v3Volume,v1v2v3Volume,v0v2v3Volume,v0v1v3Volume,
     InverseTotalVolume,v0Weight,v1Weight,v2Weight,v3Weight,Dot2:TKraftScalar;
@@ -12587,6 +14149,9 @@ begin
  LocalPointB.x:=TransformB[3,0];
  LocalPointB.y:=TransformB[3,1];
  LocalPointB.z:=TransformB[3,2];
+{$ifdef SIMD}
+ LocalPointB.w:=0.0;
+{$endif}
 
  if Vector3LengthSquared(LocalPointB)<EPSILON then begin
   HitPosition:=LocalPointB;
@@ -12729,6 +14294,9 @@ begin
  LocalOrigin.x:=LocalTransformBinA[3,0];
  LocalOrigin.y:=LocalTransformBinA[3,1];
  LocalOrigin.z:=LocalTransformBinA[3,2];
+{$ifdef SIMD}
+ LocalOrigin.w:=0.0;
+{$endif}
 
  // This sweep amount needs to expand the minkowski difference to fully intersect the plane defined by the sweep direction and origin.
  RayLengthSquared:=Vector3LengthSquared(LocalDirection);
@@ -12749,6 +14317,456 @@ begin
 
  result:=MPRAreSweptShapesIntersecting(ShapeA,ShapeB,Sweep,LocalTransformBinA,HitPosition);
 end;
+
+function SignedDistanceFieldClosestPoints(const ShapeA,ShapeB:TKraftShape;const TransformA,TransformB:TKraftMatrix4x4;out PositionA,PositionB,ClosestPoint:TKraftVector3;out DistanceA,DistanceB:TKraftScalar):boolean;
+const Delta=1e-3;
+      OneOverDelta=1.0/Delta;
+      OneOverTwoDelta=0.5/Delta; // 1.0/(2.0*Delta)
+      DescentRate=5e-2;
+      Epsilon=1e-3;
+var Iteration,CountIterations:TKraftInt32;
+    Gradient,Normal:TKraftVector3;
+    LastGradientLength,GradientLength,StepSize,Distance:TKraftScalar;
+ function MaxMap(const aPosition:TKraftVector3):TKraftScalar;
+ begin
+  result:=Max(ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(aPosition,TransformA)),
+              ShapeB.GetLocalSignedDistance(Vector3TermMatrixMulInverted(aPosition,TransformB)));
+ end;
+ function GetGradient(const aPosition:TKraftVector3):TKraftVector3;
+ var Center:TKraftScalar;
+ begin
+  Center:=MaxMap(aPosition);
+  result:=Vector3ScalarMul(Vector3(MaxMap(Vector3(aPosition.x+Delta,aPosition.y,aPosition.z))-Center,
+                                   MaxMap(Vector3(aPosition.x,aPosition.y+Delta,aPosition.z))-Center,
+                                   MaxMap(Vector3(aPosition.x,aPosition.y,aPosition.z+Delta))-Center),1.0/Delta);
+ end;{}
+ function GetGradientA(const aPosition:TKraftVector3;const aCenter:TKraftScalar):TKraftVector3;
+ begin
+  result:=Vector3Norm(Vector3(ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(Vector3(aPosition.x+Delta,aPosition.y,aPosition.z),TransformA))-aCenter,
+                              ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(Vector3(aPosition.x,aPosition.y+Delta,aPosition.z),TransformA))-aCenter,
+                              ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(Vector3(aPosition.x,aPosition.y,aPosition.z+Delta),TransformA))-aCenter));
+ end;{}
+ function GetGradientB(const aPosition:TKraftVector3;const aCenter:TKraftScalar):TKraftVector3;
+ begin
+  result:=Vector3Norm(Vector3(ShapeB.GetLocalSignedDistance(Vector3TermMatrixMulInverted(Vector3(aPosition.x+Delta,aPosition.y,aPosition.z),TransformB))-aCenter,
+                              ShapeB.GetLocalSignedDistance(Vector3TermMatrixMulInverted(Vector3(aPosition.x,aPosition.y+Delta,aPosition.z),TransformB))-aCenter,
+                              ShapeB.GetLocalSignedDistance(Vector3TermMatrixMulInverted(Vector3(aPosition.x,aPosition.y,aPosition.z+Delta),TransformB))-aCenter));
+ end;{}
+begin
+(*
+ if ShapeA.fShapeType=kstSignedDistanceField then begin
+
+  case ShapeB.fShapeType of
+
+   kstSphere:begin
+
+    // Fast signed distance field versus sphere case
+
+    ClosestPoint:=ShapeB.GetCenter(TransformB);
+
+    PositionA:=Vector3TermMatrixMulBasis(ShapeA.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformA)),TransformA);
+    PositionB:=Vector3TermMatrixMulBasis(ShapeB.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(PositionA,TransformB)),TransformB);
+
+    ClosestPoint:=Vector3Avg(PositionA,PositionB);
+
+    DistanceA:=ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(ClosestPoint,TransformA));
+    DistanceB:=ShapeB.GetLocalSignedDistance(Vector3TermMatrixMulInverted(ClosestPoint,TransformB));
+
+    result:=true;
+
+    exit; //}
+
+   end;
+
+   kstCapsule:begin
+    // TODO
+   end;
+
+   kstConvexHull,kstBox,kstPlane,kstTriangle:begin
+    // TODO
+   end;
+
+   else begin
+   end;
+
+  end;
+
+ end else begin
+  Assert(false);
+ end;          *)
+
+ // Get a seed starting point
+ ClosestPoint:=Vector3Avg(ShapeA.GetCenter(TransformA),ShapeB.GetCenter(TransformB));
+{if ShapeA.fRigidBody.fRigidBodyType=TKraftRigidBodyType.krbtStatic then begin
+  if ShapeB.fRigidBody.fRigidBodyType=TKraftRigidBodyType.krbtStatic then begin
+   ClosestPoint:=Vector3Avg(ShapeA.GetCenter(TransformA),ShapeB.GetCenter(TransformB));
+  end else begin
+   ClosestPoint:=ShapeB.GetCenter(TransformB);
+   ClosestPoint:=Vector3TermMatrixMul(ShapeA.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformA)),TransformA);
+   ClosestPoint:=Vector3TermMatrixMul(ShapeB.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformB)),TransformB);
+  end;
+ end else begin
+  if ShapeB.fRigidBody.fRigidBodyType=TKraftRigidBodyType.krbtStatic then begin
+   ClosestPoint:=ShapeA.GetCenter(TransformA);
+   ClosestPoint:=Vector3TermMatrixMul(ShapeB.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformB)),TransformB);
+   ClosestPoint:=Vector3TermMatrixMul(ShapeA.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformA)),TransformA);
+  end else begin
+   ClosestPoint:=Vector3Avg(ShapeA.GetCenter(TransformA),ShapeB.GetCenter(TransformB));
+  end;
+ end;}
+
+{$ifdef SIMD}
+ Gradient.w:=0;
+{$endif}
+
+ CountIterations:=1024;
+
+ LastGradientLength:=-1.0;
+
+ for Iteration:=1 to CountIterations do begin
+  DistanceA:=ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(ClosestPoint,TransformA));
+  DistanceB:=ShapeB.GetLocalSignedDistance(Vector3TermMatrixMulInverted(ClosestPoint,TransformB));
+  if DistanceA>DistanceB then begin
+   Distance:=DistanceA;
+   Gradient:=Vector3TermMatrixMulBasis(ShapeA.GetLocalSignedDistanceGradient(Vector3TermMatrixMulInverted(ClosestPoint,TransformA)),TransformA);
+//Gradient:=GetGradientA(ClosestPoint,DistanceA);
+  end else begin
+   Distance:=DistanceB;
+   Gradient:=Vector3TermMatrixMulBasis(ShapeB.GetLocalSignedDistanceGradient(Vector3TermMatrixMulInverted(ClosestPoint,TransformB)),TransformB);
+// Gradient:=GetGradientB(ClosestPoint,DistanceB);
+  end;
+{ if Vector3Length(Gradient)<Epsilon then begin
+   break;
+  end else}begin
+   if Distance<0.0 then begin
+    StepSize:=0.1;
+   end else begin
+    StepSize:=(abs(Distance)*0.95)+0.1;
+   end;
+   Vector3DirectSub(ClosestPoint,Vector3ScalarMul(Gradient,StepSize));
+  end;
+ end;
+
+ PositionA:=Vector3TermMatrixMul(ShapeA.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformA)),TransformA);
+ PositionB:=Vector3TermMatrixMul(ShapeB.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformB)),TransformB);
+
+ result:=true;
+
+end;
+
+function SignedDistanceFieldPenetration(const ShapeA,ShapeB:TKraftShape;const TransformA,TransformB:TKraftMatrix4x4;out PositionA,PositionB,Normal:TKraftVector3;out PenetrationDepth:TKraftScalar):boolean;
+ function Map(const aPosition:TKraftVector3):TKraftScalar;
+ begin
+  result:=Min(ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(aPosition,TransformA)),
+              ShapeB.GetLocalSignedDistance(Vector3TermMatrixMulInverted(aPosition,TransformB)));
+ end;
+ function GetNormal(const aPosition:TKraftVector3):TKraftVector3;
+ const Epsilon=1e-3;
+ var Center:TKraftScalar;
+ begin
+  Center:=Map(aPosition);
+  result:=Vector3Norm(Vector3(Map(Vector3(aPosition.x+Epsilon,aPosition.y,aPosition.z))-Center,
+                              Map(Vector3(aPosition.x,aPosition.y+Epsilon,aPosition.z))-Center,
+                              Map(Vector3(aPosition.x,aPosition.y,aPosition.z+Epsilon))-Center));
+ end;
+var ClosestPointA,ClosestPointB,ClosestPoint:TKraftVector3;
+    DistanceA,DistanceB:TKraftScalar;
+begin
+
+ result:=false;
+
+ result:=false;
+
+ PositionA:=Vector3Origin;
+ PositionB:=Vector3Origin;
+ Normal:=Vector3Origin;
+ PenetrationDepth:=0.0;
+
+(*if ShapeA.fShapeType=kstSignedDistanceField then begin
+
+  case ShapeB.fShapeType of
+
+   kstSphere:begin
+
+    // Fast signed distance field versus sphere case
+
+    ClosestPoint:=ShapeB.GetCenter(TransformB);
+
+    DistanceA:=ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(ClosestPoint,TransformA));
+
+    if DistanceA<TKraftShapeSphere(ShapeB).fRadius then begin
+
+     PenetrationDepth:=TKraftShapeSphere(ShapeB).fRadius-DistanceA;
+
+     Normal:=ShapeA.GetLocalSignedDistanceNormal(ClosestPoint);
+
+     PositionA:=Vector3Add(ClosestPoint,Vector3ScalarMul(Normal,DistanceA));
+
+     Normal:=Vector3Neg(GetNormal(PositionB));//Vector3Neg(Vector3TermMatrixMulBasis(ShapeA.GetLocalSignedDistanceNormal(ClosestPoint),TransformA));
+
+     PositionB:=Vector3Add(ClosestPoint,Vector3ScalarMul(Normal,TKraftShapeSphere(ShapeB).fRadius));
+
+     result:=true;
+
+    end;
+
+    exit;  //}
+
+   end;
+
+   kstCapsule:begin
+    // TODO
+   end;
+
+   kstConvexHull,kstBox,kstPlane,kstTriangle:begin
+    // TODO
+   end;
+
+   else begin
+   end;
+
+  end;
+
+ end else begin
+  Assert(false);
+ end;        *)
+
+ if SignedDistanceFieldClosestPoints(ShapeA,ShapeB,
+                                     TransformA,TransformB,
+                                     ClosestPointA,ClosestPointB,ClosestPoint,
+                                     DistanceA,DistanceB) then begin
+  PenetrationDepth:=Max(DistanceA,DistanceB);
+  if PenetrationDepth<=EPSILON then begin
+   Normal:=Vector3Norm(Vector3Sub(ClosestPointB,ClosestPointA));
+   PositionA:=ClosestPointA;
+   PositionB:=ClosestPointB;
+   result:=true;
+  end;
+ end;
+
+end;
+
+(*const Delta=1e-3;
+      OneOverDelta=1.0/Delta;
+      OneOverTwoDelta=0.5/Delta; // 1.0/(2.0*Delta)
+      DescentRate=1e-1;
+      Epsilon=1e-3;
+var Iteration,CountIterations:TKraftInt32;
+    ClosestPointA,ClosestPointB,
+    ClosestPoint,Gradient,
+    GradientA,GradientB,
+    NormalA,NormalB,DirectionA,DirectionB:TKraftVector3;
+    DistanceA,DistanceB,
+    QueryDistanceA,
+    QueryDistanceB,
+    QueryDistance:TKraftScalar;
+ function Map(const aPosition:TKraftVector3):TKraftScalar;
+ begin
+  result:=Min(ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(aPosition,TransformA)),
+              ShapeB.GetLocalSignedDistance(Vector3TermMatrixMulInverted(aPosition,TransformB)));
+ end;
+ function GetNormal(const aPosition:TKraftVector3):TKraftVector3;
+ const Epsilon=1e-3;
+ var Center:TKraftScalar;
+ begin
+  Center:=Map(aPosition);
+  result:=Vector3Norm(Vector3(Map(Vector3(aPosition.x+Epsilon,aPosition.y,aPosition.z))-Center,
+                              Map(Vector3(aPosition.x,aPosition.y+Epsilon,aPosition.z))-Center,
+                              Map(Vector3(aPosition.x,aPosition.y,aPosition.z+Epsilon))-Center));
+ end;
+{function GetGradient(const aPosition:TKraftVector3):TKraftVector3;
+ const Epsilon=1e-3;
+ var Center:TKraftScalar;
+ begin
+  Center:=Map(aPosition);
+  result:=Vector3Norm(Vector3(Map(Vector3(aPosition.x+Epsilon,aPosition.y,aPosition.z))-Center,
+                              Map(Vector3(aPosition.x,aPosition.y+Epsilon,aPosition.z))-Center,
+                              Map(Vector3(aPosition.x,aPosition.y,aPosition.z+Epsilon))-Center));
+ end;}
+ function MaxMap(const aPosition:TKraftVector3):TKraftScalar;
+ begin
+  result:=Max(ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(aPosition,TransformA)),
+              ShapeB.GetLocalSignedDistance(Vector3TermMatrixMulInverted(aPosition,TransformB)));
+ end;
+ function GetGradient(const aPosition:TKraftVector3):TKraftVector3;
+ var Center:TKraftScalar;
+ begin
+  Center:=MaxMap(aPosition);
+  result:=Vector3ScalarMul(Vector3(MaxMap(Vector3(aPosition.x+Delta,aPosition.y,aPosition.z))-Center,
+                                   MaxMap(Vector3(aPosition.x,aPosition.y+Delta,aPosition.z))-Center,
+                                   MaxMap(Vector3(aPosition.x,aPosition.y,aPosition.z+Delta))-Center),1.0/Delta);
+ end;{}
+var Which:boolean;
+begin
+
+ result:=false;
+
+ PositionA:=Vector3Origin;
+ PositionB:=Vector3Origin;
+ Normal:=Vector3Origin;
+ PenetrationDepth:=0.0;
+
+ if ShapeA.fShapeType=kstSignedDistanceField then begin
+
+  case ShapeB.fShapeType of
+
+   kstSphere:begin
+
+   {
+    // Fast signed distance field versus sphere case
+
+    ClosestPoint:=ShapeB.GetCenter(TransformB);
+
+    DistanceA:=ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(ClosestPoint,TransformA));
+
+    if DistanceA<TKraftShapeSphere(ShapeB).fRadius then begin
+
+     Normal:=Vector3Neg(Vector3TermMatrixMulBasis(ShapeA.GetLocalSignedDistanceNormal(ClosestPoint),TransformA));
+
+     PenetrationDepth:=TKraftShapeSphere(ShapeB).fRadius-DistanceA;
+
+     PositionA:=Vector3Add(ClosestPoint,Vector3ScalarMul(Normal,DistanceA-TKraftShapeSphere(ShapeB).fRadius));
+     PositionB:=Vector3Add(ClosestPoint,Vector3ScalarMul(Normal,TKraftShapeSphere(ShapeB).fRadius-DistanceA));
+
+     result:=true;
+
+    end;
+
+    exit;  //}
+
+   end;
+
+   kstCapsule:begin
+    // TODO
+   end;
+
+   kstConvexHull,kstBox,kstPlane,kstTriangle:begin
+    // TODO
+   end;
+
+   else begin
+   end;
+
+  end;
+
+ end else begin
+  Assert(false);
+ end;
+
+ // Slow fallback general case per gradient descent
+ begin
+
+  // Get a seed starting point
+  if ShapeA.fRigidBody.fRigidBodyType=TKraftRigidBodyType.krbtStatic then begin
+   if ShapeB.fRigidBody.fRigidBodyType=TKraftRigidBodyType.krbtStatic then begin
+    ClosestPoint:=Vector3Avg(ShapeA.GetCenter(TransformA),ShapeB.GetCenter(TransformB));
+   end else begin
+    ClosestPoint:=ShapeB.GetCenter(TransformB);
+    ClosestPointA:=Vector3TermMatrixMul(ShapeA.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformA)),TransformA);
+    ClosestPoint:=Vector3TermMatrixMul(ShapeB.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPointA,TransformB)),TransformB);
+   end;
+  end else begin
+   if ShapeB.fRigidBody.fRigidBodyType=TKraftRigidBodyType.krbtStatic then begin
+    ClosestPoint:=ShapeA.GetCenter(TransformA);
+    ClosestPointB:=Vector3TermMatrixMul(ShapeB.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformB)),TransformB);
+    ClosestPoint:=Vector3TermMatrixMul(ShapeA.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPointB,TransformA)),TransformA);
+   end else begin
+    ClosestPoint:=Vector3Avg(ShapeA.GetCenter(TransformA),ShapeB.GetCenter(TransformB));
+   end;
+  end;
+
+{$ifdef SIMD}
+  Gradient.w:=0;
+{$endif}
+
+  CountIterations:=512;
+
+  for Iteration:=1 to CountIterations do begin
+
+   DistanceA:=ShapeA.GetLocalSignedDistance(Vector3TermMatrixMulInverted(ClosestPoint,TransformA));
+   DistanceB:=ShapeB.GetLocalSignedDistance(Vector3TermMatrixMulInverted(ClosestPoint,TransformB));
+
+{  ClosestPointA:=Vector3TermMatrixMul(ShapeA.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformA)),TransformA);
+   ClosestPointB:=Vector3TermMatrixMul(ShapeB.GetLocalClosestPointTo(Vector3TermMatrixMulInverted(ClosestPoint,TransformB)),TransformB);
+
+   QueryDistanceA:=Vector3Dist(ClosestPointA,ClosestPoint)*DistanceA;
+   QueryDistanceB:=Vector3Dist(ClosestPointB,ClosestPoint)*DistanceB;
+
+   if QueryDistanceA>QueryDistanceB then begin
+    QueryDistance:=QueryDistanceA;
+    Gradient:=Vector3ScalarMul(Vector3Norm(Vector3Sub(ClosestPoint,ClosestPointA)),DistanceA);
+   end else begin
+    QueryDistance:=QueryDistanceB;
+    Gradient:=Vector3ScalarMul(Vector3Norm(Vector3Sub(ClosestPoint,ClosestPointB)),DistanceB);
+   end;}
+
+{  GradientA:=Vector3TermMatrixMulBasis(ShapeA.GetLocalSignedDistanceGradient(Vector3TermMatrixMulInverted(ClosestPoint,TransformA),Delta),TransformA);
+   GradientB:=Vector3TermMatrixMulBasis(ShapeB.GetLocalSignedDistanceGradient(Vector3TermMatrixMulInverted(ClosestPoint,TransformB),Delta),TransformB);
+
+   Gradient:=Vector3Avg(GradientA,GradientB);}
+
+   Gradient:=GetGradient(ClosestPoint);
+
+   if Vector3Length(Gradient)<EPSILON then begin
+
+{   PenetrationDepth:=;
+
+    result:=PenetrationDepth<0.0;
+
+    if result then} begin
+
+{    NormalA:=Vector3TermMatrixMulBasis(ShapeA.GetLocalSignedDistanceNormal(Vector3TermMatrixMulInverted(ClosestPoint,TransformA)),TransformA);
+     NormalB:=Vector3TermMatrixMulBasis(ShapeB.GetLocalSignedDistanceNormal(Vector3TermMatrixMulInverted(ClosestPoint,TransformB)),TransformB);
+
+     PositionA:=Vector3Sub(ClosestPoint,Vector3ScalarMul(NormalA,DistanceA));
+     PositionB:=Vector3Sub(ClosestPoint,Vector3ScalarMul(NormalB,DistanceB));
+
+     Normal:=Vector3Norm(Vector3Sub(PositionA,PositionB));
+
+{    PositionA:=ClosestPoint;
+     PositionB:=ClosestPoint;
+
+     Normal:=Vector3Neg(GetNormal(ClosestPoint));//}
+
+{    if Which then begin
+      Normal:=Vector3Neg(NormalB);
+     end else begin
+      Normal:=Vector3Neg(NormalA);
+     end;}
+
+     PositionA:=ClosestPoint;
+     PositionB:=ClosestPoint;
+
+     //Normal:=Vector3Neg(Vector3TermMatrixMulBasis(ShapeA.GetLocalSignedDistanceNormal(ClosestPoint),TransformA));
+
+     Normal:=Vector3Neg(Vector3Norm(Gradient));
+
+     PenetrationDepth:=Min(DistanceA,DistanceB);//Vector3Dot(Vector3Sub(ClosestPointB,ClosestPointA),Normal);
+
+     //PenetrationDepth:=0.1+PenetrationDepth;
+
+     writeln(Normal.x:4:3,' ',Normal.y:4:3,' ',Normal.z:4:3,' ',PenetrationDepth:4:3);
+
+     result:=true;
+     exit;
+
+ {   end else begin
+
+     Vector3DirectSub(ClosestPoint,Vector3ScalarMul(Gradient,0.05));}
+
+    end;
+
+   end else begin
+
+    Vector3DirectSub(ClosestPoint,Vector3ScalarMul(Gradient,DescentRate));
+
+   end;
+
+  end;
+
+ end;
+
+end;*)
 
 function AABBHasPoint(const aAABBOrigin,aAABBExtents,aPoint:TKraftVector3):boolean;
 begin
@@ -12787,7 +14805,7 @@ begin
  aNewPoint:=Vector3Add(aPoint,Vector3ScalarMul(aPlaneNormal,Distance));
 end;
 
-function SphereIntersectPlane(const aSphereOrigin:TKraftVector3;const aSphereRadius:TKraftScalar;const aPlaneVertex,aPlaneNormal:TKraftVector3;const aNewOrigin:PKraftVector3;const aNewRadius:PKraftScalar):longint;
+function SphereIntersectPlane(const aSphereOrigin:TKraftVector3;const aSphereRadius:TKraftScalar;const aPlaneVertex,aPlaneNormal:TKraftVector3;const aNewOrigin:PKraftVector3;const aNewRadius:PKraftScalar):TKraftInt32;
 var PlanePoint,PlanePointOrigin:TKraftVector3;
     PlanePointDistance,LenSquared,Temporary:TKraftScalar;
 begin
@@ -12887,6 +14905,17 @@ begin
  end;
 end;
 
+function SphereCastAABBOpt(const aSphere:TKraftSphere;const aRayInvDirection:TKraftVector3;const aAABB:TKraftAABB):boolean; overload;
+var AABB:TKraftAABB;
+begin
+ result:=AABBIntersectSphere(aAABB,aSphere);
+ if not result then begin
+  AABB.Min:=Vector3Sub(aAABB.Min,Vector3(aSphere.Radius,aSphere.Radius,aSphere.Radius));
+  AABB.Max:=Vector3Add(aAABB.Max,Vector3(aSphere.Radius,aSphere.Radius,aSphere.Radius));
+  result:=AABBRayIntersectOpt(AABB,aSphere.Center,aRayInvDirection);
+ end;
+end;
+
 function SphereCastAABB(const aSphereCenter:TKraftVector3;const aSphereRadius:TKraftScalar;const aRayDirection:TKraftVector3;const aAABB:TKraftAABB):boolean; overload;
 var Sphere:TKraftSphere;
 begin
@@ -12895,28 +14924,43 @@ begin
  result:=SphereCastAABB(Sphere,aRayDirection,aAABB);
 end;
 
-function AABBGetVertex(const aAABB:TKraftAABB;const aX,aY,aZ:longint):TKraftVector3; overload;
+function SphereCastAABBOpt(const aSphereCenter:TKraftVector3;const aSphereRadius:TKraftScalar;const aRayInvDirection:TKraftVector3;const aAABB:TKraftAABB):boolean; overload;
+var Sphere:TKraftSphere;
+begin
+ Sphere.Center:=aSphereCenter;
+ Sphere.Radius:=aSphereRadius;
+ result:=SphereCastAABBOpt(Sphere,aRayInvDirection,aAABB);
+end;
+
+function AABBGetVertex(const aAABB:TKraftAABB;const aX,aY,aZ:TKraftInt32):TKraftVector3; overload;
 begin
  result.x:=aAABB.MinMax[aX and 1].x;
  result.y:=aAABB.MinMax[aY and 1].y;
  result.z:=aAABB.MinMax[aZ and 1].Z;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function AABBGetVertex(const aAABB:TKraftAABB;const aIndex:longint):TKraftVector3; overload;
+function AABBGetVertex(const aAABB:TKraftAABB;const aIndex:TKraftInt32):TKraftVector3; overload;
 begin
  result.x:=aAABB.MinMax[(aIndex shr 0) and 1].x;
  result.y:=aAABB.MinMax[(aIndex shr 1) and 1].y;
  result.z:=aAABB.MinMax[(aIndex shr 2) and 1].Z;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
 function TKraftGJK.Run:boolean;
-var CountSaved,Index,iA,iB:longint;
+var CountSaved,Index,iA,iB:TKraftInt32;
     Initialized,Duplicate:boolean;
     SimplexVertex:PKraftGJKSimplexVertex;
     CachedSimplexVertex:PKraftGJKCachedSimplexVertex;
     Metrics,SquaredDistances:array[0..1] of TKraftScalar;
-    Saved:array[0..3,0..1] of longint;
-    Direction,a,b,c,d,ba,ab,cb,bc,ac,ca,db,bd,cd,dc,da,ad,baxca,daxba,bcxdc,caxda:TKraftVector3;
+    Saved:array[0..3,0..1] of TKraftInt32;
+    Direction,a,b,c,d,ba,ab,cb,bc,ac,ca,db,bd,cd,dc,da,ad,baxca,daxba,bcxdc,caxda,
+    ClosestPoint:TKraftVector3;
     uAB,vAB,uBC,vBC,uCA,vCA,uBD,vBD,uDC,vDC,uAD,vAD,uADB,vADB,wADB,uACD,vACD,wACD,uCBD,vCBD,wCBD,
     uABC,vABC,wABC,uABCD,vABCD,wABCD,xABCD,Denominator:TKraftScalar;
     TempVertex:PKraftGJKSimplexVertex;
@@ -12925,6 +14969,42 @@ begin
  Failed:=false;
 
  Initialized:=false;
+
+ if (Shapes[0].fShapeType=kstSignedDistanceField) or
+    (Shapes[1].fShapeType=kstSignedDistanceField) then begin
+
+  result:=SignedDistanceFieldClosestPoints(Shapes[0],Shapes[1],Transforms[0]^,Transforms[1]^,ClosestPoints[0],ClosestPoints[1],ClosestPoint,uAB,vAB);
+
+  if result then begin
+
+   // Get the normal direction
+   Normal:=Vector3Sub(ClosestPoints[0],ClosestPoints[1]);
+
+   // Normalize normal direction to a normalized normal vector, and get the distance at the same time
+   Distance:=Vector3LengthNormalize(Normal);
+
+   // Apply the radius stuff, if requested and needed
+   if UseRadii then begin
+    if (Distance>(Shapes[0].fFeatureRadius+Shapes[1].fFeatureRadius)) and (Distance>EPSILON) then begin
+     Distance:=Distance-(Shapes[0].fFeatureRadius+Shapes[1].fFeatureRadius);
+     ClosestPoints[0]:=Vector3Sub(ClosestPoints[0],Vector3ScalarMul(Normal,Shapes[0].fFeatureRadius));
+     ClosestPoints[1]:=Vector3Add(ClosestPoints[1],Vector3ScalarMul(Normal,Shapes[1].fFeatureRadius));
+    end else begin
+     Distance:=0.0;
+     ClosestPoints[0]:=ClosestPoint;
+     ClosestPoints[1]:=ClosestPoint;
+    end;
+   end;
+
+  end else begin
+
+   Failed:=true;
+
+  end;
+
+  exit;
+
+ end;
 
  // Initialize simplex vertex permutation order
  Simplex.Vertices[0]:=@Simplex.VerticesData[0];
@@ -13625,7 +15705,7 @@ begin
 end;
 
 constructor TKraftDynamicAABBTree.Create;
-var i:longint;
+var i:TKraftInt32;
 begin
  inherited Create;
  fRoot:=daabbtNULLNODE;
@@ -13643,7 +15723,7 @@ begin
  fPath:=0;
  fInsertionCount:=0;
  fStackCapacity:=16;
- GetMem(fStack,fStackCapacity*SizeOf(longint));
+ GetMem(fStack,fStackCapacity*SizeOf(TKraftInt32));
 end;
 
 destructor TKraftDynamicAABBTree.Destroy;
@@ -13653,9 +15733,9 @@ begin
  inherited Destroy;
 end;
 
-function TKraftDynamicAABBTree.AllocateNode:longint;
+function TKraftDynamicAABBTree.AllocateNode:TKraftInt32;
 var Node:PKraftDynamicAABBTreeNode;
-    i:longint;
+    i:TKraftInt32;
 begin
  if fFreeList=daabbtNULLNODE then begin
   inc(fNodeCapacity,fNodeCapacity);
@@ -13681,7 +15761,7 @@ begin
  inc(fNodeCount);
 end;
 
-procedure TKraftDynamicAABBTree.FreeNode(NodeID:longint);
+procedure TKraftDynamicAABBTree.FreeNode(NodeID:TKraftInt32);
 var Node:PKraftDynamicAABBTreeNode;
 begin
  Node:=@fNodes^[NodeID];
@@ -13692,9 +15772,9 @@ begin
  dec(fNodeCount);
 end;
 
-function TKraftDynamicAABBTree.Balance(NodeAID:longint):longint;
+function TKraftDynamicAABBTree.Balance(NodeAID:TKraftInt32):TKraftInt32;
 var NodeA,NodeB,NodeC,NodeD,NodeE,NodeF,NodeG:PKraftDynamicAABBTreeNode;
-    NodeBID,NodeCID,NodeDID,NodeEID,NodeFID,NodeGID,NodeBalance:longint;
+    NodeBID,NodeCID,NodeDID,NodeEID,NodeFID,NodeGID,NodeBalance:TKraftInt32;
 begin
  NodeA:=@fNodes^[NodeAID];
  if (NodeA.Children[0]<0) or (NodeA^.Height<2) then begin
@@ -13781,11 +15861,11 @@ begin
  end;
 end;
 
-procedure TKraftDynamicAABBTree.InsertLeaf(Leaf:longint);
+procedure TKraftDynamicAABBTree.InsertLeaf(Leaf:TKraftInt32);
 var Node:PKraftDynamicAABBTreeNode;
     LeafAABB,CombinedAABB,AABB:TKraftAABB;
-    Index,Sibling,OldParent,NewParent:longint;
-    Children:array[0..1] of longint;
+    Index,Sibling,OldParent,NewParent:TKraftInt32;
+    Children:array[0..1] of TKraftInt32;
     CombinedCost,Cost,InheritanceCost:TKraftScalar;
     Costs:array[0..1] of TKraftScalar;
 begin
@@ -13870,9 +15950,9 @@ begin
  end;
 end;
 
-procedure TKraftDynamicAABBTree.RemoveLeaf(Leaf:longint);
+procedure TKraftDynamicAABBTree.RemoveLeaf(Leaf:TKraftInt32);
 var Node:PKraftDynamicAABBTreeNode;
-    Parent,GrandParent,Sibling,Index:longint;
+    Parent,GrandParent,Sibling,Index:TKraftInt32;
 begin
  if fRoot=Leaf then begin
   fRoot:=daabbtNULLNODE;
@@ -13908,7 +15988,7 @@ begin
  end;
 end;
 
-function TKraftDynamicAABBTree.CreateProxy(const AABB:TKraftAABB;UserData:pointer):longint;
+function TKraftDynamicAABBTree.CreateProxy(const AABB:TKraftAABB;UserData:pointer):TKraftInt32;
 var Node:PKraftDynamicAABBTreeNode;
 begin
  result:=AllocateNode;
@@ -13920,13 +16000,13 @@ begin
  InsertLeaf(result);
 end;
 
-procedure TKraftDynamicAABBTree.DestroyProxy(NodeID:longint);
+procedure TKraftDynamicAABBTree.DestroyProxy(NodeID:TKraftInt32);
 begin
  RemoveLeaf(NodeID);
  FreeNode(NodeID);
 end;
 
-function TKraftDynamicAABBTree.MoveProxy(NodeID:longint;const AABB:TKraftAABB;const Displacement,BoundsExpansion:TKraftVector3):boolean;
+function TKraftDynamicAABBTree.MoveProxy(NodeID:TKraftInt32;const AABB:TKraftAABB;const Displacement,BoundsExpansion:TKraftVector3):boolean;
 var Node:PKraftDynamicAABBTreeNode;
 begin
  Node:=@fNodes^[NodeID];
@@ -13938,9 +16018,9 @@ begin
  end;
 end;
 
-procedure TKraftDynamicAABBTree.Rebalance(Iterations:longint);
-var Counter,Node:longint;
-    Bit:longword;
+procedure TKraftDynamicAABBTree.Rebalance(Iterations:TKraftInt32);
+var Counter,Node:TKraftInt32;
+    Bit:TKraftUInt32;
 //  Children:PKraftDynamicAABBTreeLongintArray;
 begin
  if (fRoot>=0) and (fRoot<fNodeCount) then begin
@@ -13966,7 +16046,7 @@ procedure TKraftDynamicAABBTree.Rebuild;
 var NewNodes:PKraftDynamicAABBTreeLongintArray;
     Children:array[0..1] of PKraftDynamicAABBTreeNode;
     Parent:PKraftDynamicAABBTreeNode;
-    Count,i,j,iMin,jMin,Index1,Index2,ParentIndex:longint;
+    Count,i,j,iMin,jMin,Index1,Index2,ParentIndex:TKraftInt32;
     MinCost,Cost:TKraftScalar;
     AABBi,AABBj:PKraftAABB;
     AABB:TKraftAABB;
@@ -13974,8 +16054,8 @@ var NewNodes:PKraftDynamicAABBTreeLongintArray;
 begin
  if fNodeCount>0 then begin
   NewNodes:=nil;
-  GetMem(NewNodes,fNodeCount*SizeOf(longint));
-  FillChar(NewNodes^,fNodeCount*SizeOf(longint),#0);
+  GetMem(NewNodes,fNodeCount*SizeOf(TKraftInt32));
+  FillChar(NewNodes^,fNodeCount*SizeOf(TKraftInt32),#0);
   Count:=0;
   for i:=0 to fNodeCapacity-1 do begin
    if fNodes^[i].Height>=0 then begin
@@ -14031,10 +16111,10 @@ begin
  end;
 end;
 
-function TKraftDynamicAABBTree.ComputeHeight:longint;
+function TKraftDynamicAABBTree.ComputeHeight:TKraftInt32;
 {$ifdef KraftSingleThreadedUsage}
 var LocalStack:PKraftDynamicAABBTreeLongintArray;
-    LocalStackPointer,NodeID,Height:longint;
+    LocalStackPointer,NodeID,Height:TKraftInt32;
     Node:PKraftDynamicAABBTreeNode;
 begin
  result:=0;
@@ -14055,7 +16135,7 @@ begin
     if Node^.Children[0]>=0 then begin
      if fStackCapacity<=(LocalStackPointer+4) then begin
       fStackCapacity:=RoundUpToPowerOfTwo(LocalStackPointer+4);
-      ReallocMem(fStack,fStackCapacity*SizeOf(longint));
+      ReallocMem(fStack,fStackCapacity*SizeOf(TKraftInt32));
       LocalStack:=fStack;
      end;
      LocalStack^[LocalStackPointer+0]:=Node^.Children[0];
@@ -14069,8 +16149,8 @@ begin
  end;
 end;
 {$else}
-var MaximalHeight:longint;
- procedure ProcessNode(const NodeID,Height:longint);
+var MaximalHeight:TKraftInt32;
+ procedure ProcessNode(const NodeID,Height:TKraftInt32);
  var Node:PKraftDynamicAABBTreeNode;
  begin
   if result<Height then begin
@@ -14089,7 +16169,7 @@ begin
 end;
 {$endif}
 
-function TKraftDynamicAABBTree.GetHeight:longint;
+function TKraftDynamicAABBTree.GetHeight:TKraftInt32;
 begin
  if fRoot>=0 then begin
   result:=fNodes[fRoot].Height;
@@ -14099,7 +16179,7 @@ begin
 end;
 
 function TKraftDynamicAABBTree.GetAreaRatio:TKraftScalar;
-var NodeID:longint;
+var NodeID:TKraftInt32;
     Node:PKraftDynamicAABBTreeNode;
 begin
  result:=0;
@@ -14114,8 +16194,8 @@ begin
  end;
 end;
 
-function TKraftDynamicAABBTree.GetMaxBalance:longint;
-var NodeID,Balance:longint;
+function TKraftDynamicAABBTree.GetMaxBalance:TKraftInt32;
+var NodeID,Balance:TKraftInt32;
     Node:PKraftDynamicAABBTreeNode;
 begin
  result:=0;
@@ -14133,7 +16213,7 @@ end;
 function TKraftDynamicAABBTree.ValidateStructure:boolean;
 {$ifdef KraftSingleThreadedUsage}
 var LocalStack:PKraftDynamicAABBTreeLongintArray;
-    LocalStackPointer,NodeID,Parent:longint;
+    LocalStackPointer,NodeID,Parent:TKraftInt32;
     Node:PKraftDynamicAABBTreeNode;
 begin
  result:=true;
@@ -14160,7 +16240,7 @@ begin
     end else begin
      if fStackCapacity<=(LocalStackPointer+4) then begin
       fStackCapacity:=RoundUpToPowerOfTwo(LocalStackPointer+4);
-      ReallocMem(fStack,fStackCapacity*SizeOf(longint));
+      ReallocMem(fStack,fStackCapacity*SizeOf(TKraftInt32));
       LocalStack:=fStack;
      end;
      LocalStack^[LocalStackPointer+0]:=Node^.Children[0];
@@ -14178,7 +16258,7 @@ begin
 end;
 {$else}
 var OK:boolean;
- procedure ProcessNode(const NodeID,Parent:longint);
+ procedure ProcessNode(const NodeID,Parent:TKraftInt32);
  var Node:PKraftDynamicAABBTreeNode;
  begin
   if (NodeID>=0) and (NodeID<fNodeCount) and OK then begin
@@ -14201,7 +16281,7 @@ end;
 function TKraftDynamicAABBTree.ValidateMetrics:boolean;
 {$ifdef KraftSingleThreadedUsage}
 var LocalStack:PKraftDynamicAABBTreeLongintArray;
-    LocalStackPointer,NodeID{,Height}:longint;
+    LocalStackPointer,NodeID{,Height}:TKraftInt32;
     Node:PKraftDynamicAABBTreeNode;
     AABB:TKraftAABB;
 begin
@@ -14229,7 +16309,7 @@ begin
      end;
      if fStackCapacity<=(LocalStackPointer+2) then begin
       fStackCapacity:=RoundUpToPowerOfTwo(LocalStackPointer+2);
-      ReallocMem(fStack,fStackCapacity*SizeOf(longint));
+      ReallocMem(fStack,fStackCapacity*SizeOf(TKraftInt32));
       LocalStack:=fStack;
      end;
      LocalStack^[LocalStackPointer+0]:=Node^.Children[0];
@@ -14245,7 +16325,7 @@ begin
 end;
 {$else}
 var OK:boolean;
- procedure ProcessNode(const NodeID:longint);
+ procedure ProcessNode(const NodeID:TKraftInt32);
  var Node:PKraftDynamicAABBTreeNode;
  begin
   if (NodeID>=0) and OK then begin
@@ -14268,7 +16348,7 @@ end;
 {$endif}
 
 function TKraftDynamicAABBTree.Validate:boolean;
-var NodeID,FreeCount:longint;
+var NodeID,FreeCount:TKraftInt32;
 begin
  result:=ValidateStructure;
  if result then begin
@@ -14291,7 +16371,7 @@ end;
 function TKraftDynamicAABBTree.GetIntersectionProxy(const AABB:TKraftAABB):pointer;
 {$ifdef KraftSingleThreadedUsage}
 var LocalStack:PKraftDynamicAABBTreeLongintArray;
-    LocalStackPointer,NodeID:longint;
+    LocalStackPointer,NodeID:TKraftInt32;
     Node:PKraftDynamicAABBTreeNode;
 begin
  result:=nil;
@@ -14311,7 +16391,7 @@ begin
      end else begin
       if fStackCapacity<=(LocalStackPointer+2) then begin
        fStackCapacity:=RoundUpToPowerOfTwo(LocalStackPointer+2);
-       ReallocMem(fStack,fStackCapacity*SizeOf(longint));
+       ReallocMem(fStack,fStackCapacity*SizeOf(TKraftInt32));
        LocalStack:=fStack;
       end;
       LocalStack^[LocalStackPointer+0]:=Node^.Children[0];
@@ -14326,7 +16406,7 @@ end;
 {$else}
 var Data:pointer;
     Done:boolean;
- procedure ProcessNode(const NodeID:longint);
+ procedure ProcessNode(const NodeID:TKraftInt32);
  var Node:PKraftDynamicAABBTreeNode;
  begin
   if (NodeID>=0) and not Done then begin
@@ -14353,13 +16433,13 @@ end;
 type PConvexHullVector=^TConvexHullVector;
      TConvexHullVector=record
       x,y,z:double;
-      HashNext:longint;
+      HashNext:TKraftInt32;
      end;
 
      TConvexHullVectors=array of TConvexHullVector;
 
      PConvexHullTriangle=^TConvexHullTriangle;
-     TConvexHullTriangle=array[0..2] of longint;
+     TConvexHullTriangle=array[0..2] of TKraftInt32;
 
      TConvexHullTriangles=array of TConvexHullTriangle;
 
@@ -14373,17 +16453,17 @@ type PConvexHullVector=^TConvexHullVector;
 
      PConvexHullPolygon=^TConvexHullPolygon;
      TConvexHullPolygon=record
-      Indices:array of longint;
-      Count:longint;
+      Indices:TKraftInt32Array;
+      Count:TKraftInt32;
       Plane:TConvexHullPlane;
      end;
 
      TConvexHullPolygons=record
       Items:array of TConvexHullPolygon;
-      Count:longint;
+      Count:TKraftInt32;
      end;
 
-function CompareConvexHullPoints(const a,b:pointer):longint;
+function CompareConvexHullPoints(const a,b:pointer):TKraftInt32;
  function IsSameValue(const a,b:double):boolean;
  const FuzzFactor=1000;
        DoubleResolution=1e-15*FuzzFactor;
@@ -14497,7 +16577,7 @@ function ConvexHullVectorDot(const v1,v2:TConvexHullVector):double;
 begin
  result:=(v1.x*v2.x)+(v1.y*v2.y)+(v1.z*v2.z);
 end;
-             
+
 function ConvexHullVectorNormalize(const v:TConvexHullVector):TConvexHullVector;
 var l:double;
 begin
@@ -14568,7 +16648,7 @@ begin
 end;
 
 procedure ConvexHullComputePolygonNewellPlane(const Vertices:TConvexHullVectors;var Polygon:TConvexHullPolygon);
-var VertexIndex:longint;
+var VertexIndex:TKraftInt32;
     Last,Current:PConvexHullVector;
     Plane:PConvexHullPlane;
     Centroid,Normal:TConvexHullVector;
@@ -14608,25 +16688,25 @@ begin
  end;
 end;
 
-function StanHullProcess(var Points:TConvexHullVectors;var OutTriangles:TConvexHullTriangles;const MaximumOutputPoints:longint=-1;const UserDefinedTolerance:double=-1.0):boolean;
-const ModuloThree:array[0..5] of longint=(0,1,2,0,1,2);
+function StanHullProcess(var Points:TConvexHullVectors;var OutTriangles:TConvexHullTriangles;const MaximumOutputPoints:TKraftInt32=-1;const UserDefinedTolerance:double=-1.0):boolean;
+const ModuloThree:array[0..5] of TKraftInt32=(0,1,2,0,1,2);
       DOUBLE_PREC:double=2.2204460492503131e-16;
       EPSILON=1e-10;
 type PInt3=^TInt3;
-     TInt3=array[0..2] of longint;
+     TInt3=array[0..2] of TKraftInt32;
      TInt3s=array of TInt3;
      PInt4=^TInt4;
-     TInt4=array[0..3] of longint;
+     TInt4=array[0..3] of TKraftInt32;
      PTri=^TTri;
      TTri=record
       v:TInt3;
       n:TInt3;
-      ID:longint;
-      vmax:longint;
+      ID:TKraftInt32;
+      vmax:TKraftInt32;
       Rise:double;
      end;
      TTris=array of TTri;
-var CountPoints:longint;
+var CountPoints:TKraftInt32;
     MinPoint,MaxPoint:TConvexHullVector;
     Tolerance:double;
  function Roll3(const a:TInt3):TInt3;
@@ -14673,8 +16753,8 @@ var CountPoints:longint;
   n:=TriNormal(Vertices[t[0]],Vertices[t[1]],Vertices[t[2]]);
   result:=ConvexHullVectorDot(n,ConvexHullVectorSub(p,Vertices[t[0]]))>Epsilon;
  end;
- function HasEdges(const t:TInt3;const a,b:longint):boolean;
- var i,i1:longint;
+ function HasEdges(const t:TInt3;const a,b:TKraftInt32):boolean;
+ var i,i1:TKraftInt32;
  begin
   for i:=0 to 2 do begin
    i1:=ModuloThree[i+1];
@@ -14685,12 +16765,12 @@ var CountPoints:longint;
   end;
   result:=false;
  end;
- function HasVertex(const t:TInt3;const v:longint):boolean;
+ function HasVertex(const t:TInt3;const v:TKraftInt32):boolean;
  begin
   result:=(t[0]=v) or (t[1]=v) or (t[2]=v);
  end;
  function HasSharedEdge(const a,b:TInt3):boolean;
- var i,i1:longint;
+ var i,i1:TKraftInt32;
  begin
   for i:=0 to 2 do begin
    i1:=ModuloThree[i+1];
@@ -14701,7 +16781,7 @@ var CountPoints:longint;
   end;
   result:=false;
  end;
- function Tri(const a,b,c,id:longint;const na:longint=-1;const nb:longint=-1;const nc:longint=-1):TTri;
+ function Tri(const a,b,c,id:TKraftInt32;const na:TKraftInt32=-1;const nb:TKraftInt32=-1;const nc:TKraftInt32=-1):TTri;
  begin
   FillChar(result,SizeOf(TTri),#0);
   result.v[0]:=a;
@@ -14718,8 +16798,8 @@ var CountPoints:longint;
  begin
   result:=Tri.n[0]<0;
  end;
- function TriNEIB(const Tri:TTri;const va,vb:longint):plongint;
- var i,i1,i2:longint;
+ function TriNEIB(const Tri:TTri;const va,vb:TKraftInt32):plongint;
+ var i,i1,i2:TKraftInt32;
  begin
   for i:=0 to 2 do begin
    i1:=ModuloThree[i+1];
@@ -14736,8 +16816,8 @@ var CountPoints:longint;
   result:=nil;
   raise EKraftDegeneratedConvexHull.Create('Degenerated convex hull');
  end;
- procedure NNFix(var Tris:TTris;const CountTris,k:longint);
- var i,i1,i2:longint;
+ procedure NNFix(var Tris:TTris;const CountTris,k:TKraftInt32);
+ var i,i1,i2:TKraftInt32;
      nn:plongint;
  begin
   if Tris[k].ID>=0 then begin
@@ -14752,9 +16832,9 @@ var CountPoints:longint;
    end;
   end;
  end;
- procedure SwapN(var Tris:TTris;const CountTris,a,b:longint);
+ procedure SwapN(var Tris:TTris;const CountTris,a,b:TKraftInt32);
  var TempTri:TTri;
-     TempID:longint;
+     TempID:TKraftInt32;
  begin
   TempTri:=Tris[a];
   Tris[a]:=Tris[b];
@@ -14765,8 +16845,8 @@ var CountPoints:longint;
   NNFix(Tris,CountTris,a);
   NNFix(Tris,CountTris,b);
  end;
- procedure B2BFix(var Tris:TTris;const CountTris,s,t:longint);
- var i,i1,i2,va,vb:longint;
+ procedure B2BFix(var Tris:TTris;const CountTris,s,t:TKraftInt32);
+ var i,i1,i2,va,vb:TKraftInt32;
  begin
   for i:=0 to 2 do begin
    i1:=ModuloThree[i+1];
@@ -14785,8 +16865,8 @@ var CountPoints:longint;
   Tris[t].n[1]:=-1;
   Tris[t].n[2]:=-1;
  end;
- procedure CheckIt(const Tris:TTris;const CountTris:longint;const t:TTri);
- var i,i1,i2,a,b:longint;
+ procedure CheckIt(const Tris:TTris;const CountTris:TKraftInt32;const t:TTri);
+ var i,i1,i2,a,b:TKraftInt32;
  begin
   Assert(Tris[t.ID].ID=t.ID);
   Assert(@Tris[t.ID]=@t);
@@ -14799,8 +16879,8 @@ var CountPoints:longint;
    Assert(TriNEIB(Tris[t.n[i]],b,a)^=t.ID);
   end;
  end;
- function Extrudable(const Tris:TTris;const CountTris:longint;const Epsilon:double):longint;
- var t,i:longint;
+ function Extrudable(const Tris:TTris;const CountTris:TKraftInt32;const Epsilon:double):TKraftInt32;
+ var t,i:TKraftInt32;
  begin
   t:=-1;
   for i:=0 to CountTris-1 do begin
@@ -14817,8 +16897,8 @@ var CountPoints:longint;
    result:=-1;
   end;
  end;
- function MaxDir(const Vertices:TConvexHullVectors;const CountVertices:longint;const Direction:TConvexHullVector):longint;
- var i:longint;
+ function MaxDir(const Vertices:TConvexHullVectors;const CountVertices:TKraftInt32;const Direction:TConvexHullVector):TKraftInt32;
+ var i:TKraftInt32;
      Best,Current:double;
  begin
   result:=-1;
@@ -14831,11 +16911,11 @@ var CountPoints:longint;
    end;
   end;
  end;
- function FindSimplex(const Vertices:TConvexHullVectors;const CountVertices:longint):TInt4;
+ function FindSimplex(const Vertices:TConvexHullVectors;const CountVertices:TKraftInt32):TInt4;
  const v000:TConvexHullVector=(x:0.0;y:0.0;z:0.0);
        v100:TConvexHullVector=(x:1.0;y:0.0;z:0.0);
        v010:TConvexHullVector=(x:0.0;y:1.0;z:0.0);
- var p0,p1,p2,p3,TempIndex:longint;
+ var p0,p1,p2,p3,TempIndex:TKraftInt32;
      Basis:array[0..2] of TConvexHullVector;
  begin
   Basis[0].x:=0.01;
@@ -14896,17 +16976,17 @@ var CountPoints:longint;
   result[3]:=p3;
  end;
 {$warnings off}
- function CalcHull(const Vertices:TConvexHullVectors;var CountVertices:longint;VerticesLimit:longint):TInt3s;
+ function CalcHull(const Vertices:TConvexHullVectors;var CountVertices:TKraftInt32;VerticesLimit:TKraftInt32):TInt3s;
  var bmin,bmax,Center,n,TempVertex:TConvexHullVector;
      isextreme:array of boolean;
-     CountTris,i,j,k,te,v,{NewStart,}nb:longint;
+     CountTris,i,j,k,te,v,{NewStart,}nb:TKraftInt32;
      Epsilon:double;
      {ti,}t,nt:TInt3;
      p:TInt4;
      Tris:TTris;
      tt:PTri;
      {TempTri:TTri;}
-     Map,Used:array of longint;
+     Map,Used:TKraftInt32Array;
   procedure TrisPushBack(const NewTri:TTri);
   begin
    if (CountTris+1)>=length(Tris) then begin
@@ -14915,9 +16995,9 @@ var CountPoints:longint;
    Tris[CountTris]:=NewTri;
    inc(CountTris);
   end;
-  procedure Extrude(const t0,v:longint);
+  procedure Extrude(const t0,v:TKraftInt32);
   var t,n:TInt3;
-      b:longint;
+      b:TKraftInt32;
   begin
    t:=Tris[t0].v;
    b:=CountTris;
@@ -15127,7 +17207,7 @@ var CountPoints:longint;
  end;
 {$warnings on}
  procedure SearchMinMax;
- var Index:longint;
+ var Index:TKraftInt32;
      Point:PConvexHullVector;
  begin
   MinPoint:=Points[0];
@@ -15158,11 +17238,11 @@ var CountPoints:longint;
  const HashBits=8;
        HashSize=1 shl HashBits;
        HashMask=HashSize-1;
- var PointIndex,OtherPointIndex,CountNewPoints,HashItemIndex:longint;
-     Hash:longword;
+ var PointIndex,OtherPointIndex,CountNewPoints,HashItemIndex:TKraftInt32;
+     Hash:TKraftUInt32;
      NewPoints:TConvexHullVectors;
-     PointNextIndices:array of longint;
-     HashTable:array of longint;
+     PointNextIndices:TKraftInt32Array;
+     HashTable:TKraftInt32Array;
  begin
   NewPoints:=nil;
   PointNextIndices:=nil;
@@ -15224,12 +17304,12 @@ var CountPoints:longint;
  const HashBits=8;
        HashSize=1 shl HashBits;
        HashMask=HashSize-1;
- var PointIndex,OtherPointIndex,CountNewPoints,HashItemIndex:longint;
-     Hash:longword;
+ var PointIndex,OtherPointIndex,CountNewPoints,HashItemIndex:TKraftInt32;
+     Hash:TKraftUInt32;
      InverseTolerance:double;
      NewPoints:TConvexHullVectors;
-     PointNextIndices:array of longint;
-     HashTable:array of longint;
+     PointNextIndices:TKraftInt32Array;
+     HashTable:TKraftInt32Array;
  begin
   NewPoints:=nil;
   PointNextIndices:=nil;
@@ -15292,7 +17372,7 @@ var CountPoints:longint;
   end;
  end;
  procedure SortPoints;
- var Count,Index:longint;
+ var Count,Index:TKraftInt32;
      NewPoints:TConvexHullVectors;
      IndirectPoints:array of PConvexHullVector;
  begin
@@ -15319,7 +17399,7 @@ var CountPoints:longint;
   end;
  end;
 var Tris:TInt3s;
-    i:longint;
+    i:TKraftInt32;
 begin
  result:=false;
  Tris:=nil;
@@ -15371,12 +17451,34 @@ begin
  end;
 end;
 
-function KraftQuickHullIntLog2(x:longword):longword; {$ifdef cpu386}assembler; register;
+function KraftQuickHullIntLog2(x:TKraftUInt32):TKraftUInt32; {$if defined(fpc)}{$ifdef CAN_INLINE}inline;{$endif}
+begin
+ if x<>0 then begin
+  result:=BSRWord(x);
+ end else begin
+  result:=0;
+ end;
+end;
+{$elseif defined(cpu386)}
 asm
  test eax,eax
  jz @Done
  bsr eax,eax
  @Done:
+end;
+{$elseif defined(cpux86_64)}
+asm
+{$ifndef fpc}
+ .noframe
+{$endif}
+{$ifdef Windows}
+ bsr eax,ecx
+{$else}
+ bsr eax,edi
+{$endif}
+ jnz @Done
+ xor eax,eax
+@Done:
 end;
 {$else}
 begin
@@ -15386,14 +17488,14 @@ begin
  x:=x or (x shr 8);
  x:=x or (x shr 16);
  x:=x shr 1;
- x:=x-((x shr 1) and $55555555);
+ dec(x,(x shr 1) and $55555555);
  x:=((x shr 2) and $33333333)+(x and $33333333);
  x:=((x shr 4)+x) and $0f0f0f0f;
- x:=x+(x shr 8);
- x:=x+(x shr 16);
+ inc(x,x shr 8);
+ inc(x,x shr 16);
  result:=x and $3f;
 end;
-{$endif}
+{$ifend}
 
 constructor TKraftQuickHullIntegerList.Create;
 begin
@@ -15418,15 +17520,15 @@ begin
  ReallocMem(fList,0);
 end;
 
-procedure TKraftQuickHullIntegerList.SetCapacity(NewCapacity:longint);
+procedure TKraftQuickHullIntegerList.SetCapacity(NewCapacity:TKraftInt32);
 begin
  if NewCapacity>=0 then begin
-  ReallocMem(fList,NewCapacity*sizeof(longint));
+  ReallocMem(fList,NewCapacity*sizeof(TKraftInt32));
   fAllocated:=NewCapacity;
  end;
 end;
 
-procedure TKraftQuickHullIntegerList.SetCount(NewCount:longint);
+procedure TKraftQuickHullIntegerList.SetCount(NewCount:TKraftInt32);
 begin
  if NewCount>=0 then begin
   if NewCount<fCountItems then begin
@@ -15436,18 +17538,18 @@ begin
     SetCapacity((fCountItems+4096) and not 4095);
    end;
    if fCountItems<NewCount then begin
-    FillChar(fList^[fCountItems],(NewCount-fCountItems)*SizeOf(longint),#0);
+    FillChar(fList^[fCountItems],(NewCount-fCountItems)*SizeOf(TKraftInt32),#0);
    end;
    fCountItems:=NewCount;
   end;
  end;
 end;
 
-function TKraftQuickHullIntegerList.Add(Item:longint):longint;
+function TKraftQuickHullIntegerList.Add(Item:TKraftInt32):TKraftInt32;
 begin
  if fCountItems>=fAllocated then begin
   fAllocated:=(fCountItems+4096) and not 4095;
-  ReallocMem(fList,fAllocated*SizeOf(longint));
+  ReallocMem(fList,fAllocated*SizeOf(TKraftInt32));
  end;
  fList^[fCountItems]:=Item;
  result:=fCountItems;
@@ -15455,8 +17557,8 @@ begin
  fIsSorted:=false;
 end;
 
-procedure TKraftQuickHullIntegerList.AddSorted(Item:longint);
-var i:longint;
+procedure TKraftQuickHullIntegerList.AddSorted(Item:TKraftInt32);
+var i:TKraftInt32;
 begin
  if fIsSorted then begin
   if fCountItems=0 then begin
@@ -15475,8 +17577,8 @@ begin
  end;
 end;
 
-procedure TKraftQuickHullIntegerList.Insert(Index:longint;Item:longint);
-var i:longint;
+procedure TKraftQuickHullIntegerList.Insert(Index:TKraftInt32;Item:TKraftInt32);
+var i:TKraftInt32;
 begin
  if (Index>=0) and (Index<fCountItems) then begin
   SetCount(fCountItems+1);
@@ -15493,8 +17595,8 @@ begin
  fIsSorted:=false;
 end;
 
-procedure TKraftQuickHullIntegerList.Delete(Index:longint);
-var i,j,k:longint;
+procedure TKraftQuickHullIntegerList.Delete(Index:TKraftInt32);
+var i,j,k:TKraftInt32;
 begin
  if (Index>=0) and (Index<fCountItems) then begin
   k:=fCountItems-1;
@@ -15506,8 +17608,8 @@ begin
  end;
 end;
 
-function TKraftQuickHullIntegerList.Remove(Item:longint):longint;
-var i,j,k:longint;
+function TKraftQuickHullIntegerList.Remove(Item:TKraftInt32):TKraftInt32;
+var i,j,k:TKraftInt32;
 begin
  result:=-1;
  k:=fCountItems;
@@ -15528,8 +17630,8 @@ begin
  end;
 end;
 
-function TKraftQuickHullIntegerList.Find(Item:longint):longint;
-var i,l,r:longint;
+function TKraftQuickHullIntegerList.Find(Item:TKraftInt32):TKraftInt32;
+var i,l,r:TKraftInt32;
 begin
  result:=-1;
  if fIsSorted then begin
@@ -15558,13 +17660,13 @@ begin
  end;
 end;
 
-function TKraftQuickHullIntegerList.IndexOf(Item:longint):longint;
+function TKraftQuickHullIntegerList.IndexOf(Item:TKraftInt32):TKraftInt32;
 begin
  result:=Find(Item);
 end;
 
-procedure TKraftQuickHullIntegerList.Exchange(Index1,Index2:longint);
-var TempInteger:longint;
+procedure TKraftQuickHullIntegerList.Exchange(Index1,Index2:TKraftInt32);
+var TempInteger:TKraftInt32;
 begin
  if (Index1>=0) and (Index1<fCountItems) and (Index2>=0) and (Index2<fCountItems) then begin
   TempInteger:=fList^[Index1];
@@ -15574,7 +17676,7 @@ begin
  end;
 end;
 
-function TKraftQuickHullIntegerList.GetItem(Index:longint):longint;
+function TKraftQuickHullIntegerList.GetItem(Index:TKraftInt32):TKraftInt32;
 begin
  if (Index>=0) and (Index<fCountItems) then begin
   result:=fList^[Index];
@@ -15583,7 +17685,7 @@ begin
  end;
 end;
 
-procedure TKraftQuickHullIntegerList.SetItem(Index:longint;Value:longint);
+procedure TKraftQuickHullIntegerList.SetItem(Index:TKraftInt32;Value:TKraftInt32);
 begin
  if (Index>=0) and (Index<fCountItems) then begin
   fList^[Index]:=Value;
@@ -15591,7 +17693,7 @@ begin
  end;
 end;
 
-function TKraftQuickHullIntegerList.GetItemPointer(Index:longint):pointer;
+function TKraftQuickHullIntegerList.GetItemPointer(Index:TKraftInt32):pointer;
 begin
  if (Index>=0) and (Index<fCountItems) then begin
   result:=@fList^[Index];
@@ -15601,10 +17703,10 @@ begin
 end;
 
 procedure TKraftQuickHullIntegerList.Sort;
- procedure IntroSort(Left,Right,Depth:longint);
-  procedure SiftDown(Current,MaxIndex:longint);
-  var SiftLeft,SiftRight,Largest:longint;
-      v:longint;
+ procedure IntroSort(Left,Right,Depth:TKraftInt32);
+  procedure SiftDown(Current,MaxIndex:TKraftInt32);
+  var SiftLeft,SiftRight,Largest:TKraftInt32;
+      v:TKraftInt32;
   begin
    SiftLeft:=Left+(2*(Current-Left))+1;
    SiftRight:=Left+(2*(Current-Left))+2;
@@ -15623,8 +17725,8 @@ procedure TKraftQuickHullIntegerList.Sort;
    end;
   end;
   procedure InsertionSort;
-  var i,j:longint;
-      t:longint;
+  var i,j:TKraftInt32;
+      t:TKraftInt32;
   begin
    i:=Left+1;
    while i<=Right do begin
@@ -15639,8 +17741,8 @@ procedure TKraftQuickHullIntegerList.Sort;
    end;
   end;
   procedure HeapSort;
-  var i:longint;
-      v:longint;
+  var i:TKraftInt32;
+      v:TKraftInt32;
   begin
    i:=((Left+Right+1) div 2)-1;
    while i>=Left do begin
@@ -15657,8 +17759,8 @@ procedure TKraftQuickHullIntegerList.Sort;
    end;
   end;
   procedure QuickSortWidthMedianOfThreeOptimization;
-  var Middle,i,j:longint;
-      Pivot,v:longint;
+  var Middle,i,j:TKraftInt32;
+      Pivot,v:TKraftInt32;
   begin
    Middle:=(Left+Right) div 2;
    if (Right-Left)>3 then begin
@@ -15711,9 +17813,9 @@ procedure TKraftQuickHullIntegerList.Sort;
    end;
   end;
  end;
- procedure QuickSort(L,R:longint);
- var Pivot,vL,vR:longint;
-     v:longint;
+ procedure QuickSort(L,R:TKraftInt32);
+ var Pivot,vL,vR:TKraftInt32;
+     v:TKraftInt32;
  begin
   if (R-L)<=1 then begin
    if (L<R) and (fList[R]<fList[L]) then begin
@@ -15749,9 +17851,9 @@ procedure TKraftQuickHullIntegerList.Sort;
    end;
   end;
  end;
- procedure QuickSortEx(Left,Right:longint);
- var Pivot,i,j:longint;
-     v:longint;
+ procedure QuickSortEx(Left,Right:TKraftInt32);
+ var Pivot,i,j:TKraftInt32;
+     v:TKraftInt32;
  begin
   i:=Left;
   j:=Right;
@@ -15779,8 +17881,8 @@ procedure TKraftQuickHullIntegerList.Sort;
   end;
  end;
  procedure BeRoSort;
- var i:longint;
-     v:longint;
+ var i:TKraftInt32;
+     v:TKraftInt32;
  begin
   i:=0;
   while i<(fCountItems-1) do begin
@@ -15813,7 +17915,7 @@ begin
  result:=self;
 end;
 
-procedure TKraftQuickHullVector3D.SetValue(i:longint;const v:double);
+procedure TKraftQuickHullVector3D.SetValue(i:TKraftInt32;const v:double);
 begin
  case i of
   0:begin
@@ -15828,7 +17930,7 @@ begin
  end;
 end;
 
-function TKraftQuickHullVector3D.GetValue(i:longint):double;
+function TKraftQuickHullVector3D.GetValue(i:TKraftInt32):double;
 begin
  case i of
   0:begin
@@ -16088,8 +18190,8 @@ begin
  fOutside:=nil;
 end;
 
-constructor TKraftQuickHullFace.CreatePolygon(const AInstance:TKraftQuickHull;const AVertices:array of TKraftQuickHullVertex;const AIndices:array of longint);
-var i:longint;
+constructor TKraftQuickHullFace.CreatePolygon(const AInstance:TKraftQuickHull;const AVertices:array of TKraftQuickHullVertex;const AIndices:array of TKraftInt32);
+var i:TKraftInt32;
     hePrev,he:TKraftQuickHullHalfEdge;
 begin
  Create(AInstance);
@@ -16216,7 +18318,7 @@ end;
 
 procedure TKraftQuickHullFace.ComputeNormalAndCentroid;
 var he:TKraftQuickHullHalfEdge;
-    CountFoundVertices:longint;
+    CountFoundVertices:TKraftInt32;
 begin
  ComputeNormal(fNormal);
  ComputeCentroid(fCentroid);
@@ -16237,7 +18339,7 @@ begin
  fPlaneOffset:=fNormal.Dot(fCentroid);
 end;
 
-function TKraftQuickHullFace.GetEdge(i:longint):TKraftQuickHullHalfEdge;
+function TKraftQuickHullFace.GetEdge(i:TKraftInt32):TKraftQuickHullHalfEdge;
 begin
  result:=fhe0;
  while i>0 do begin
@@ -16311,7 +18413,7 @@ procedure TKraftQuickHullFace.CheckConsistency;
 var hedge,hedgeOpp:TKraftQuickHullHalfEdge;
     oppFace:TKraftQuickHullFace;
     MaxD,d:double;
-    CountFoundVertices:longint;
+    CountFoundVertices:TKraftInt32;
 begin
  Assert(fCountVertices>2,'Degenerated Face');
  MaxD:=0.0;
@@ -16335,7 +18437,7 @@ begin
  Assert(CountFoundVertices=fCountVertices,'Wrong count of vertices');
 end;
 
-function TKraftQuickHullFace.MergeAdjacentFace(const hedgeAdj:TKraftQuickHullHalfEdge;const Discarded:TList):longint;
+function TKraftQuickHullFace.MergeAdjacentFace(const hedgeAdj:TKraftQuickHullHalfEdge;const Discarded:TList):TKraftInt32;
 var oppFace,DiscardedFace:TKraftQuickHullFace;
     hedgeOpp,hedgeAdjPrev,hedgeAdjNext,hedgeOppPrev,hedgeOppNext,hedge:TKraftQuickHullHalfEdge;
 begin
@@ -16343,7 +18445,7 @@ begin
  result:=0;
 
  Discarded.Clear;
- 
+
  Discarded.Add(oppFace);
  inc(result);
  oppFace.fMark:=KRAFT_QUICKHULL_FACE_MARK_NON_DELETED;
@@ -16365,7 +18467,7 @@ begin
   hedgeAdjNext:=hedgeAdjNext.fNext;
  end;
 
- hedge:=hedgeOppNext;       
+ hedge:=hedgeOppNext;
  while hedge<>hedgeOppPrev.fNext do begin
   hedge.fFace:=self;
   hedge:=hedge.fNext;
@@ -16565,7 +18667,7 @@ end;
 
 procedure TKraftQuickHull.AddPoint(const x,y,z:double);
 var Vertex:TKraftQuickHullVertex;
-    Index,HashBucket:longint;
+    Index,HashBucket:TKraftInt32;
 begin
  HashBucket:=((round(x)*73856093) xor (round(y)*19349663) xor (round(z)*83492791)) and KRAFT_QUICKHULL_HASHMASK;
  Vertex:=fVertexHashTable[HashBucket];
@@ -16629,7 +18731,7 @@ begin
 end;
 
 function TKraftQuickHull.FindHalfEdge(const Tail,Head:TKraftQuickHullVertex):TKraftQuickHullHalfEdge;
-var i:longint;
+var i:TKraftInt32;
     Face:TKraftQuickHullFace;
 begin
  result:=nil;
@@ -16644,7 +18746,7 @@ end;
 
 procedure TKraftQuickHull.Triangulate;
 const DOUBLE_PREC=2.2204460492503131e-16;
-var i:longint;
+var i:TKraftInt32;
     Face:TKraftQuickHullFace;
     MinArea:double;
 begin
@@ -16666,7 +18768,7 @@ end;
 
 procedure TKraftQuickHull.ComputeMinAndMax;
 const DOUBLE_PREC=2.2204460492503131e-16;
-var i:longint;
+var i:TKraftInt32;
     MinVector,MaxVector,Point:TKraftQuickHullVector3D;
     Vertex:TKraftQuickHullVertex;
 begin
@@ -16704,7 +18806,7 @@ begin
    MaxVector.z:=Point.z;
    fMaxVertices[2]:=Vertex;
   end;
- end;                                                                  
+ end;
  fCharLength:=Max(Max(MaxVector.x-MinVector.x,MaxVector.y-MinVector.y),MaxVector.z-MinVector.z);
  if fExplicitTolerance<0.0 then begin
   fTolerance:=(3.0*DOUBLE_PREC)*(Max(abs(MaxVector.x),abs(MinVector.x))+Max(abs(MaxVector.y),abs(MinVector.y))+Max(abs(MaxVector.z),abs(MinVector.z)));
@@ -16712,10 +18814,10 @@ begin
   fTolerance:=fExplicitTolerance;
  end;
 end;
-                    
+
 procedure TKraftQuickHull.CreateInitialSimplex;
-const ModuloThree:array[0..5] of longint=(0,1,2,0,1,2);
-var MaxIndex,Index,OtherIndex:longint;
+const ModuloThree:array[0..5] of TKraftInt32=(0,1,2,0,1,2);
+var MaxIndex,Index,OtherIndex:TKraftInt32;
     MaxValue,Diff,MaxSquared,LenSquared,MaxDistance,d0,Distance:double;
     v:TKraftQuickHullVertex;
     MaxFace:TKraftQuickHullFace;
@@ -16745,7 +18847,7 @@ begin
  // set third vertex to be the vertex farthest from the line between v0 and v1
  u01.Sub(Vertices[1].Point,Vertices[0].Point);
  u01.Normalize;
-   
+
  MaxSquared:=0.0;
  for Index:=0 to fCountPoints-1 do begin
   Diff02.Sub(TKraftQuickHullVertex(fPointBuffer[Index]).Point,Vertices[0].Point);
@@ -16900,10 +19002,10 @@ begin
  fFaces.Add(Face);
  Face.fhe0.fPrevious.SetOpposite(he.fOpposite);
  result:=Face.fhe0;
-end;                            
+end;
 
 procedure TKraftQuickHull.AddNewFaces(const NewFaces:TKraftQuickHullFaceList;const EyeVertex:TKraftQuickHullVertex;const Horizon:TList);
-var Index:longint;
+var Index:TKraftInt32;
     hedgeSidePrev,hedgeSideBegin,horizonHe,hedgeSide:TKraftQuickHullHalfEdge;
 begin
  NewFaces.clear;
@@ -16928,8 +19030,8 @@ begin
  result:=he.fFace.DistanceToPlane(he.fOpposite.fFace.fCentroid);
 end;
 
-function TKraftQuickHull.DoAdjacentMerge(const Face:TKraftQuickHullFace;const MergeType:longint):boolean;
-var Index,CountDiscarded:longint;
+function TKraftQuickHull.DoAdjacentMerge(const Face:TKraftQuickHullFace;const MergeType:TKraftInt32):boolean;
+var Index,CountDiscarded:TKraftInt32;
     hedge:TKraftQuickHullHalfEdge;
     oppFace:TKraftQuickHullFace;
     Convex,Merge:boolean;
@@ -16938,7 +19040,7 @@ begin
  Convex:=true;
  repeat
   oppFace:=hedge.OppositeFace;
-  Merge:=false;          
+  Merge:=false;
   if MergeType=KRAFT_QUICKHULL_MERGE_TYPE_NONCONVEX then begin
    // merge faces if they are definitively non-convex
    if (OppFaceDistance(hedge)>(-fTolerance)) or (OppFaceDistance(hedge.fOpposite)>(-fTolerance)) then begin
@@ -17044,7 +19146,7 @@ begin
 
 end;
 
-procedure TKraftQuickHull.MarkFaceVertices(const Face:TKraftQuickHullFace;const Mark:longint);
+procedure TKraftQuickHull.MarkFaceVertices(const Face:TKraftQuickHullFace;const Mark:TKraftInt32);
 var he0,he:TKraftQuickHullHalfEdge;
 begin
  he0:=Face.GetFirstEdge;
@@ -17056,7 +19158,7 @@ begin
 end;
 
 procedure TKraftQuickHull.ReindexFacesAndVertices;
-var Index:longint;
+var Index:TKraftInt32;
     Face:TKraftQuickHullFace;
     Vertex:TKraftQuickHullVertex;
 begin
@@ -17091,9 +19193,9 @@ begin
 
 end;
 
-procedure TKraftQuickHull.Build(const MaximumVertices:longint=-1);
+procedure TKraftQuickHull.Build(const MaximumVertices:TKraftInt32=-1);
 var EyeVertex:TKraftQuickHullVertex;
-    RemainToDoVertices:longint;
+    RemainToDoVertices:TKraftInt32;
 begin
  ComputeMinAndMax;
  CreateInitialSimplex;
@@ -17109,10 +19211,10 @@ begin
  ReindexFacesAndVertices;
 end;
 
-procedure TKraftQuickHull.GetFaceIndices(out OutputFace:TKraftQuickHullOutputFace;const Face:TKraftQuickHullFace;const Flags:longint);
+procedure TKraftQuickHull.GetFaceIndices(out OutputFace:TKraftQuickHullOutputFace;const Face:TKraftQuickHullFace;const Flags:TKraftInt32);
 var CCW,IndexedFromOne,PointRelative:boolean;
     hedge:TKraftQuickHullHalfEdge;
-    Count,Index:longint;
+    Count,Index:TKraftInt32;
 begin
  SetLength(OutputFace,Face.fCountVertices);
  CCW:=(Flags and KRAFT_QUICKHULL_FACE_FLAG_CLOCKWISE)=0;
@@ -17139,7 +19241,7 @@ begin
 end;
 
 procedure TKraftQuickHull.GetVertices(out OutputVertices:TKraftQuickHullVector3DArray);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  SetLength(OutputVertices,fCountVertices);
  for Index:=0 to fCountVertices-1 do begin
@@ -17148,7 +19250,7 @@ begin
 end;
 
 procedure TKraftQuickHull.GetFaces(out OutputFaces:TKraftQuickHullOutputFaces);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  SetLength(OutputFaces,fCountFaces);
  for Index:=0 to fCountFaces-1 do begin
@@ -17158,7 +19260,7 @@ end;
 
 type PConvexHullGrahamScanVector=^TConvexHullGrahamScanVector;
      TConvexHullGrahamScanVector=record
-      OriginalIndex:longint;
+      OriginalIndex:TKraftInt32;
       Angle:double;
       LengthToAnchor:double;
       Vector:TConvexHullVector;
@@ -17166,7 +19268,7 @@ type PConvexHullGrahamScanVector=^TConvexHullGrahamScanVector;
 
      TConvexHullGrahamScanVectors=array of TConvexHullGrahamScanVector;
 
-function CompareConvexHullGrahamScanVector(const a,b:pointer):longint;
+function CompareConvexHullGrahamScanVector(const a,b:pointer):TKraftInt32;
 var va,vb:PConvexHullGrahamScanVector;
 begin
  va:=a;
@@ -17189,7 +19291,7 @@ begin
 end;
 
 procedure ConvexHullGrahamScan2D(var OriginalPoints:TConvexHullGrahamScanVectors;var Hull:TConvexHullGrahamScanVectors;const NormalAxis:TConvexHullVector);
-var CountOriginalPoints,Index,Count:longint;
+var CountOriginalPoints,Index,Count:TKraftInt32;
     ProjectionLeft,ProjectionRight:double;
     Axis0,Axis1,xVector,Relative:TConvexHullVector;
     TempPoint:TConvexHullGrahamScanVector;
@@ -17300,11 +19402,11 @@ end;
 destructor TKraftConvexHull.Destroy;
 begin
 
- SetLength(fVertices,0);
+ fVertices:=nil;
 
- SetLength(fFaces,0);
+ fFaces:=nil;
 
- SetLength(fEdges,0);
+ fEdges:=nil;
 
  if assigned(fPrevious) then begin
   fPrevious.fNext:=fNext;
@@ -17323,25 +19425,65 @@ begin
 
 end;
 
-procedure TKraftConvexHull.LoadFromStream(const AStream:TStream);
-var i,j:longint;
+procedure TKraftConvexHull.Clear(const aFreeMemory:boolean);
 begin
 
- AStream.ReadBuffer(i,SizeOf(longint));
+ if aFreeMemory then begin
+  fVertices:=nil;
+ end;
+ fCountVertices:=0;
+
+ if aFreeMemory then begin
+  fFaces:=nil;
+ end;
+ fCountFaces:=0;
+
+ if aFreeMemory then begin
+  fEdges:=nil;
+ end;
+ fCountEdges:=0;
+
+ FillChar(fSphere,SizeOf(TKraftSphere),AnsiChar(#0));
+
+ FillChar(fAABB,SizeOf(TKraftAABB),AnsiChar(#0));
+
+ fAngularMotionDisc:=0.0;
+
+ fPhysics.InvalidateShapes;
+
+end;
+
+procedure TKraftConvexHull.LoadFromStream(const AStream:TStream);
+var i,j:TKraftInt32;
+    Signature:TKraftSignature;
+    FileFormatVersion:TKraftUInt32;
+begin
+
+ AStream.ReadBuffer(Signature,SizeOf(TKraftSignature));
+ if Signature<>KraftSignatureConvexHull then begin
+  raise EKraftInvalidSignature.Create('Invalid signature');
+ end;
+
+ AStream.ReadBuffer(FileFormatVersion,SizeOf(TKraftUInt32));
+ if FileFormatVersion<>KraftFileFormatVersion then begin
+  raise EKraftInvalidFileFormatVersion.Create('Invalid file format version');
+ end;
+
+ AStream.ReadBuffer(i,SizeOf(TKraftInt32));
  fCountVertices:=i;
  SetLength(fVertices,fCountVertices);
  for i:=0 to fCountVertices-1 do begin
   AStream.ReadBuffer(fVertices[i].Position.x,SizeOf(TKraftScalar));
   AStream.ReadBuffer(fVertices[i].Position.y,SizeOf(TKraftScalar));
   AStream.ReadBuffer(fVertices[i].Position.z,SizeOf(TKraftScalar));
-  AStream.ReadBuffer(fVertices[i].CountAdjacencies,SizeOf(longint));
+  AStream.ReadBuffer(fVertices[i].CountAdjacencies,SizeOf(TKraftInt32));
   SetLength(fVertices[i].Adjacencies,fVertices[i].CountAdjacencies);
   for j:=0 to fVertices[i].CountAdjacencies-1 do begin
-   AStream.ReadBuffer(fVertices[i].Adjacencies[j],SizeOf(longint));
+   AStream.ReadBuffer(fVertices[i].Adjacencies[j],SizeOf(TKraftInt32));
   end;
  end;
 
- AStream.ReadBuffer(i,SizeOf(longint));
+ AStream.ReadBuffer(i,SizeOf(TKraftInt32));
  fCountFaces:=i;
  SetLength(fFaces,fCountFaces);
  for i:=0 to fCountFaces-1 do begin
@@ -17349,22 +19491,22 @@ begin
   AStream.ReadBuffer(fFaces[i].Plane.Normal.y,SizeOf(TKraftScalar));
   AStream.ReadBuffer(fFaces[i].Plane.Normal.z,SizeOf(TKraftScalar));
   AStream.ReadBuffer(fFaces[i].Plane.Distance,SizeOf(TKraftScalar));
-  AStream.ReadBuffer(fFaces[i].CountVertices,SizeOf(longint));
+  AStream.ReadBuffer(fFaces[i].CountVertices,SizeOf(TKraftInt32));
   SetLength(fFaces[i].Vertices,fFaces[i].CountVertices);
   for j:=0 to fFaces[i].CountVertices-1 do begin
-   AStream.ReadBuffer(fFaces[i].Vertices[j],SizeOf(longint));
+   AStream.ReadBuffer(fFaces[i].Vertices[j],SizeOf(TKraftInt32));
   end;
-  AStream.ReadBuffer(fFaces[i].EdgeVertexOffset,SizeOf(longint));
+  AStream.ReadBuffer(fFaces[i].EdgeVertexOffset,SizeOf(TKraftInt32));
  end;
 
- AStream.ReadBuffer(i,SizeOf(longint));
+ AStream.ReadBuffer(i,SizeOf(TKraftInt32));
  fCountEdges:=i;
  SetLength(fEdges,fCountEdges);
  for i:=0 to fCountEdges-1 do begin
-  AStream.ReadBuffer(fEdges[i].Vertices[0],SizeOf(longint));
-  AStream.ReadBuffer(fEdges[i].Vertices[1],SizeOf(longint));
-  AStream.ReadBuffer(fEdges[i].Faces[0],SizeOf(longint));
-  AStream.ReadBuffer(fEdges[i].Faces[1],SizeOf(longint));
+  AStream.ReadBuffer(fEdges[i].Vertices[0],SizeOf(TKraftInt32));
+  AStream.ReadBuffer(fEdges[i].Vertices[1],SizeOf(TKraftInt32));
+  AStream.ReadBuffer(fEdges[i].Faces[0],SizeOf(TKraftInt32));
+  AStream.ReadBuffer(fEdges[i].Faces[1],SizeOf(TKraftInt32));
  end;
 
  AStream.ReadBuffer(fSphere.Center.x,SizeOf(TKraftScalar));
@@ -17393,42 +19535,46 @@ begin
 end;
 
 procedure TKraftConvexHull.SaveToStream(const AStream:TStream);
-var i,j:longint;
+var i,j:TKraftInt32;
 begin
 
+ AStream.WriteBuffer(KraftSignatureConvexHull,SizeOf(TKraftSignature));
+
+ AStream.WriteBuffer(KraftFileFormatVersion,SizeOf(TKraftUInt32));
+
  i:=fCountVertices;
- AStream.WriteBuffer(i,SizeOf(longint));
+ AStream.WriteBuffer(i,SizeOf(TKraftInt32));
  for i:=0 to fCountVertices-1 do begin
   AStream.WriteBuffer(fVertices[i].Position.x,SizeOf(TKraftScalar));
   AStream.WriteBuffer(fVertices[i].Position.y,SizeOf(TKraftScalar));
   AStream.WriteBuffer(fVertices[i].Position.z,SizeOf(TKraftScalar));
-  AStream.WriteBuffer(fVertices[i].CountAdjacencies,SizeOf(longint));
+  AStream.WriteBuffer(fVertices[i].CountAdjacencies,SizeOf(TKraftInt32));
   for j:=0 to fVertices[i].CountAdjacencies-1 do begin
-   AStream.WriteBuffer(fVertices[i].Adjacencies[j],SizeOf(longint));
+   AStream.WriteBuffer(fVertices[i].Adjacencies[j],SizeOf(TKraftInt32));
   end;
  end;
 
  i:=fCountFaces;
- AStream.WriteBuffer(i,SizeOf(longint));
+ AStream.WriteBuffer(i,SizeOf(TKraftInt32));
  for i:=0 to fCountFaces-1 do begin
   AStream.WriteBuffer(fFaces[i].Plane.Normal.x,SizeOf(TKraftScalar));
   AStream.WriteBuffer(fFaces[i].Plane.Normal.y,SizeOf(TKraftScalar));
   AStream.WriteBuffer(fFaces[i].Plane.Normal.z,SizeOf(TKraftScalar));
   AStream.WriteBuffer(fFaces[i].Plane.Distance,SizeOf(TKraftScalar));
-  AStream.WriteBuffer(fFaces[i].CountVertices,SizeOf(longint));
+  AStream.WriteBuffer(fFaces[i].CountVertices,SizeOf(TKraftInt32));
   for j:=0 to fFaces[i].CountVertices-1 do begin
-   AStream.WriteBuffer(fFaces[i].Vertices[j],SizeOf(longint));
+   AStream.WriteBuffer(fFaces[i].Vertices[j],SizeOf(TKraftInt32));
   end;
-  AStream.WriteBuffer(fFaces[i].EdgeVertexOffset,SizeOf(longint));
+  AStream.WriteBuffer(fFaces[i].EdgeVertexOffset,SizeOf(TKraftInt32));
  end;
 
  i:=fCountEdges;
- AStream.WriteBuffer(i,SizeOf(longint));
+ AStream.WriteBuffer(i,SizeOf(TKraftInt32));
  for i:=0 to fCountEdges-1 do begin
-  AStream.WriteBuffer(fEdges[i].Vertices[0],SizeOf(longint));
-  AStream.WriteBuffer(fEdges[i].Vertices[1],SizeOf(longint));
-  AStream.WriteBuffer(fEdges[i].Faces[0],SizeOf(longint));
-  AStream.WriteBuffer(fEdges[i].Faces[1],SizeOf(longint));
+  AStream.WriteBuffer(fEdges[i].Vertices[0],SizeOf(TKraftInt32));
+  AStream.WriteBuffer(fEdges[i].Vertices[1],SizeOf(TKraftInt32));
+  AStream.WriteBuffer(fEdges[i].Faces[0],SizeOf(TKraftInt32));
+  AStream.WriteBuffer(fEdges[i].Faces[1],SizeOf(TKraftInt32));
  end;
 
  AStream.WriteBuffer(fSphere.Center.x,SizeOf(TKraftScalar));
@@ -17456,7 +19602,7 @@ begin
 
 end;
 
-function TKraftConvexHull.AddVertex(const AVertex:TKraftVector3):longint;
+function TKraftConvexHull.AddVertex(const AVertex:TKraftVector3):TKraftInt32;
 var Vertex:PKraftConvexHullVertex;
 begin
  result:=fCountVertices;
@@ -17469,21 +19615,21 @@ begin
  Vertex^.CountAdjacencies:=0;
 end;
 
-procedure TKraftConvexHull.Load(const AVertices:PKraftVector3;const ACountVertices:longint);
-var Index:longint;
+procedure TKraftConvexHull.Load(const AVertices:PKraftVector3;const ACountVertices:TKraftInt32);
+var Index:TKraftInt32;
     Vertex:PKraftConvexHullVertex;
 begin
  fCountVertices:=ACountVertices;
  SetLength(fVertices,fCountVertices);
  for Index:=0 to fCountVertices-1 do begin
   Vertex:=@fVertices[Index];
-  Vertex^.Position:=PKraftVector3s(AVertices)^[Index];
+  Vertex^.Position:=Vector3(PKraftVector3s(AVertices)^[Index].RawVector);
   Vertex^.CountAdjacencies:=0;
  end;
 end;
 
 procedure TKraftConvexHull.Scale(const WithFactor:TKraftScalar);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  for Index:=0 to fCountVertices-1 do begin
   Vector3Scale(fVertices[Index].Position,WithFactor);
@@ -17491,7 +19637,7 @@ begin
 end;
 
 procedure TKraftConvexHull.Scale(const WithVector:TKraftVector3);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  for Index:=0 to fCountVertices-1 do begin
   Vector3Scale(fVertices[Index].Position,WithVector.x,WithVector.y,WithVector.z);
@@ -17499,7 +19645,7 @@ begin
 end;
 
 procedure TKraftConvexHull.Transform(const WithMatrix:TKraftMatrix3x3);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  for Index:=0 to fCountVertices-1 do begin
   Vector3MatrixMul(fVertices[Index].Position,WithMatrix);
@@ -17507,43 +19653,43 @@ begin
 end;
 
 procedure TKraftConvexHull.Transform(const WithMatrix:TKraftMatrix4x4);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  for Index:=0 to fCountVertices-1 do begin
   Vector3MatrixMul(fVertices[Index].Position,WithMatrix);
  end;
 end;
 
-procedure TKraftConvexHull.Build(const AMaximumCountConvexHullPoints:longint=-1;const AUserDefinedTolerance:double=-1.0);
+procedure TKraftConvexHull.Build(const AMaximumCountConvexHullPoints:TKraftInt32=-1;const AUserDefinedTolerance:double=-1.0);
 const HashBits=8;
       HashSize=1 shl HashBits;
       HashMask=HashSize-1;
-      ModuloThree:array[0..5] of longint=(0,1,2,0,1,2);
+      ModuloThree:array[0..5] of TKraftInt32=(0,1,2,0,1,2);
       DOUBLE_PREC:double=2.2204460492503131e-16;
 type PTempFaceEdgeHashItem=^TTempFaceEdgeHashItem;
      TTempFaceEdgeHashItem=record
-      Next:longint;
-      Hash:longword;
-      Edge:longint;
-      Face:longint;
-      FaceEdge:longint;
-      FaceEdgeVertexA:longint;
-      FaceEdgeVertexB:longint;
+      Next:TKraftInt32;
+      Hash:TKraftUInt32;
+      Edge:TKraftInt32;
+      Face:TKraftInt32;
+      FaceEdge:TKraftInt32;
+      FaceEdgeVertexA:TKraftInt32;
+      FaceEdgeVertexB:TKraftInt32;
      end;
      PTempFaceEdge=^TTempFaceEdge;
      TTempFaceEdge=record
-      Face:longint;
-      Twin:longint;
-      Vertices:array[0..1] of longint;
+      Face:TKraftInt32;
+      Twin:TKraftInt32;
+      Vertices:array[0..1] of TKraftInt32;
      end;
 var PointIndex,TriangleIndex,TriangleVertexIndex,VertexIndex,OtherVertexIndex,{OtherTriangleIndex,}Index,
     OtherTriangleVertexIndex,SearchIndex,CountTempFaceEdges,FaceIndex,EdgeVertexOffset,TempFaceEdgeIndex,
     {OtherTempFaceEdgeIndex,}CountTempFaceEdgeHashItems,TempFaceEdgeHashItemIndex,{v0,v1,v2,}
-    {FoundSharedVertex,}FaceVertexIndex,{OtherFaceVertexIndex,}CountPoints,HashBucket,CountTriangles:longint;
-    TempFaceEdgeHash:longword;
+    {FoundSharedVertex,}FaceVertexIndex,{OtherFaceVertexIndex,}CountPoints,HashBucket,CountTriangles:TKraftInt32;
+    TempFaceEdgeHash:TKraftUInt32;
     TempFaceEdgeHashItem:PTempFaceEdgeHashItem;
     TempPoints:TConvexHullVectors;
-    TempPointHashTable:array of longint;
+    TempPointHashTable:TKraftInt32Array;
     TempTriangles:TConvexHullTriangles;
     Vertex:PKraftConvexHullVertex;
     Face:PKraftConvexHullFace;
@@ -17555,7 +19701,7 @@ var PointIndex,TriangleIndex,TriangleVertexIndex,VertexIndex,OtherVertexIndex,{O
     TempFaceEdge:PTempFaceEdge;
     Found:boolean;
     TempFaceEdgeHashItems:array of TTempFaceEdgeHashItem;
-    TempFaceEdgeHashTable:array of longint;
+    TempFaceEdgeHashTable:TKraftInt32Array;
     {TempInputPolygons,}TempOutputPolygons:TConvexHullPolygons;
     TempPolygon:PConvexHullPolygon;
     QuickHullInstance:TKraftQuickHull;
@@ -17915,9 +20061,9 @@ begin
    for TempFaceEdgeIndex:=0 to CountTempFaceEdges-1 do begin
     TempFaceEdge:=@TempFaceEdges[TempFaceEdgeIndex];
     if TempFaceEdge^.Vertices[0]<TempFaceEdge^.Vertices[1] then begin
-     TempFaceEdgeHash:=(longword(TempFaceEdge^.Vertices[0])*73856093) xor (longword(TempFaceEdge^.Vertices[1])*83492791);
+     TempFaceEdgeHash:=(TKraftUInt32(TempFaceEdge^.Vertices[0])*73856093) xor (TKraftUInt32(TempFaceEdge^.Vertices[1])*83492791);
     end else begin
-     TempFaceEdgeHash:=(longword(TempFaceEdge^.Vertices[1])*73856093) xor (longword(TempFaceEdge^.Vertices[0])*83492791);
+     TempFaceEdgeHash:=(TKraftUInt32(TempFaceEdge^.Vertices[1])*73856093) xor (TKraftUInt32(TempFaceEdge^.Vertices[0])*83492791);
     end;
     TempFaceEdgeHashItemIndex:=TempFaceEdgeHashTable[TempFaceEdgeHash and HashMask];
     while TempFaceEdgeHashItemIndex>=0 do begin
@@ -18040,7 +20186,7 @@ begin
 end;
 
 procedure TKraftConvexHull.Update;
-var FaceIndex,VertexIndex:longint;
+var FaceIndex,VertexIndex:TKraftInt32;
     Face:PKraftConvexHullFace;
     v0,v1,v2:PKraftVector3;
 begin
@@ -18059,6 +20205,9 @@ begin
  fSphere.Center.x:=0.0;
  fSphere.Center.y:=0.0;
  fSphere.Center.z:=0.0;
+{$ifdef SIMD}
+ fSphere.Center.w:=0.0;
+{$endif}
  fSphere.Radius:=0.0;
  if fCountVertices>0 then begin
   v0:=@fVertices[0].Position;
@@ -18109,9 +20258,9 @@ begin
 end;
 
 procedure TKraftConvexHull.CalculateMassData;
-const ModuloThree:array[0..5] of longint=(0,1,2,0,1,2);
+const ModuloThree:array[0..5] of TKraftInt32=(0,1,2,0,1,2);
       Density=1.0;
-var FaceIndex,FaceVertexIndex,CoordinateIndex,SecondCoordinateIndex,ThirdCoordinateIndex:longint;
+var FaceIndex,FaceVertexIndex,CoordinateIndex,SecondCoordinateIndex,ThirdCoordinateIndex:TKraftInt32;
     Face:PKraftConvexHullFace;
     vU,vV,vW:PKraftVector3;
     CurrentVolume,CentroidX,CentroidY,CentroidZ,Volume,Denominator:double;
@@ -18193,6 +20342,9 @@ begin
  fCentroid.x:=CentroidX/Denominator;
  fCentroid.y:=CentroidY/Denominator;
  fCentroid.z:=CentroidZ/Denominator;
+{$ifdef SIMD}
+ fCentroid.w:=0.0;
+{$endif}
 
  Volume:=Volume/6.0;
 
@@ -18235,8 +20387,8 @@ end;
 
 procedure TKraftConvexHull.Finish;
 const Steps=1024;
-      //ModuloThree:array[0..5] of longint=(0,1,2,0,1,2);
-var VertexIndex:longint;
+      //ModuloThree:array[0..5] of TKraftInt32=(0,1,2,0,1,2);
+var VertexIndex:TKraftInt32;
     v:PKraftVector3;
 begin
 
@@ -18248,6 +20400,9 @@ begin
  fSphere.Center.x:=0.0;
  fSphere.Center.y:=0.0;
  fSphere.Center.z:=0.0;
+{$ifdef SIMD}
+ fSphere.Center.w:=0.0;
+{$endif}
  fSphere.Radius:=0.0;
  if fCountVertices>0 then begin
   v:=@fVertices[0].Position;
@@ -18297,8 +20452,8 @@ begin
 
 end;
 
-function TKraftConvexHull.GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
-var Index:longint;
+function TKraftConvexHull.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
+var Index:TKraftInt32;
     Distance:TKraftScalar;
 begin
  if fCountFaces>0 then begin
@@ -18325,7 +20480,138 @@ begin
  end;
 end;
 
-function TKraftConvexHull.GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3;
+function TKraftConvexHull.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+var Index,BestIndex:TKraftInt32;
+    BestDistance,Distance:TKraftScalar;
+begin
+ if fCountFaces>0 then begin
+  BestDistance:=PlaneVectorDistance(fFaces[0].Plane,Position);
+  BestIndex:=0;
+  for Index:=1 to fCountFaces-1 do begin
+   Distance:=PlaneVectorDistance(fFaces[Index].Plane,Position);
+   if BestDistance<Distance then begin
+    BestDistance:=Distance;
+    BestIndex:=Index;
+   end;
+  end;
+  if BestDistance>=0.0 then begin
+   // Point lies on or outside convex hull
+   for Index:=0 to fCountFaces-1 do begin
+    Distance:=PlaneVectorDistance(fFaces[Index].Plane,Position);
+    if BestDistance>Distance then begin
+     BestDistance:=Distance;
+     BestIndex:=Index;
+    end;
+   end;
+  end else begin
+   // Point lies inside convex hull
+  end;
+  Direction:=fFaces[BestIndex].Plane.Normal;
+  result:=Distance;
+ end else begin
+  Direction:=Vector3XAxis;
+  result:=MAX_SCALAR;
+ end;
+end;
+
+function TKraftConvexHull.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+var Index,BestIndex:TKraftInt32;
+    BestDistance,Distance:TKraftScalar;
+begin
+ if fCountFaces>0 then begin
+  BestDistance:=PlaneVectorDistance(fFaces[0].Plane,Position);
+  BestIndex:=0;
+  for Index:=1 to fCountFaces-1 do begin
+   Distance:=PlaneVectorDistance(fFaces[Index].Plane,Position);
+   if BestDistance<Distance then begin
+    BestDistance:=Distance;
+    BestIndex:=Index;
+   end;
+  end;
+  if BestDistance>=0.0 then begin
+   // Point lies on or outside convex hull
+   for Index:=0 to fCountFaces-1 do begin
+    Distance:=PlaneVectorDistance(fFaces[Index].Plane,Position);
+    if BestDistance>Distance then begin
+     BestDistance:=Distance;
+     BestIndex:=Index;
+    end;
+   end;
+  end else begin
+   // Point lies inside convex hull
+  end;
+//result:=Vector3ScalarMul(Vector3Norm(Vector3Sub(Position,Vector3Sub(Position,Vector3ScalarMul(fFaces[BestIndex].Plane.Normal,PlaneVectorDistance(fFaces[Index].Plane,Position))))),Delta);
+  result:=Faces[BestIndex].Plane.Normal;
+ end else begin
+  result:=Vector3(MAX_SCALAR,MAX_SCALAR,MAX_SCALAR);
+ end;
+end;
+
+function TKraftConvexHull.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+var Index,BestIndex:TKraftInt32;
+    BestDistance,Distance:TKraftScalar;
+begin
+ if fCountFaces>0 then begin
+  BestDistance:=PlaneVectorDistance(fFaces[0].Plane,Position);
+  BestIndex:=0;
+  for Index:=1 to fCountFaces-1 do begin
+   Distance:=PlaneVectorDistance(fFaces[Index].Plane,Position);
+   if BestDistance<Distance then begin
+    BestDistance:=Distance;
+    BestIndex:=Index;
+   end;
+  end;
+  if BestDistance>=0.0 then begin
+   // Point lies on or outside convex hull
+   for Index:=0 to fCountFaces-1 do begin
+    Distance:=PlaneVectorDistance(fFaces[Index].Plane,Position);
+    if BestDistance>Distance then begin
+     BestDistance:=Distance;
+     BestIndex:=Index;
+    end;
+   end;
+  end else begin
+   // Point lies inside convex hull
+  end;
+  result:=fFaces[BestIndex].Plane.Normal;
+ end else begin
+  result:=Vector3Origin;
+ end;
+end;
+
+function TKraftConvexHull.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+var Index,BestIndex:TKraftInt32;
+    BestDistance,Distance:TKraftScalar;
+begin
+ if fCountFaces>0 then begin
+  BestDistance:=PlaneVectorDistance(fFaces[0].Plane,Position);
+  BestIndex:=0;
+  for Index:=1 to fCountFaces-1 do begin
+   Distance:=PlaneVectorDistance(fFaces[Index].Plane,Position);
+   if BestDistance<Distance then begin
+    BestDistance:=Distance;
+    BestIndex:=Index;
+   end;
+  end;
+  if BestDistance>=0.0 then begin
+   // Point lies on or outside convex hull
+   for Index:=0 to fCountFaces-1 do begin
+    Distance:=PlaneVectorDistance(fFaces[Index].Plane,Position);
+    if BestDistance>Distance then begin
+     BestDistance:=Distance;
+     BestIndex:=Index;
+    end;
+   end;
+  end else begin
+   // Point lies inside convex hull
+  end;
+  result:=Vector3Sub(Position,Vector3ScalarMul(fFaces[BestIndex].Plane.Normal,Distance));
+ end else begin
+  result:=Vector3Origin;
+ end;
+end;
+
+function TKraftConvexHull.GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
 begin
  if (Index>=0) and (Index<fCountVertices) then begin
   result:=fVertices[Index].Position;
@@ -18334,9 +20620,9 @@ begin
  end;
 end;
 
-function TKraftConvexHull.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint;
+function TKraftConvexHull.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
 var Normal:TKraftVector3;
-    Index,BestVertexIndex,NewVertexIndex,CurrentVertexIndex:longint;
+    Index,BestVertexIndex,NewVertexIndex,CurrentVertexIndex:TKraftInt32;
     BestDistance,NewDistance,CurrentDistance:TKraftScalar;
     Vertex,CurrentVertex:PKraftConvexHullVertex;
 begin
@@ -18380,7 +20666,7 @@ end;
 
 function TKraftConvexHull.GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
 var Normal:TKraftVector3;
-    Index,BestVertexIndex,NewVertexIndex,CurrentVertexIndex:longint;
+    Index,BestVertexIndex,NewVertexIndex,CurrentVertexIndex:TKraftInt32;
     BestDistance,NewDistance,CurrentDistance:TKraftScalar;
     Vertex,CurrentVertex:PKraftConvexHullVertex;
 begin
@@ -18438,14 +20724,14 @@ begin
  fTriangles:=nil;
  fCountTriangles:=0;
 
- fNodes:=nil;
- fCountNodes:=0;
+ fTreeNodes:=nil;
+ fCountTreeNodes:=0;
 
  fSkipListNodes:=nil;
  fCountSkipListNodes:=0;
 
  fDoubleSided:=true;
- 
+
  if assigned(fPhysics.fMeshLast) then begin
   fPhysics.fMeshLast.fNext:=self;
   fPrevious:=fPhysics.fMeshLast;
@@ -18456,20 +20742,23 @@ begin
  fPhysics.fMeshLast:=self;
  fNext:=nil;
 
+ fNodeQueue:=nil;
+ fCountActiveWorkers:=0;
+
 end;
 
 destructor TKraftMesh.Destroy;
 begin
 
- SetLength(fVertices,0);
+ fVertices:=nil;
 
- SetLength(fNormals,0);
+ fNormals:=nil;
 
- SetLength(fTriangles,0);
+ fTriangles:=nil;
 
- SetLength(fNodes,0);
+ fTreeNodes:=nil;
 
- SetLength(fSkipListNodes,0);
+ fSkipListNodes:=nil;
 
  if assigned(fPrevious) then begin
   fPrevious.fNext:=fNext;
@@ -18488,7 +20777,276 @@ begin
 
 end;
 
-function TKraftMesh.AddVertex(const AVertex:TKraftVector3):longint;
+procedure TKraftMesh.Clear(const aFreeMemory:boolean);
+begin
+
+ if aFreeMemory then begin
+  fVertices:=nil;
+ end;
+ fCountVertices:=0;
+
+ if aFreeMemory then begin
+  fNormals:=nil;
+ end;
+ fCountNormals:=0;
+
+ if aFreeMemory then begin
+  fTriangles:=nil;
+ end;
+ fCountTriangles:=0;
+
+ if aFreeMemory then begin
+  fTreeNodes:=nil;
+ end;
+ fCountTreeNodes:=0;
+
+ if aFreeMemory then begin
+  fSkipListNodes:=nil;
+ end;
+ fCountSkipListNodes:=0;
+
+ fPhysics.InvalidateShapes;
+
+end;
+
+procedure TKraftMesh.LoadFromStream(const AStream:TStream);
+var Index:TKraftInt32;
+    Flags:TKraftUInt32;
+    Signature:TKraftSignature;
+    FileFormatVersion:TKraftUInt32;
+    Dummy:TKraftScalar;
+    SIMD:boolean;
+begin
+
+ AStream.ReadBuffer(Signature,SizeOf(TKraftSignature));
+ if Signature<>KraftSignatureMesh then begin
+  raise EKraftInvalidSignature.Create('Invalid signature');
+ end;
+
+ AStream.ReadBuffer(FileFormatVersion,SizeOf(TKraftUInt32));
+ if FileFormatVersion<>KraftFileFormatVersion then begin
+  raise EKraftInvalidFileFormatVersion.Create('Invalid file format version');
+ end;
+
+ Flags:=0;
+ AStream.ReadBuffer(Flags,SizeOf(TKraftUInt32));
+ fDoubleSided:=(Flags and 1)<>0;
+ SIMD:=(Flags and 2)<>0;
+
+ if SIMD=KraftSIMD then begin
+
+  AStream.ReadBuffer(fAABB,SizeOf(TKraftAABB));
+
+  AStream.ReadBuffer(fCountVertices,SizeOf(TKraftInt32));
+  SetLength(fVertices,fCountVertices);
+  if fCountVertices>0 then begin
+   AStream.ReadBuffer(fVertices[0],fCountVertices*SizeOf(TKraftVector3));
+  end;
+
+  AStream.ReadBuffer(fCountNormals,SizeOf(TKraftInt32));
+  SetLength(fNormals,fCountNormals);
+  if fCountNormals>0 then begin
+   AStream.ReadBuffer(fNormals[0],fCountNormals*SizeOf(TKraftVector3));
+  end;
+
+  AStream.ReadBuffer(fCountTriangles,SizeOf(TKraftInt32));
+  SetLength(fTriangles,fCountTriangles);
+  if fCountTriangles>0 then begin
+   AStream.ReadBuffer(fTriangles[0],fCountTriangles*SizeOf(TKraftMeshTriangle));
+  end;
+
+  AStream.ReadBuffer(fTreeNodeRoot,SizeOf(TKraftInt32));
+  AStream.ReadBuffer(fCountTreeNodes,SizeOf(TKraftInt32));
+  SetLength(fTreeNodes,fCountTreeNodes);
+  if fCountTreeNodes>0 then begin
+   AStream.ReadBuffer(fTreeNodes[0],fCountTreeNodes*SizeOf(TKraftMeshTreeNode));
+  end;
+
+  AStream.ReadBuffer(fCountSkipListNodes,SizeOf(TKraftInt32));
+  SetLength(fSkipListNodes,fCountSkipListNodes);
+  if fCountSkipListNodes>0 then begin
+   AStream.ReadBuffer(fSkipListNodes[0],fCountSkipListNodes*SizeOf(TKraftMeshSkipListNode));
+  end;
+
+ end else begin
+
+  AStream.ReadBuffer(fAABB.Min,3*SizeOf(TKraftScalar));
+  if SIMD then begin
+   AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+  end;
+  AStream.ReadBuffer(fAABB.Max,3*SizeOf(TKraftScalar));
+  if SIMD then begin
+   AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+  end;
+
+  AStream.ReadBuffer(fCountVertices,SizeOf(TKraftInt32));
+  SetLength(fVertices,fCountVertices);
+  for Index:=0 to fCountVertices-1 do begin
+   AStream.ReadBuffer(fVertices[Index],3*SizeOf(TKraftScalar));
+   if SIMD then begin
+    AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+   end;
+  end;
+
+  AStream.ReadBuffer(fCountNormals,SizeOf(TKraftInt32));
+  SetLength(fNormals,fCountNormals);
+  for Index:=0 to fCountNormals-1 do begin
+   AStream.ReadBuffer(fNormals[Index],3*SizeOf(TKraftScalar));
+   if SIMD then begin
+    AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+   end;
+  end;
+
+  AStream.ReadBuffer(fCountTriangles,SizeOf(TKraftInt32));
+  SetLength(fTriangles,fCountTriangles);
+  for Index:=0 to fCountTriangles-1 do begin
+   AStream.ReadBuffer(fTriangles[Index].Next,SizeOf(TKraftInt32));
+   AStream.ReadBuffer(fTriangles[Index].Vertices[0],3*SizeOf(TKraftInt32));
+   AStream.ReadBuffer(fTriangles[Index].Normals[0],3*SizeOf(TKraftInt32));
+   AStream.ReadBuffer(fTriangles[Index].Center,3*SizeOf(TKraftScalar));
+   AStream.ReadBuffer(fTriangles[Index].Plane.Normal,3*SizeOf(TKraftScalar));
+   if SIMD then begin
+    AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+   end;
+   AStream.ReadBuffer(fTriangles[Index].Plane.Distance,SizeOf(TKraftScalar));
+   AStream.ReadBuffer(fTriangles[Index].AABB.Min,3*SizeOf(TKraftScalar));
+   if SIMD then begin
+    AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+   end;
+   AStream.ReadBuffer(fTriangles[Index].AABB.Max,3*SizeOf(TKraftScalar));
+   if SIMD then begin
+    AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+   end;
+  end;
+
+  AStream.ReadBuffer(fTreeNodeRoot,SizeOf(TKraftInt32));
+  AStream.ReadBuffer(fCountTreeNodes,SizeOf(TKraftInt32));
+  SetLength(fTreeNodes,fCountTreeNodes);
+  for Index:=0 to fCountTreeNodes-1 do begin
+   AStream.ReadBuffer(fTreeNodes[Index].FirstLeftChild,2*SizeOf(TKraftInt32));
+   AStream.ReadBuffer(fTreeNodes[Index].FirstTriangleIndex,SizeOf(TKraftInt32));
+   AStream.ReadBuffer(fTreeNodes[Index].CountTriangles,SizeOf(TKraftInt32));
+   AStream.ReadBuffer(fTreeNodes[Index].AABB.Min,3*SizeOf(TKraftScalar));
+   if SIMD then begin
+    AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+   end;
+   AStream.ReadBuffer(fTreeNodes[Index].AABB.Max,3*SizeOf(TKraftScalar));
+   if SIMD then begin
+    AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+   end;
+  end;
+
+  AStream.ReadBuffer(fCountSkipListNodes,SizeOf(TKraftInt32));
+  SetLength(fSkipListNodes,fCountSkipListNodes);
+  for Index:=0 to fCountSkipListNodes-1 do begin
+   AStream.ReadBuffer(fSkipListNodes[Index].SkipToNodeIndex,SizeOf(TKraftInt32));
+   AStream.ReadBuffer(fSkipListNodes[Index].FirstTriangleIndex,SizeOf(TKraftInt32));
+   AStream.ReadBuffer(fSkipListNodes[Index].CountTriangles,SizeOf(TKraftInt32));
+   AStream.ReadBuffer(fSkipListNodes[Index].AABB.Min,3*SizeOf(TKraftScalar));
+   if SIMD then begin
+    AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+   end;
+   AStream.ReadBuffer(fSkipListNodes[Index].AABB.Max,3*SizeOf(TKraftScalar));
+   if SIMD then begin
+    AStream.ReadBuffer(Dummy,SizeOf(TKraftScalar));
+   end;
+  end;
+
+ end;
+
+end;
+
+procedure TKraftMesh.SaveToStream(const AStream:TStream);
+var //Index:TKraftInt32;
+    Flags:TKraftUInt32;
+begin
+
+ AStream.WriteBuffer(KraftSignatureMesh,SizeOf(TKraftSignature));
+
+ AStream.WriteBuffer(KraftFileFormatVersion,SizeOf(TKraftUInt32));
+
+ Flags:=0;
+ if fDoubleSided then begin
+  Flags:=Flags or 1;
+ end;
+ if KraftSIMD then begin
+  Flags:=Flags or 2;
+ end;
+
+ AStream.WriteBuffer(Flags,SizeOf(TKraftUInt32));
+
+ AStream.WriteBuffer(fAABB,SizeOf(TKraftAABB));
+
+ AStream.WriteBuffer(fCountVertices,SizeOf(TKraftInt32));
+ if fCountVertices>0 then begin
+  AStream.WriteBuffer(fVertices[0],fCountVertices*SizeOf(TKraftVector3));
+ end;
+
+ AStream.WriteBuffer(fCountNormals,SizeOf(TKraftInt32));
+ if fCountNormals>0 then begin
+  AStream.WriteBuffer(fNormals[0],fCountNormals*SizeOf(TKraftVector3));
+ end;
+
+ AStream.WriteBuffer(fCountTriangles,SizeOf(TKraftInt32));
+ if fCountTriangles>0 then begin
+  AStream.WriteBuffer(fTriangles[0],fCountTriangles*SizeOf(TKraftMeshTriangle));
+ end;
+
+ AStream.WriteBuffer(fTreeNodeRoot,SizeOf(TKraftInt32));
+ AStream.WriteBuffer(fCountTreeNodes,SizeOf(TKraftInt32));
+ if fCountTreeNodes>0 then begin
+  AStream.WriteBuffer(fTreeNodes[0],fCountTreeNodes*SizeOf(TKraftMeshTreeNode));
+ end;
+
+ AStream.WriteBuffer(fCountSkipListNodes,SizeOf(TKraftInt32));
+ if fCountSkipListNodes>0 then begin
+  AStream.WriteBuffer(fSkipListNodes[0],fCountSkipListNodes*SizeOf(TKraftMeshSkipListNode));
+ end;
+
+{AStream.WriteBuffer(fAABB.Min,3*SizeOf(TKraftScalar));
+ AStream.WriteBuffer(fAABB.Max,3*SizeOf(TKraftScalar));
+
+ AStream.WriteBuffer(fCountVertices,SizeOf(TKraftInt32));
+ for Index:=0 to fCountVertices-1 do begin
+  AStream.WriteBuffer(fVertices[Index],3*SizeOf(TKraftScalar));
+ end;
+
+ AStream.WriteBuffer(fCountNormals,SizeOf(TKraftInt32));
+ for Index:=0 to fCountNormals-1 do begin
+  AStream.WriteBuffer(fNormals[Index],3*SizeOf(TKraftScalar));
+ end;
+
+ AStream.WriteBuffer(fCountTriangles,SizeOf(TKraftInt32));
+ for Index:=0 to fCountTriangles-1 do begin
+  AStream.WriteBuffer(fTriangles[Index].Next,SizeOf(TKraftInt32));
+  AStream.WriteBuffer(fTriangles[Index].Vertices[0],3*SizeOf(TKraftInt32));
+  AStream.WriteBuffer(fTriangles[Index].Normals[0],3*SizeOf(TKraftInt32));
+  AStream.WriteBuffer(fTriangles[Index].Center,3*SizeOf(TKraftScalar));
+  AStream.WriteBuffer(fTriangles[Index].Plane.Normal,3*SizeOf(TKraftScalar));
+  AStream.WriteBuffer(fTriangles[Index].Plane.Distance,SizeOf(TKraftScalar));
+  AStream.WriteBuffer(fTriangles[Index].AABB.Min,3*SizeOf(TKraftScalar));
+  AStream.WriteBuffer(fTriangles[Index].AABB.Max,3*SizeOf(TKraftScalar));
+ end;
+
+ AStream.WriteBuffer(fCountTreeNodes,SizeOf(TKraftInt32));
+ for Index:=0 to fCountTreeNodes-1 do begin
+  AStream.WriteBuffer(fTreeNodes[Index].Children,2*SizeOf(TKraftInt32));
+  AStream.WriteBuffer(fTreeNodes[Index].TriangleIndex,SizeOf(TKraftInt32));
+  AStream.WriteBuffer(fTreeNodes[Index].AABB.Min,3*SizeOf(TKraftScalar));
+  AStream.WriteBuffer(fTreeNodes[Index].AABB.Max,3*SizeOf(TKraftScalar));
+ end;
+
+ AStream.WriteBuffer(fCountSkipListNodes,SizeOf(TKraftInt32));
+ for Index:=0 to fCountSkipListNodes-1 do begin
+  AStream.WriteBuffer(fSkipListNodes[Index].SkipToNodeIndex,SizeOf(TKraftInt32));
+  AStream.WriteBuffer(fSkipListNodes[Index].TriangleIndex,SizeOf(TKraftInt32));
+  AStream.WriteBuffer(fSkipListNodes[Index].AABB.Min,3*SizeOf(TKraftScalar));
+  AStream.WriteBuffer(fSkipListNodes[Index].AABB.Max,3*SizeOf(TKraftScalar));
+ end;//}
+
+end;
+
+function TKraftMesh.AddVertex(const AVertex:TKraftVector3):TKraftInt32;
 begin
  result:=fCountVertices;
  inc(fCountVertices);
@@ -18498,7 +21056,7 @@ begin
  fVertices[result]:=AVertex;
 end;
 
-function TKraftMesh.AddNormal(const ANormal:TKraftVector3):longint;
+function TKraftMesh.AddNormal(const ANormal:TKraftVector3):TKraftInt32;
 begin
  result:=fCountNormals;
  inc(fCountNormals);
@@ -18508,7 +21066,7 @@ begin
  fNormals[result]:=ANormal;
 end;
 
-function TKraftMesh.AddTriangle(const AVertexIndex0,AVertexIndex1,AVertexIndex2:longint;const ANormalIndex0:longint=-1;const ANormalIndex1:longint=-1;ANormalIndex2:longint=-1):longint;
+function TKraftMesh.AddTriangle(const AVertexIndex0,AVertexIndex1,AVertexIndex2:TKraftInt32;const ANormalIndex0:TKraftInt32=-1;const ANormalIndex1:TKraftInt32=-1;ANormalIndex2:TKraftInt32=-1):TKraftInt32;
 var Triangle:PKraftMeshTriangle;
 begin
  result:=fCountTriangles;
@@ -18523,13 +21081,14 @@ begin
  Triangle^.Normals[0]:=ANormalIndex0;
  Triangle^.Normals[1]:=ANormalIndex1;
  Triangle^.Normals[2]:=ANormalIndex2;
+ Triangle^.Center:=Vector3Avg(Vertices[Triangle^.Vertices[0]],Vertices[Triangle^.Vertices[1]],Vertices[Triangle^.Vertices[2]]);
  Triangle^.Plane.Normal:=Vector3NormEx(Vector3Cross(Vector3Sub(fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[0]]),Vector3Sub(fVertices[Triangle^.Vertices[2]],fVertices[Triangle^.Vertices[0]])));
  Triangle^.Plane.Distance:=-Vector3Dot(Triangle^.Plane.Normal,fVertices[Triangle^.Vertices[0]]);
  Triangle^.Next:=-1;
 end;
 
-procedure TKraftMesh.Load(const AVertices:PKraftVector3;const ACountVertices:longint;const ANormals:PKraftVector3;const ACountNormals:longint;const AVertexIndices,ANormalIndices:pointer;const ACountIndices:longint);
-var i:longint;
+procedure TKraftMesh.Load(const AVertices:PKraftVector3;const ACountVertices:TKraftInt32;const ANormals:PKraftVector3;const ACountNormals:TKraftInt32;const AVertexIndices,ANormalIndices:pointer;const ACountIndices:TKraftInt32);
+var i:TKraftInt32;
     Triangle:PKraftMeshTriangle;
     v,n:plongint;
     HasNormals:boolean;
@@ -18580,6 +21139,7 @@ begin
    Triangle^.Normals[1]:=-1;
    Triangle^.Normals[2]:=-1;
   end;
+  Triangle^.Center:=Vector3Avg(Vertices[Triangle^.Vertices[0]],Vertices[Triangle^.Vertices[1]],Vertices[Triangle^.Vertices[2]]);
   Triangle^.Plane.Normal:=Vector3NormEx(Vector3Cross(Vector3Sub(fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[0]]),Vector3Sub(fVertices[Triangle^.Vertices[2]],fVertices[Triangle^.Vertices[0]])));
   Triangle^.Plane.Distance:=-Vector3Dot(Triangle^.Plane.Normal,fVertices[Triangle^.Vertices[0]]);
   Triangle^.Next:=-1;
@@ -18587,11 +21147,11 @@ begin
 
 end;
 
-procedure TKraftMesh.Load(const ASourceData:pointer;const ASourceSize:longint);
+procedure TKraftMesh.Load(const ASourceData:pointer;const ASourceSize:TKraftInt32);
 type TFileSignature=array[0..3] of ansichar;
-var SrcPos:longint;
+var SrcPos:TKraftInt32;
     Signature:TFileSignature;
- function Read(var Dst;DstLen:longword):longword;
+ function Read(var Dst;DstLen:TKraftUInt32):TKraftUInt32;
  begin
   result:=ASourceSize-SrcPos;
   if result>DstLen then begin
@@ -18602,17 +21162,17 @@ var SrcPos:longint;
    inc(SrcPos,result);
   end;
  end;
- function ReadByte:byte;
+ function ReadByte:TKraftUInt8;
  begin
-  Read(result,SizeOf(byte));
+  Read(result,SizeOf(TKraftUInt8));
  end;
- function ReadWord:word;
+ function ReadWord:TKraftUInt16;
  begin
-  Read(result,SizeOf(word));
+  Read(result,SizeOf(TKraftUInt16));
  end;
- function ReadLongWord:longword;
+ function ReadLongWord:TKraftUInt32;
  begin
-  Read(result,SizeOf(longword));
+  Read(result,SizeOf(TKraftUInt32));
  end;
  function ReadFloat:single;
  begin
@@ -18620,11 +21180,11 @@ var SrcPos:longint;
  end;
  procedure LoadPMF;
  type TFace=record
-       Indices:array[0..2] of longword;
+       Indices:array[0..2] of TKraftUInt32;
       end;
       PFaces=^TFaces;
       TFaces=array[0..0] of TFace;
- var Counter:longint;
+ var Counter:TKraftInt32;
      Triangle:PKraftMeshTriangle;
  begin
   fCountTriangles:=ReadLongWord;
@@ -18645,16 +21205,20 @@ var SrcPos:longint;
     fVertices[Counter].x:=ReadFloat;
     fVertices[Counter].y:=ReadFloat;
     fVertices[Counter].z:=ReadFloat;
+{$ifdef SIMD}
+    fVertices[Counter].w:=0.0;
+{$endif}
    end;
    for Counter:=0 to fCountTriangles-1 do begin
     Triangle:=@fTriangles[Counter];
+    Triangle^.Center:=Vector3Avg(Vertices[Triangle^.Vertices[0]],Vertices[Triangle^.Vertices[1]],Vertices[Triangle^.Vertices[2]]);
     Triangle^.Plane.Normal:=Vector3NormEx(Vector3Cross(Vector3Sub(fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[0]]),Vector3Sub(fVertices[Triangle^.Vertices[2]],fVertices[Triangle^.Vertices[0]])));
     Triangle^.Plane.Distance:=-Vector3Dot(Triangle^.Plane.Normal,fVertices[Triangle^.Vertices[0]]);
     Triangle^.Next:=-1;
    end;
   end;
  end;
- function Load3DS(SrcData:pointer;SrcSize:longword):boolean;
+ function Load3DS(SrcData:pointer;SrcSize:TKraftUInt32):boolean;
  const CHUNK_3DS_MAIN=$4d4d;
        CHUNK_3DS_OBJMESH=$3d3d;
        CHUNK_3DS_OBJBLOCK=$4000;
@@ -18672,20 +21236,20 @@ var SrcPos:longint;
       TKraftVector3Array=array[0..0] of TKraftVector3;
       PFace3DS=^TFace3DS;
       TFace3DS=record
-       Indices:array[0..2] of longword;
-       Flags:longword;
-       SmoothGroup:longword;
+       Indices:array[0..2] of TKraftUInt32;
+       Flags:TKraftUInt32;
+       SmoothGroup:TKraftUInt32;
       end;
       PFaces3DS=^TFaces3DS;
       TFaces3DS=array[0..0] of TFace3DS;
       PObject3DSMesh=^TObject3DSMesh;
       TObject3DSMesh=record
        Vertices:PVector3Array;
-       NumVertices:longint;
+       NumVertices:TKraftInt32;
        TexCoords:PVector2Array;
-       NumTexCoords:longint;
+       NumTexCoords:TKraftInt32;
        Faces:PFaces3DS;
-       NumFaces:longint;
+       NumFaces:TKraftInt32;
        Matrix:TKraftMatrix4x4;
       end;
       PObject3DSMeshs=^TObject3DSMeshs;
@@ -18694,16 +21258,16 @@ var SrcPos:longint;
       TObject3DS=record
        Name:PAnsiChar;
        Meshs:PObject3DSMeshs;
-       NumMeshs:longint;
+       NumMeshs:TKraftInt32;
       end;
       PObjects3DS=^TObjects3DS;
       TObjects3DS=array[0..0] of TObject3DS;
- var SrcPos:longword;
-     Signature3DS:word;
-     Size3DS:longword;
+ var SrcPos:TKraftUInt32;
+     Signature3DS:TKraftUInt16;
+     Size3DS:TKraftUInt32;
      Objects3DS:PObjects3DS;
-     NumObjects3DS:longint;
-  function Read(var Dst;DstLen:longword):longword;
+     NumObjects3DS:TKraftInt32;
+  function Read(var Dst;DstLen:TKraftUInt32):TKraftUInt32;
   begin
    result:=SrcSize-SrcPos;
    if result>DstLen then begin
@@ -18714,23 +21278,23 @@ var SrcPos:longint;
     inc(SrcPos,result);
    end;
   end;
-  function ReadByte:byte;
+  function ReadByte:TKraftUInt8;
   begin
-   Read(result,SizeOf(byte));
+   Read(result,SizeOf(TKraftUInt8));
   end;
-  function ReadWord:word;
+  function ReadWord:TKraftUInt16;
   begin
-   Read(result,SizeOf(word));
+   Read(result,SizeOf(TKraftUInt16));
   end;
-  function ReadLongWord:longword;
+  function ReadLongWord:TKraftUInt32;
   begin
-   Read(result,SizeOf(longword));
+   Read(result,SizeOf(TKraftUInt32));
   end;
   function ReadFloat:single;
   begin
    Read(result,SizeOf(single));
   end;
-  procedure ReallocateMemory(var p;Size:longint);
+  procedure ReallocateMemory(var p;Size:TKraftInt32);
   begin
    if assigned(pointer(p)) then begin
     if Size=0 then begin
@@ -18743,8 +21307,8 @@ var SrcPos:longint;
     GetMem(pointer(p),Size);
    end;
   end;
-  function Read3DSChunks(const ParentChunk,Bytes:longword):longword; forward;
-  function Skip3DSString:longword;
+  function Read3DSChunks(const ParentChunk,Bytes:TKraftUInt32):TKraftUInt32; forward;
+  function Skip3DSString:TKraftUInt32;
   var c:ansichar;
   begin
    result:=0;
@@ -18756,9 +21320,9 @@ var SrcPos:longint;
     inc(result);
    end;
   end;
-  function Read3DSString(var p:PAnsiChar):longword;
+  function Read3DSString(var p:PAnsiChar):TKraftUInt32;
   var c:ansichar;
-      OldPos:longword;
+      OldPos:TKraftUInt32;
   begin
    OldPos:=SrcPos;
    result:=0;
@@ -18781,18 +21345,18 @@ var SrcPos:longint;
     inc(result);
    end;
   end;
-  function Read3DSChunk(const ParentChunk:longword):longword;
-  var Chunk:word;
-      Size,i,j:longword;
+  function Read3DSChunk(const ParentChunk:TKraftUInt32):TKraftUInt32;
+  var Chunk:TKraftUInt16;
+      Size,i,j:TKraftUInt32;
       Vertex:PKraftVector3;
       TexCoord:PVector2;
       Face:PFace3DS;
   begin
-   if Read(Chunk,SizeOf(word))<>SizeOf(word) then begin
+   if Read(Chunk,SizeOf(TKraftUInt16))<>SizeOf(TKraftUInt16) then begin
     result:=$80000000;
     exit;
    end;
-   if Read(result,SizeOf(longword))<>SizeOf(longword) then begin
+   if Read(result,SizeOf(TKraftUInt32))<>SizeOf(TKraftUInt32) then begin
     result:=$80000000;
     exit;
    end;
@@ -18846,6 +21410,9 @@ var SrcPos:longint;
         Vertex^.x:=ReadFloat;
         Vertex^.y:=ReadFloat;
         Vertex^.z:=ReadFloat;
+{$ifdef SIMD}
+        Vertex^.w:=0.0;
+{$endif}
         inc(Vertex);
        end;
       end;
@@ -18905,7 +21472,7 @@ var SrcPos:longint;
     end;
    end;
   end;
-  function Read3DSChunks(const ParentChunk,Bytes:longword):longword;
+  function Read3DSChunks(const ParentChunk,Bytes:TKraftUInt32):TKraftUInt32;
   begin
    result:=0;
    while result<Bytes do begin
@@ -18913,7 +21480,7 @@ var SrcPos:longint;
    end;
   end;
   procedure Convert3DS;
-  var i,j,k,h:longint;
+  var i,j,k,h:TKraftInt32;
       v:array[0..2] of TKraftVector3;
       tv:TKraftVector3;
   begin
@@ -18926,6 +21493,9 @@ var SrcPos:longint;
        v[h].x:=tv.x;
        v[h].y:=tv.z;
        v[h].z:=-tv.y;
+{$ifdef SIMD}
+       v[h].w:=0.0;
+{$endif}
       end;
       AddTriangle(AddVertex(v[0]),AddVertex(v[1]),AddVertex(v[2]));
      end;
@@ -18933,7 +21503,7 @@ var SrcPos:longint;
    end;
   end;
   procedure Free3DS;
-  var i,j:longint;
+  var i,j:TKraftInt32;
   begin
    for i:=0 to NumObjects3DS-1 do begin
     for j:=0 to Objects3DS^[i].NumMeshs-1 do begin
@@ -18949,9 +21519,9 @@ var SrcPos:longint;
   result:=false;
   if SrcSize>0 then begin
    SrcPos:=0;
-   if Read(Signature3DS,SizeOf(word))=SizeOf(word) then begin
+   if Read(Signature3DS,SizeOf(TKraftUInt16))=SizeOf(TKraftUInt16) then begin
     if Signature3DS=CHUNK_3DS_MAIN then begin
-     if Read(Size3DS,SizeOf(longword))=SizeOf(longword) then begin
+     if Read(Size3DS,SizeOf(TKraftUInt32))=SizeOf(TKraftUInt32) then begin
       Objects3DS:=nil;
       NumObjects3DS:=0;
       result:=Read3DSChunks(Signature3DS,Size3DS)>0;
@@ -18989,7 +21559,7 @@ begin
 end;
 
 procedure TKraftMesh.Scale(const WithFactor:TKraftScalar);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  for Index:=0 to fCountVertices-1 do begin
   Vector3Scale(fVertices[Index],WithFactor);
@@ -18997,7 +21567,7 @@ begin
 end;
 
 procedure TKraftMesh.Scale(const WithVector:TKraftVector3);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  for Index:=0 to fCountVertices-1 do begin
   Vector3Scale(fVertices[Index],WithVector.x,WithVector.y,WithVector.z);
@@ -19005,7 +21575,7 @@ begin
 end;
 
 procedure TKraftMesh.Transform(const WithMatrix:TKraftMatrix3x3);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  for Index:=0 to fCountVertices-1 do begin
   Vector3MatrixMul(fVertices[Index],WithMatrix);
@@ -19013,16 +21583,262 @@ begin
 end;
 
 procedure TKraftMesh.Transform(const WithMatrix:TKraftMatrix4x4);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  for Index:=0 to fCountVertices-1 do begin
   Vector3MatrixMul(fVertices[Index],WithMatrix);
  end;
 end;
 
+function TKraftMesh.FindBestSplitPlane(const aParentTreeNode:PKraftMeshTreeNode;out aAxis:TKraftInt32;out aSplitPosition:TKraftScalar):TKraftScalar;
+const CountBINs=8;
+type TBIN=record
+      Count:TKraftInt32;
+      Bounds:TKraftAABB;
+     end;
+     PBIN=^TBIN;
+     TBINs=array[0..CountBINs-1] of TBIN;
+var AxisIndex,TriangleIndex,BINIndex,LeftSum,RightSum:TKraftInt32;
+    BoundsMin,BoundsMax,Scale,PlaneCost:TKraftScalar;
+    LeftArea,RightArea:array[0..CountBINs-1] of TKraftScalar;
+    LeftCount,RightCount:array[0..CountBINs-1] of TKraftInt32;
+    LeftBounds,RightBounds:TKraftAABB;
+    Triangle:PKraftMeshTriangle;
+    BINs:TBINs;
+    BIN:PBIN;
+begin
+
+ result:=1e30;
+
+ aAxis:=-1;
+
+ if aParentTreeNode^.CountTriangles>0 then begin
+
+  for AxisIndex:=0 to 2 do begin
+
+   BoundsMin:=1e30;
+   BoundsMax:=-1e30;
+
+   for TriangleIndex:=aParentTreeNode^.FirstTriangleIndex to aParentTreeNode^.FirstTriangleIndex+(aParentTreeNode^.CountTriangles-1) do begin
+    Triangle:=@fTriangles[TriangleIndex];
+    BoundsMin:=Min(BoundsMin,Triangle^.Center.xyz[AxisIndex]);
+    BoundsMax:=Max(BoundsMax,Triangle^.Center.xyz[AxisIndex]);
+   end;
+
+   if BoundsMin<>BoundsMax then begin
+
+    Scale:=CountBINs/(BoundsMax-BoundsMin);
+
+    FillChar(BINs,SizeOf(TBINs),#0);
+
+    for TriangleIndex:=aParentTreeNode^.FirstTriangleIndex to aParentTreeNode^.FirstTriangleIndex+(aParentTreeNode^.CountTriangles-1) do begin
+     Triangle:=@fTriangles[TriangleIndex];
+     BINIndex:=Min(trunc((Triangle^.Center.xyz[AxisIndex]-BoundsMin)*Scale),CountBINs-1);
+     BIN:=@BINs[BINIndex];
+     if BIN^.Count=0 then begin
+      BIN^.Bounds.Min.x:=Min(Min(Vertices[Triangle^.Vertices[0]].x,Vertices[Triangle^.Vertices[1]].x),Vertices[Triangle^.Vertices[2]].x);
+      BIN^.Bounds.Min.y:=Min(Min(Vertices[Triangle^.Vertices[0]].y,Vertices[Triangle^.Vertices[1]].y),Vertices[Triangle^.Vertices[2]].y);
+      BIN^.Bounds.Min.z:=Min(Min(Vertices[Triangle^.Vertices[0]].z,Vertices[Triangle^.Vertices[1]].z),Vertices[Triangle^.Vertices[2]].z);
+      BIN^.Bounds.Max.x:=Max(Max(Vertices[Triangle^.Vertices[0]].x,Vertices[Triangle^.Vertices[1]].x),Vertices[Triangle^.Vertices[2]].x);
+      BIN^.Bounds.Max.y:=Max(Max(Vertices[Triangle^.Vertices[0]].y,Vertices[Triangle^.Vertices[1]].y),Vertices[Triangle^.Vertices[2]].y);
+      BIN^.Bounds.Max.z:=Max(Max(Vertices[Triangle^.Vertices[0]].z,Vertices[Triangle^.Vertices[1]].z),Vertices[Triangle^.Vertices[2]].z);
+     end else begin
+      BIN^.Bounds.Min.x:=Min(BIN^.Bounds.Min.x,Min(Min(Vertices[Triangle^.Vertices[0]].x,Vertices[Triangle^.Vertices[1]].x),Vertices[Triangle^.Vertices[2]].x));
+      BIN^.Bounds.Min.y:=Min(BIN^.Bounds.Min.y,Min(Min(Vertices[Triangle^.Vertices[0]].y,Vertices[Triangle^.Vertices[1]].y),Vertices[Triangle^.Vertices[2]].y));
+      BIN^.Bounds.Min.z:=Min(BIN^.Bounds.Min.z,Min(Min(Vertices[Triangle^.Vertices[0]].z,Vertices[Triangle^.Vertices[1]].z),Vertices[Triangle^.Vertices[2]].z));
+      BIN^.Bounds.Max.x:=Max(BIN^.Bounds.Max.x,Max(Max(Vertices[Triangle^.Vertices[0]].x,Vertices[Triangle^.Vertices[1]].x),Vertices[Triangle^.Vertices[2]].x));
+      BIN^.Bounds.Max.y:=Max(BIN^.Bounds.Max.y,Max(Max(Vertices[Triangle^.Vertices[0]].y,Vertices[Triangle^.Vertices[1]].y),Vertices[Triangle^.Vertices[2]].y));
+      BIN^.Bounds.Max.z:=Max(BIN^.Bounds.Max.z,Max(Max(Vertices[Triangle^.Vertices[0]].z,Vertices[Triangle^.Vertices[1]].z),Vertices[Triangle^.Vertices[2]].z));
+     end;
+{$ifdef SIMD}
+     BIN^.Bounds.Min.w:=0.0;
+     BIN^.Bounds.Max.w:=0.0;
+{$endif}
+     inc(BIN^.Count);
+    end;
+
+    LeftSum:=0;
+    RightSum:=0;
+    for BINIndex:=0 to CountBINs-2 do begin
+
+     BIN:=@BINs[BINIndex];
+     inc(LeftSum,BIN^.Count);
+     LeftCount[BINIndex]:=LeftSum;
+     if BINIndex=0 then begin
+      LeftBounds:=BIN^.Bounds;
+     end else begin
+      LeftBounds:=AABBCombine(LeftBounds,BIN^.Bounds);
+     end;
+     LeftArea[BINIndex]:=AABBArea(LeftBounds);
+
+     BIN:=@BINs[CountBINs-(BINIndex+1)];
+     inc(RightSum,BIN^.Count);
+     RightCount[CountBINs-(BINIndex+2)]:=RightSum;
+     if BINIndex=0 then begin
+      RightBounds:=BIN^.Bounds;
+     end else begin
+      RightBounds:=AABBCombine(RightBounds,BIN^.Bounds);
+     end;
+     RightArea[CountBINs-(BINIndex+2)]:=AABBArea(RightBounds);
+
+    end;
+
+    Scale:=(BoundsMax-BoundsMin)/CountBINs;
+    for BINIndex:=0 to CountBINs-2 do begin
+     PlaneCost:=(LeftCount[BINIndex]*LeftArea[BINIndex])+(RightCount[BINIndex]*RightArea[BINIndex]);
+     if PlaneCost<result then begin
+      result:=PlaneCost;
+      aAxis:=AxisIndex;
+      aSplitPosition:=BoundsMin+((BINIndex+1)*Scale);
+     end;
+    end;
+
+   end;
+
+  end;
+
+ end;
+
+end;
+
+function TKraftMesh.CalculateNodeCost(const aParentTreeNode:PKraftMeshTreeNode):TKraftScalar;
+begin
+ result:=AABBArea(aParentTreeNode^.AABB)*aParentTreeNode^.CountTriangles;
+end;
+
+procedure TKraftMesh.UpdateNodeBounds(const aParentTreeNode:PKraftMeshTreeNode);
+var TriangleIndex:TKraftInt32;
+    Triangle:PKraftMeshTriangle;
+begin
+ if aParentTreeNode^.CountTriangles>0 then begin
+  Triangle:=@fTriangles[aParentTreeNode^.FirstTriangleIndex];
+  aParentTreeNode.AABB.Min.x:=Min(Min(Vertices[Triangle^.Vertices[0]].x,Vertices[Triangle^.Vertices[1]].x),Vertices[Triangle^.Vertices[2]].x);
+  aParentTreeNode.AABB.Min.y:=Min(Min(Vertices[Triangle^.Vertices[0]].y,Vertices[Triangle^.Vertices[1]].y),Vertices[Triangle^.Vertices[2]].y);
+  aParentTreeNode.AABB.Min.z:=Min(Min(Vertices[Triangle^.Vertices[0]].z,Vertices[Triangle^.Vertices[1]].z),Vertices[Triangle^.Vertices[2]].z);
+  aParentTreeNode.AABB.Max.x:=Max(Max(Vertices[Triangle^.Vertices[0]].x,Vertices[Triangle^.Vertices[1]].x),Vertices[Triangle^.Vertices[2]].x);
+  aParentTreeNode.AABB.Max.y:=Max(Max(Vertices[Triangle^.Vertices[0]].y,Vertices[Triangle^.Vertices[1]].y),Vertices[Triangle^.Vertices[2]].y);
+  aParentTreeNode.AABB.Max.z:=Max(Max(Vertices[Triangle^.Vertices[0]].z,Vertices[Triangle^.Vertices[1]].z),Vertices[Triangle^.Vertices[2]].z);
+  for TriangleIndex:=aParentTreeNode^.FirstTriangleIndex+1 to aParentTreeNode^.FirstTriangleIndex+(aParentTreeNode^.CountTriangles-1) do begin
+   Triangle:=@fTriangles[TriangleIndex];
+   aParentTreeNode.AABB.Min.x:=Min(aParentTreeNode.AABB.Min.x,Min(Min(Vertices[Triangle^.Vertices[0]].x,Vertices[Triangle^.Vertices[1]].x),Vertices[Triangle^.Vertices[2]].x));
+   aParentTreeNode.AABB.Min.y:=Min(aParentTreeNode.AABB.Min.y,Min(Min(Vertices[Triangle^.Vertices[0]].y,Vertices[Triangle^.Vertices[1]].y),Vertices[Triangle^.Vertices[2]].y));
+   aParentTreeNode.AABB.Min.z:=Min(aParentTreeNode.AABB.Min.z,Min(Min(Vertices[Triangle^.Vertices[0]].z,Vertices[Triangle^.Vertices[1]].z),Vertices[Triangle^.Vertices[2]].z));
+   aParentTreeNode.AABB.Max.x:=Max(aParentTreeNode.AABB.Max.x,Max(Max(Vertices[Triangle^.Vertices[0]].x,Vertices[Triangle^.Vertices[1]].x),Vertices[Triangle^.Vertices[2]].x));
+   aParentTreeNode.AABB.Max.y:=Max(aParentTreeNode.AABB.Max.y,Max(Max(Vertices[Triangle^.Vertices[0]].y,Vertices[Triangle^.Vertices[1]].y),Vertices[Triangle^.Vertices[2]].y));
+   aParentTreeNode.AABB.Max.z:=Max(aParentTreeNode.AABB.Max.z,Max(Max(Vertices[Triangle^.Vertices[0]].z,Vertices[Triangle^.Vertices[1]].z),Vertices[Triangle^.Vertices[2]].z));
+  end;
+  aParentTreeNode.AABB.Min.x:=aParentTreeNode.AABB.Min.x-EPSILON;
+  aParentTreeNode.AABB.Min.y:=aParentTreeNode.AABB.Min.y-EPSILON;
+  aParentTreeNode.AABB.Min.z:=aParentTreeNode.AABB.Min.z-EPSILON;
+{$ifdef SIMD}
+  aParentTreeNode.AABB.Min.w:=0;
+{$endif}
+  aParentTreeNode.AABB.Max.x:=aParentTreeNode.AABB.Max.x+EPSILON;
+  aParentTreeNode.AABB.Max.y:=aParentTreeNode.AABB.Max.y+EPSILON;
+  aParentTreeNode.AABB.Max.z:=aParentTreeNode.AABB.Max.z+EPSILON;
+{$ifdef SIMD}
+  aParentTreeNode.AABB.Max.w:=0;
+{$endif}
+ end;
+end;
+
+procedure TKraftMesh.ProcessNodeQueue;
+var ParentTreeNodeIndex,AxisIndex,
+    LeftIndex,RightIndex,
+    LeftCount,
+    LeftChildIndex,RightChildIndex:TKraftInt32;
+    SplitPosition,SplitCost:TKraftScalar;
+    ParentTreeNode,ChildTreeNode:PKraftMeshTreeNode;
+    TemporaryTriangle:TKraftMeshTriangle;
+    Added:boolean;
+begin
+ {$ifdef KraftPasMP}while (fCountActiveWorkers<>0) or not fNodeQueue.IsEmpty do{$endif} begin
+
+  Added:=false;
+
+  while fNodeQueue.Dequeue(ParentTreeNodeIndex) do begin
+
+   if not Added then begin
+{$ifdef KraftPasMP}
+    TPasMPInterlocked.Increment(fCountActiveWorkers);
+{$endif}
+    Added:=true;
+   end;
+
+   ParentTreeNode:=@fTreeNodes[ParentTreeNodeIndex];
+   if ParentTreeNode^.CountTriangles>0 then begin
+
+    SplitCost:=FindBestSplitPlane(ParentTreeNode,AxisIndex,SplitPosition);
+    if SplitCost<CalculateNodeCost(ParentTreeNode) then begin
+
+     LeftIndex:=ParentTreeNode^.FirstTriangleIndex;
+     RightIndex:=ParentTreeNode^.FirstTriangleIndex+(ParentTreeNode^.CountTriangles-1);
+     while LeftIndex<=RightIndex do begin
+      if fTriangles[LeftIndex].Center.xyz[AxisIndex]<SplitPosition then begin
+       inc(LeftIndex);
+      end else begin
+       TemporaryTriangle:=fTriangles[LeftIndex];
+       fTriangles[LeftIndex]:=fTriangles[RightIndex];
+       fTriangles[RightIndex]:=TemporaryTriangle;
+       dec(RightIndex);
+      end;
+     end;
+
+     LeftCount:=LeftIndex-ParentTreeNode^.FirstTriangleIndex;
+
+     if (LeftCount<>0) and (LeftCount<>ParentTreeNode^.CountTriangles) then begin
+
+{$ifdef KraftPasMP}
+      LeftChildIndex:=TPasMPInterlocked.Add(fCountTreeNodes,2);
+{$else}
+      LeftChildIndex:=fCountTreeNodes;
+      inc(fCountTreeNodes,2);
+{$endif}
+      RightChildIndex:=LeftChildIndex+1;
+
+      ParentTreeNode^.FirstLeftChild:=LeftChildIndex;
+
+      ChildTreeNode:=@fTreeNodes[LeftChildIndex];
+      ChildTreeNode^.FirstTriangleIndex:=ParentTreeNode^.FirstTriangleIndex;
+      ChildTreeNode^.CountTriangles:=LeftCount;
+      ChildTreeNode^.FirstLeftChild:=-1;
+      UpdateNodeBounds(ChildTreeNode);
+      fNodeQueue.Enqueue(LeftChildIndex);
+
+      ChildTreeNode:=@fTreeNodes[RightChildIndex];
+      ChildTreeNode^.FirstTriangleIndex:=LeftIndex;
+      ChildTreeNode^.CountTriangles:=ParentTreeNode^.CountTriangles-LeftCount;
+      ChildTreeNode^.FirstLeftChild:=-1;
+      UpdateNodeBounds(ChildTreeNode);
+      fNodeQueue.Enqueue(RightChildIndex);
+
+     end;
+
+    end;
+
+   end;
+
+  end;
+
+  if Added then begin
+{$ifdef KraftPasMP}
+   TPasMPInterlocked.Decrement(fCountActiveWorkers);
+{$endif}
+  end;
+
+ end;
+end;
+
+{$ifdef KraftPasMP}
+procedure TKraftMesh.BuildJob(const Job:PPasMPJob;const ThreadIndex:TPasMPInt32);
+begin
+ ProcessNodeQueue;
+end;
+{$endif}
+
 procedure TKraftMesh.CalculateNormals;
-var TriangleIndex,NormalIndex,Counter:longint;
-    NormalCounts:array of longint;
+var TriangleIndex,NormalIndex,Counter:TKraftInt32;
+    NormalCounts:TKraftInt32Array;
     Triangle:PKraftMeshTriangle;
 begin
  NormalCounts:=nil;
@@ -19058,34 +21874,31 @@ begin
 end;
 
 procedure TKraftMesh.Finish;
-type PAABBTreeNode=^TAABBTreeNode;
-     TAABBTreeNode=record
-      AABB:TKraftAABB;
-      Children:array[0..1] of longint;
-      TriangleIndex:longint;
-     end;
-     TAABBTreeNodes=array of TAABBTreeNode;
-var Counter,StackPointer,CurrentNodeIndex,LeftCount,RightCount,ParentCount,AxisCounter,Axis,BestAxis,TriangleIndex,
-    Balance,BestBalance,NextTriangleIndex,LeftNodeIndex,RightNodeIndex,TargetNodeIndex,Count,Root,CountNodes,Index,
-    NodeID,Pass,NewStackCapacity:longint;
-    Stack:array of longint;
-    Points:array[0..2] of array of TKraftScalar;
-    Center,Median:TKraftVector3;
-    LeftAABB,RightAABB:TKraftAABB;
-    Nodes:TAABBTreeNodes;
-    Node:PAABBTreeNode;
-    SkipListNode:PKraftMeshSkipListNode;
+var Index{$ifdef KraftPasMP},JobIndex{$endif},TreeNodeIndex,SkipListNodeIndex,
+    StackPointer,VertexIndex,CountNewVertices,CountNewNormals:TKraftInt32;
     Triangle:PKraftMeshTriangle;
-    TriangleAABBs:array of TKraftAABB;
-    CurrentAABB:PKraftAABB;
     v0,v1,v2:PKraftVector3;
+    TreeNode:PKraftMeshTreeNode;
+{$ifdef KraftPasMP}
+    Jobs:array of PPasMPJob;
+{$endif}
+    Stack:array of TKraftUInt64;
+    StackItem:TKraftUInt64;
+    SkipListNode:PKraftMeshSkipListNode;
+    SkipListNodeMap:TKraftInt32Array;
+    NewVertices:TKraftVector3Array;
+    NewNormals:TKraftVector3Array;
+    VertexReindexMap:TKraftInt32Array;
+    NormalReindexMap:TKraftInt32Array;
 begin
+
  if length(fVertices)<>fCountVertices then begin
   SetLength(fVertices,fCountVertices);
  end;
  if length(fTriangles)<>fCountTriangles then begin
   SetLength(fTriangles,fCountTriangles);
  end;
+
  for Index:=0 to fCountTriangles-1 do begin
   Triangle:=@fTriangles[Index];
   if (Triangle^.Normals[0]<0) or (Triangle^.Normals[1]<0) or (Triangle^.Normals[2]<0) then begin
@@ -19093,300 +21906,214 @@ begin
    break;
   end;
  end;
+
  if fCountSkipListNodes=0 then begin
+
+  for Index:=0 to fCountTriangles-1 do begin
+   Triangle:=@fTriangles[Index];
+   v0:=@fVertices[Triangle^.Vertices[0]];
+   v1:=@fVertices[Triangle^.Vertices[1]];
+   v2:=@fVertices[Triangle^.Vertices[2]];
+   Triangle^.Center:=Vector3Avg(v0^,v1^,v2^);
+   Triangle^.AABB.Min.x:=Min(Min(v0^.x,v1^.x),v2^.x)-EPSILON;
+   Triangle^.AABB.Min.y:=Min(Min(v0^.y,v1^.y),v2^.y)-EPSILON;
+   Triangle^.AABB.Min.z:=Min(Min(v0^.z,v1^.z),v2^.z)-EPSILON;
+{$ifdef SIMD}
+   Triangle^.AABB.Min.w:=0.0;
+{$endif}
+   Triangle^.AABB.Max.x:=Max(Max(v0^.x,v1^.x),v2^.x)+EPSILON;
+   Triangle^.AABB.Max.y:=Max(Max(v0^.y,v1^.y),v2^.y)+EPSILON;
+   Triangle^.AABB.Max.z:=Max(Max(v0^.z,v1^.z),v2^.z)+EPSILON;
+{$ifdef SIMD}
+   Triangle^.AABB.Max.w:=0.0;
+{$endif}
+   if Index=0 then begin
+    fAABB:=Triangle^.AABB;
+   end else begin
+    fAABB:=AABBCombine(fAABB,Triangle^.AABB);
+   end;
+  end;
+
+  if length(fTreeNodes)<=Max(1,length(fTriangles)) then begin
+   SetLength(fTreeNodes,Max(1,length(fTriangles)*2));
+  end;
+
+  fCountTreeNodes:=1;
+  fTreeNodeRoot:=0;
+  TreeNode:=@fTreeNodes[fTreeNodeRoot];
+  TreeNode^.AABB:=fAABB;
+  TreeNode^.FirstLeftChild:=-1;
   if fCountTriangles>0 then begin
-   Stack:=nil;
-   Nodes:=nil;
-   Points[0]:=nil;
-   Points[1]:=nil;
-   Points[2]:=nil;
-   TriangleAABBs:=nil;
-   try
-    SetLength(TriangleAABBs,fCountTriangles);
-    for Index:=0 to fCountTriangles-1 do begin
-     Triangle:=@fTriangles[Index];
-     v0:=@fVertices[Triangle^.Vertices[0]];
-     v1:=@fVertices[Triangle^.Vertices[1]];
-     v2:=@fVertices[Triangle^.Vertices[2]];
-     CurrentAABB:=@TriangleAABBs[Index];
-     CurrentAABB^.Min.x:=Min(Min(v0^.x,v1^.x),v2^.x)-EPSILON;
-     CurrentAABB^.Min.y:=Min(Min(v0^.y,v1^.y),v2^.y)-EPSILON;
-     CurrentAABB^.Min.z:=Min(Min(v0^.z,v1^.z),v2^.z)-EPSILON;
-     CurrentAABB^.Max.x:=Max(Max(v0^.x,v1^.x),v2^.x)+EPSILON;
-     CurrentAABB^.Max.y:=Max(Max(v0^.y,v1^.y),v2^.y)+EPSILON;
-     CurrentAABB^.Max.z:=Max(Max(v0^.z,v1^.z),v2^.z)+EPSILON;
-     Triangle^.AABB:=TriangleAABBs[Index];
-    end;
-    Root:=0;
-    CountNodes:=1;
-    SetLength(Nodes,Max(CountNodes,fCountTriangles));
-    SetLength(Points[0],fCountTriangles*6);
-    SetLength(Points[1],fCountTriangles*6);
-    SetLength(Points[2],fCountTriangles*6);
-    Nodes[0].AABB:=TriangleAABBs[0];
-    for Counter:=1 to fCountTriangles-1 do begin
-     Nodes[0].AABB:=AABBCombine(Nodes[0].AABB,TriangleAABBs[Counter]);
-    end;
-    for Counter:=0 to fCountTriangles-2 do begin
-     fTriangles[Counter].Next:=Counter+1;
-    end;
-    fTriangles[fCountTriangles-1].Next:=-1;
-    Nodes[0].TriangleIndex:=0;
-    Nodes[0].Children[0]:=-1;
-    Nodes[0].Children[1]:=-1;
-    SetLength(Stack,16);
-    Stack[0]:=0;
-    StackPointer:=1;
-    while StackPointer>0 do begin
-     dec(StackPointer);
-     CurrentNodeIndex:=Stack[StackPointer];
-     if (CurrentNodeIndex>=0) and (Nodes[CurrentNodeIndex].TriangleIndex>=0) then begin
-      TriangleIndex:=Nodes[CurrentNodeIndex].TriangleIndex;
-      Nodes[CurrentNodeIndex].AABB:=TriangleAABBs[TriangleIndex];
-      TriangleIndex:=fTriangles[TriangleIndex].Next;
-      ParentCount:=1;
-      while TriangleIndex>=0 do begin
-       Nodes[CurrentNodeIndex].AABB:=AABBCombine(Nodes[CurrentNodeIndex].AABB,TriangleAABBs[TriangleIndex]);
-       inc(ParentCount);
-       TriangleIndex:=fTriangles[TriangleIndex].Next;
+   TreeNode^.FirstTriangleIndex:=0;
+   TreeNode^.CountTriangles:=fCountTriangles;
+   if fCountTriangles>=MaximumTrianglesPerNode then begin
+    fNodeQueue:=TKraftMeshNodeQueue.Create;
+    try
+     fNodeQueue.Clear;
+     fNodeQueue.Enqueue(0);
+     fCountActiveWorkers:=0;
+{$ifdef KraftPasMP}if assigned(fPhysics.fPasMP) and (fPhysics.fPasMP.CountJobWorkerThreads>0) then begin
+      Jobs:=nil;
+      try
+       SetLength(Jobs,fPhysics.fPasMP.CountJobWorkerThreads);
+       for JobIndex:=0 to length(Jobs)-1 do begin
+        Jobs[JobIndex]:=fPhysics.fPasMP.Acquire(BuildJob,self,nil,0,0);
+       end;
+       fPhysics.fPasMP.Invoke(Jobs);
+      finally
+       Jobs:=nil;
       end;
-      if ParentCount>3 then begin
-       Center:=Vector3Avg(Nodes[CurrentNodeIndex].AABB.Min,Nodes[CurrentNodeIndex].AABB.Max);
-       TriangleIndex:=Nodes[CurrentNodeIndex].TriangleIndex;
-       Count:=0;
-       while TriangleIndex>=0 do begin
-        v0:=@fVertices[fTriangles[TriangleIndex].Vertices[0]];
-        v1:=@fVertices[fTriangles[TriangleIndex].Vertices[1]];
-        v2:=@fVertices[fTriangles[TriangleIndex].Vertices[2]];
-        Points[0,Count]:=v0^.x;
-        Points[1,Count]:=v0^.y;
-        Points[2,Count]:=v0^.z;
-        Points[0,Count+1]:=v1^.x;
-        Points[1,Count+1]:=v1^.y;
-        Points[2,Count+1]:=v1^.z;
-        Points[0,Count+2]:=v2^.x;
-        Points[1,Count+2]:=v2^.y;
-        Points[2,Count+2]:=v2^.z;
-        inc(Count,3);
-        TriangleIndex:=fTriangles[TriangleIndex].Next;
-       end;
-       if Count>1 then begin
-        DirectIntroSort(@Points[0,0],0,Count-1,SizeOf(TKraftScalar),@CompareFloat);
-        DirectIntroSort(@Points[0,1],0,Count-1,SizeOf(TKraftScalar),@CompareFloat);
-        DirectIntroSort(@Points[0,2],0,Count-1,SizeOf(TKraftScalar),@CompareFloat);
-        Median.x:=Points[0,Count shr 1];
-        Median.y:=Points[1,Count shr 1];
-        Median.z:=Points[2,Count shr 1];
-       end else begin
-        Median:=Center;
-       end;
-       BestAxis:=-1;
-       BestBalance:=$7fffffff;
-       for AxisCounter:=0 to 5 do begin
-        if AxisCounter>2 then begin
-         Axis:=AxisCounter-3;
-        end else begin
-         Axis:=AxisCounter;
-        end;
-        LeftCount:=0;
-        RightCount:=0;
-        LeftAABB:=Nodes[CurrentNodeIndex].AABB;
-        RightAABB:=Nodes[CurrentNodeIndex].AABB;
-        if AxisCounter>2 then begin
-         LeftAABB.Max.xyz[Axis]:=Median.xyz[Axis];
-         RightAABB.Min.xyz[Axis]:=Median.xyz[Axis];
-        end else begin
-         LeftAABB.Max.xyz[Axis]:=Center.xyz[Axis];
-         RightAABB.Min.xyz[Axis]:=Center.xyz[Axis];
-        end;
-        TriangleIndex:=Nodes[CurrentNodeIndex].TriangleIndex;
-        while TriangleIndex>=0 do begin
-         if Vector3Avg(TriangleAABBs[TriangleIndex].Min,TriangleAABBs[TriangleIndex].Max).xyz[Axis]<RightAABB.Min.xyz[Axis] then begin
-          inc(LeftCount);
-         end else begin
-          inc(RightCount);
-         end;
-         TriangleIndex:=fTriangles[TriangleIndex].Next;
-        end;
-        if (LeftCount>0) and (RightCount>0) then begin
-         Balance:=abs(RightCount-LeftCount);
-         if BestBalance>Balance then begin
-          BestBalance:=Balance;
-          BestAxis:=AxisCounter;
-         end;
-        end;
-       end;
-       if BestAxis>=0 then begin
-        LeftNodeIndex:=CountNodes;
-        RightNodeIndex:=CountNodes+1;
-        inc(CountNodes,2);
-        if CountNodes>=length(Nodes) then begin
-         SetLength(Nodes,RoundUpToPowerOfTwo(CountNodes));
-        end;
-        LeftAABB:=Nodes[CurrentNodeIndex].AABB;
-        RightAABB:=Nodes[CurrentNodeIndex].AABB;
-        TriangleIndex:=Nodes[CurrentNodeIndex].TriangleIndex;
-        Nodes[LeftNodeIndex].TriangleIndex:=-1;
-        Nodes[RightNodeIndex].TriangleIndex:=-1;
-        Nodes[CurrentNodeIndex].TriangleIndex:=-1;
-        if BestAxis>2 then begin
-         dec(BestAxis,3);
-         LeftAABB.Max.xyz[BestAxis]:=Median.xyz[BestAxis];
-         RightAABB.Min.xyz[BestAxis]:=Median.xyz[BestAxis];
-        end else begin
-         LeftAABB.Max.xyz[BestAxis]:=Center.xyz[BestAxis];
-         RightAABB.Min.xyz[BestAxis]:=Center.xyz[BestAxis];
-        end;
-        Nodes[LeftNodeIndex].AABB:=LeftAABB;
-        Nodes[RightNodeIndex].AABB:=RightAABB;
-        while TriangleIndex>=0 do begin
-         NextTriangleIndex:=fTriangles[TriangleIndex].Next;
-         if Vector3Avg(TriangleAABBs[TriangleIndex].Min,TriangleAABBs[TriangleIndex].Max).xyz[BestAxis]<RightAABB.Min.xyz[BestAxis] then begin
-          TargetNodeIndex:=LeftNodeIndex;
-         end else begin
-          TargetNodeIndex:=RightNodeIndex;
-         end;
-         fTriangles[TriangleIndex].Next:=Nodes[TargetNodeIndex].TriangleIndex;
-         if Nodes[TargetNodeIndex].TriangleIndex<0 then begin
-          Nodes[TargetNodeIndex].AABB:=TriangleAABBs[TriangleIndex];
-         end else begin
-          Nodes[TargetNodeIndex].AABB:=AABBCombine(Nodes[TargetNodeIndex].AABB,TriangleAABBs[TriangleIndex]);
-         end;
-         Nodes[TargetNodeIndex].TriangleIndex:=TriangleIndex;
-         TriangleIndex:=NextTriangleIndex;
-        end;
-        Nodes[CurrentNodeIndex].Children[0]:=LeftNodeIndex;
-        Nodes[CurrentNodeIndex].Children[1]:=RightNodeIndex;
-        Nodes[LeftNodeIndex].Children[0]:=-1;
-        Nodes[LeftNodeIndex].Children[1]:=-1;
-        Nodes[RightNodeIndex].Children[0]:=-1;
-        Nodes[RightNodeIndex].Children[1]:=-1;
-        if (StackPointer+2)>=length(Stack) then begin
-         SetLength(Stack,RoundUpToPowerOfTwo(StackPointer+2));
-        end;
-        Stack[StackPointer+0]:=RightNodeIndex;
-        Stack[StackPointer+1]:=LeftNodeIndex;
-        inc(StackPointer,2);
-       end;
-      end;
+     end else{$endif}begin
+      ProcessNodeQueue;
      end;
+    finally
+     FreeAndNil(fNodeQueue);
     end;
-    SetLength(Nodes,CountNodes);
-    begin
-     fCountNodes:=CountNodes;
-     fCountSkipListNodes:=0;
-     if Root>=0 then begin
-      begin
-       // Pass 1 - Counting
-       NewStackCapacity:=RoundUpToPowerOfTwo(CountNodes*4);
-       if NewStackCapacity>length(Stack) then begin
-        SetLength(Stack,NewStackCapacity);
-       end;
-       Stack[0]:=Root;
-       StackPointer:=1;
-       while StackPointer>0 do begin
-        dec(StackPointer);
-        NodeID:=Stack[StackPointer];
-        if (NodeID>=0) and (NodeID<CountNodes) then begin
-         Node:=@Nodes[NodeID];
-         inc(fCountSkipListNodes);
-         if Node^.Children[0]>=0 then begin
-          NewStackCapacity:=RoundUpToPowerOfTwo(StackPointer+2);
-          if NewStackCapacity>length(Stack) then begin
-           SetLength(Stack,NewStackCapacity);
-          end;
-          Stack[StackPointer+0]:=Node^.Children[1];
-          Stack[StackPointer+1]:=Node^.Children[0];
-          inc(StackPointer,2);
-         end;
-        end;
-       end;
-      end;
-      begin
-       // Pass 2 - Resize arrays
-       SetLength(fNodes,fCountNodes);
-       SetLength(fSkipListNodes,fCountSkipListNodes);
-      end;
-      begin
-       // Pass 3 - Fill arrays
-       for Index:=0 to CountNodes-1 do begin
-        Node:=@Nodes[Index];
-        fNodes[Index].Children[0]:=Node^.Children[0];
-        fNodes[Index].Children[1]:=Node^.Children[1];
-        fNodes[Index].TriangleIndex:=Node^.TriangleIndex;
-        fNodes[Index].AABB:=Node^.AABB;
-       end;          
-       fCountSkipListNodes:=0;
-       Stack[0]:=Root;
-       Stack[1]:=0;
-       Stack[2]:=0;
-       StackPointer:=3;
-       while StackPointer>0 do begin
-        dec(StackPointer,3);
-        NodeID:=Stack[StackPointer];
-        Pass:=Stack[StackPointer+1];
-        Index:=Stack[StackPointer+2];
-        if (NodeID>=0) and (NodeID<CountNodes) then begin
-         Node:=@Nodes[NodeID];
-         case Pass of
-          0:begin
-           Index:=fCountSkipListNodes;
-           inc(fCountSkipListNodes);
-           SkipListNode:=@fSkipListNodes[Index];
-           SkipListNode^.AABB.Min:=Node^.AABB.Min;
-           SkipListNode^.AABB.Max:=Node^.AABB.Max;
-           SkipListNode^.SkipToNodeIndex:=-1;
-           if Node^.TriangleIndex>=0 then begin
-            SkipListNode^.TriangleIndex:=Node^.TriangleIndex;
-           end else begin
-            SkipListNode^.TriangleIndex:=-1;
-           end;
-           if Node^.Children[0]>=0 then begin
-            NewStackCapacity:=RoundUpToPowerOfTwo(StackPointer+9);
-            if NewStackCapacity>length(Stack) then begin
-             SetLength(Stack,NewStackCapacity);
-            end;
-            Stack[StackPointer+0]:=NodeID;
-            Stack[StackPointer+1]:=1;
-            Stack[StackPointer+2]:=Index;
-            Stack[StackPointer+3]:=Node^.Children[1];
-            Stack[StackPointer+4]:=0;
-            Stack[StackPointer+5]:=0;
-            Stack[StackPointer+6]:=Node^.Children[0];
-            Stack[StackPointer+7]:=0;
-            Stack[StackPointer+8]:=0;
-            inc(StackPointer,9);
-           end else begin
-            NewStackCapacity:=RoundUpToPowerOfTwo(StackPointer+3);
-            if NewStackCapacity>length(Stack) then begin
-             SetLength(Stack,NewStackCapacity);
-            end;
-            Stack[StackPointer+0]:=NodeID;
-            Stack[StackPointer+1]:=1;
-            Stack[StackPointer+2]:=Index;
-            inc(StackPointer,3);
-           end;
-          end;
-          1:begin
-           SkipListNode:=@fSkipListNodes[Index];
-           SkipListNode^.SkipToNodeIndex:=fCountSkipListNodes;
-          end;
-         end;
-        end;
-       end;
-      end;
-     end;
-    end;
-   finally
-    SetLength(Stack,0);
    end;
   end else begin
-   SetLength(TriangleAABBs,0);
-   SetLength(Nodes,0);
-   SetLength(Points[0],0);
-   SetLength(Points[1],0);
-   SetLength(Points[2],0);
+   TreeNode^.FirstTriangleIndex:=-1;
+   TreeNode^.CountTriangles:=0;
   end;
+
+  SetLength(fTreeNodes,fCountTreeNodes);
+
+  Stack:=nil;
+  try
+   SkipListNodeMap:=nil;
+   try
+    try
+     SetLength(SkipListNodeMap,fCountTreeNodes+((fCountTreeNodes+1) shr 1));
+     if length(fSkipListNodes)<=fCountTreeNodes then begin
+      SetLength(fSkipListNodes,fCountTreeNodes+((fCountTreeNodes+1) shr 1));
+     end;
+     fCountSkipListNodes:=0;
+     SetLength(Stack,8);
+     Stack[0]:=(TKraftUInt64(fTreeNodeRoot) shl 1) or 0;
+     StackPointer:=1;
+     while StackPointer>0 do begin
+      dec(StackPointer);
+      StackItem:=Stack[StackPointer];
+      TreeNodeIndex:=StackItem shr 1;
+      TreeNode:=@fTreeNodes[TreeNodeIndex];
+      case StackItem and 1 of
+       0:begin
+        SkipListNodeIndex:=fCountSkipListNodes;
+        inc(fCountSkipListNodes);
+        SkipListNode:=@fSkipListNodes[SkipListNodeIndex];
+        SkipListNodeMap[TreeNodeIndex]:=SkipListNodeIndex;
+        SkipListNode^.AABB:=TreeNode^.AABB;
+        if TreeNode^.FirstLeftChild>=0 then begin
+         // No leaf
+         SkipListNode^.FirstTriangleIndex:=-1;
+         SkipListNode^.CountTriangles:=0;
+        end else begin
+         // Leaf
+         SkipListNode^.FirstTriangleIndex:=TreeNode^.FirstTriangleIndex;
+         SkipListNode^.CountTriangles:=TreeNode^.CountTriangles;
+        end;
+        SkipListNode^.SkipToNodeIndex:=-1;
+        begin
+         if length(Stack)<=StackPointer then begin
+          SetLength(Stack,(StackPointer+1)+((StackPointer+1) shr 1));
+         end;
+         Stack[StackPointer]:=(TKraftUInt64(TreeNodeIndex) shl 1) or 1;
+         inc(StackPointer);
+        end;
+        if TreeNode^.FirstLeftChild>=0 then begin
+         if length(Stack)<=(StackPointer+1) then begin
+          SetLength(Stack,(StackPointer+2)+((StackPointer+2) shr 1));
+         end;
+         Stack[StackPointer]:=(TKraftUInt64(TreeNode^.FirstLeftChild+1) shl 1) or 0;
+         Stack[StackPointer+1]:=(TKraftUInt64(TreeNode^.FirstLeftChild+0) shl 1) or 0;
+         inc(StackPointer,2);
+        end;
+       end;
+       else {1:}begin
+        SkipListNodeIndex:=SkipListNodeMap[TreeNodeIndex];
+        fSkipListNodes[SkipListNodeIndex].SkipToNodeIndex:=fCountSkipListNodes;
+       end;
+      end;
+     end;
+    finally
+     SetLength(fSkipListNodes,fCountSkipListNodes);
+    end;
+   finally
+    SkipListNodeMap:=nil;
+   end;
+  finally
+   Stack:=nil;
+  end;
+
+  // Reorder vertices and normals by triangle access order for better cache locality
+  if fCountTriangles>0 then begin
+
+   NewVertices:=nil;
+   NewNormals:=nil;
+   VertexReindexMap:=nil;
+   NormalReindexMap:=nil;
+   try
+    
+    // Allocate the temporary array for the new vertices and reindex map with respect to the old vertices  
+    SetLength(NewVertices,fCountVertices);
+    SetLength(VertexReindexMap,fCountVertices);
+    for Index:=0 to fCountVertices-1 do begin
+     VertexReindexMap[Index]:=-1;     
+    end;
+    
+    // Allocate the temporary array for the new normals and reindex map with respect to the old normals
+    SetLength(NewNormals,fCountNormals);
+    SetLength(NormalReindexMap,fCountNormals);
+    for Index:=0 to fCountNormals-1 do begin
+     NormalReindexMap[Index]:=-1;     
+    end;
+
+    // Do the actual reorder work
+
+    CountNewVertices:=0;
+    CountNewNormals:=0;
+
+    for Index:=0 to fCountTriangles-1 do begin
+
+     Triangle:=@fTriangles[Index];
+
+     for VertexIndex:=0 to 2 do begin
+
+      if Triangle^.Vertices[VertexIndex]>=0 then begin
+       if VertexReindexMap[Triangle^.Vertices[VertexIndex]]<0 then begin
+        VertexReindexMap[Triangle^.Vertices[VertexIndex]]:=CountNewVertices;
+        NewVertices[CountNewVertices]:=fVertices[Triangle^.Vertices[VertexIndex]];
+        inc(CountNewVertices);
+       end;
+       Triangle^.Vertices[VertexIndex]:=VertexReindexMap[Triangle^.Vertices[VertexIndex]];
+      end;
+
+      if Triangle^.Normals[VertexIndex]>=0 then begin
+       if NormalReindexMap[Triangle^.Normals[VertexIndex]]<0 then begin
+        NormalReindexMap[Triangle^.Normals[VertexIndex]]:=CountNewNormals;
+        NewNormals[CountNewNormals]:=fNormals[Triangle^.Normals[VertexIndex]];
+        inc(CountNewNormals);
+       end;
+       Triangle^.Normals[VertexIndex]:=NormalReindexMap[Triangle^.Normals[VertexIndex]];
+      end;
+
+     end;
+
+    end;
+
+    // Replace the old vertices and normals with the new ones
+    fVertices:=NewVertices;
+    fNormals:=NewNormals;
+
+   finally
+    NewVertices:=nil;
+    NewNormals:=nil;
+    VertexReindexMap:=nil;
+    NormalReindexMap:=nil;
+   end; 
+  
+  end;  
+
+  // Calculate the global AABB for all vertices 
   for Index:=0 to fCountVertices-1 do begin
    if Index=0 then begin
     fAABB.Min:=fVertices[Index];
@@ -19395,26 +22122,28 @@ begin
     fAABB:=AABBCombineVector3(fAABB,fVertices[Index]);
    end;
   end;
+
  end;
+
 end;
 
-function TKraftMesh.GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
+function TKraftMesh.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
 {$ifdef KraftSingleThreadedUsage}
 type PStackItem=^TStackItem;
      TStackItem=record
-      NodeIndex:longint;
+      NodeIndex:TKraftInt32;
       SquaredDistance:TKraftScalar;
      end;
      TStackItems=array[0..31] of TStackItem;
 var LocalStack:TStackItems;
-    LocalStackPointer,TriangleIndex:longint;
+    LocalStackPointer,TriangleIndex:TKraftInt32;
     Node:PKraftMeshNode;
     Triangle,BestTriangle:PKraftMeshTriangle;
     StackItem:PStackItem;
     SquaredDistances:array[0..1] of TKraftScalar;
     SquaredDistance,SquaredThickness,SquaredThicknessEpsilon:TKraftScalar;
 begin
- if fCountNodes>0 then begin
+ if fCountTreeNodes>0 then begin
   result:=MAX_SCALAR;
   BestTriangle:=nil;
   if fDoubleSided then begin
@@ -19426,71 +22155,52 @@ begin
   LocalStackPointer:=0;
   StackItem:=@LocalStack[LocalStackPointer];
   inc(LocalStackPointer);
-  StackItem^.NodeIndex:=0;
-  StackItem^.SquaredDistance:=SquaredDistanceFromPointToAABB(fNodes[0].AABB,Position);
+  StackItem^.NodeIndex:=fTreeNodeRoot;
+  StackItem^.SquaredDistance:=SquaredDistanceFromPointToAABB(fTreeNodes[fTreeNodeRoot].AABB,Position);
   while LocalStackPointer>0 do begin
    dec(LocalStackPointer);
    StackItem:=@LocalStack[LocalStackPointer];
    if (StackItem^.SquaredDistance-SquaredThicknessEpsilon)<result then begin
     if StackItem^.NodeIndex>=0 then begin
-     Node:=@fNodes[StackItem^.NodeIndex];
-     TriangleIndex:=Node^.TriangleIndex;
-     while TriangleIndex>=0 do begin
-      Triangle:=@fTriangles[TriangleIndex];
-      SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
-      if result>SquaredDistance then begin
-       result:=SquaredDistance;
-       BestTriangle:=Triangle;
+     Node:=@fTreeNodes[StackItem^.NodeIndex];
+     if Node^.CountTriangles>0 then begin
+      for TriangleIndex:=Node^.FirstTriangleIndex to Node^.FirstTriangleIndex+(Node^.CountTriangles-1) do begin
+       Triangle:=@fTriangles[TriangleIndex];
+       SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
+       if result>SquaredDistance then begin
+        result:=SquaredDistance;
+        BestTriangle:=Triangle;
+       end;
       end;
-      TriangleIndex:=Triangle^.Next;
      end;
-     if (Node^.Children[0]>=0) and (Node^.Children[1]>=0) then begin
-      SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fNodes[Node^.Children[0]].AABB,Position);
-      SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fNodes[Node^.Children[1]].AABB,Position);
+     if Node^.FirstLeftChild>=0 then begin
+      SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild].AABB,Position);
+      SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild+1].AABB,Position);
       if SquaredDistances[0]<SquaredDistances[1] then begin
        if (SquaredDistances[0]-SquaredThicknessEpsilon)<result then begin
         StackItem:=@LocalStack[LocalStackPointer];
         inc(LocalStackPointer);
-        StackItem^.NodeIndex:=Node^.Children[0];
+        StackItem^.NodeIndex:=Node^.FirstLeftChild;
         StackItem^.SquaredDistance:=SquaredDistances[0];
        end;
        if (SquaredDistances[1]-SquaredThicknessEpsilon)<result then begin
         StackItem:=@LocalStack[LocalStackPointer];
         inc(LocalStackPointer);
-        StackItem^.NodeIndex:=Node^.Children[1];
+        StackItem^.NodeIndex:=Node^.FirstLeftChild+1;
         StackItem^.SquaredDistance:=SquaredDistances[1];
        end;
       end else begin
        if (SquaredDistances[1]-SquaredThicknessEpsilon)<result then begin
         StackItem:=@LocalStack[LocalStackPointer];
         inc(LocalStackPointer);
-        StackItem^.NodeIndex:=Node^.Children[1];
+        StackItem^.NodeIndex:=Node^.FirstLeftChild+1;
         StackItem^.SquaredDistance:=SquaredDistances[1];
        end;
        if (SquaredDistances[0]-SquaredThicknessEpsilon)<result then begin
         StackItem:=@LocalStack[LocalStackPointer];
         inc(LocalStackPointer);
-        StackItem^.NodeIndex:=Node^.Children[0];
+        StackItem^.NodeIndex:=Node^.FirstLeftChild;
         StackItem^.SquaredDistance:=SquaredDistances[0];
-       end;
-      end;
-     end else begin
-      if Node^.Children[0]>=0 then begin
-       SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fNodes[Node^.Children[0]].AABB,Position);
-       if (SquaredDistances[0]-SquaredThicknessEpsilon)<result then begin
-        StackItem:=@LocalStack[LocalStackPointer];
-        inc(LocalStackPointer);
-        StackItem^.NodeIndex:=Node^.Children[0];
-        StackItem^.SquaredDistance:=SquaredDistances[0];
-       end;
-      end;
-      if Node^.Children[1]>=0 then begin
-       SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fNodes[Node^.Children[1]].AABB,Position);
-       if (SquaredDistances[1]-SquaredThicknessEpsilon)<result then begin
-        StackItem:=@LocalStack[LocalStackPointer];
-        inc(LocalStackPointer);
-        StackItem^.NodeIndex:=Node^.Children[1];
-        StackItem^.SquaredDistance:=SquaredDistances[1];
        end;
       end;
      end;
@@ -19510,61 +22220,49 @@ begin
  end;
 end;
 {$else}
-var TriangleIndex:longint;
-    Triangle,BestTriangle:PKraftMeshTriangle;
+var BestTriangle:PKraftMeshTriangle;
     SquaredDistances:array[0..1] of TKraftScalar;
     SquaredThickness,SquaredThicknessEpsilon:TKraftScalar;
- procedure ProcessNode(const NodeIndex:longint;SquaredDistance:TKraftScalar);
- var Node:PKraftMeshNode;
+ procedure ProcessNode(const NodeIndex:TKraftInt32;SquaredDistance:TKraftScalar);
+ var TriangleIndex:TKraftInt32;
+     Triangle:PKraftMeshTriangle;
+     Node:PKraftMeshTreeNode;
  begin
   if (NodeIndex>=0) and ((SquaredDistance-SquaredThicknessEpsilon)<result) then begin
-   Node:=@fNodes[NodeIndex];
-   TriangleIndex:=Node^.TriangleIndex;
-   while TriangleIndex>=0 do begin
-    Triangle:=@fTriangles[TriangleIndex];
-    SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
-    if result>SquaredDistance then begin
-     result:=SquaredDistance;
-     BestTriangle:=Triangle;
+   Node:=@fTreeNodes[NodeIndex];
+   if Node^.CountTriangles>0 then begin
+    for TriangleIndex:=Node^.FirstTriangleIndex to Node^.FirstTriangleIndex+(Node^.CountTriangles-1) do begin
+     Triangle:=@fTriangles[TriangleIndex];
+     SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
+     if result>SquaredDistance then begin
+      result:=SquaredDistance;
+      BestTriangle:=Triangle;
+     end;
     end;
-    TriangleIndex:=Triangle^.Next;
    end;
-   if (Node^.Children[0]>=0) and (Node^.Children[1]>=0) then begin
-    SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fNodes[Node^.Children[0]].AABB,Position);
-    SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fNodes[Node^.Children[1]].AABB,Position);
+   if Node^.FirstLeftChild>=0 then begin
+    SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild].AABB,Position);
+    SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild+1].AABB,Position);
     if SquaredDistances[0]<SquaredDistances[1] then begin
      if (SquaredDistances[0]-SquaredThicknessEpsilon)<result then begin
-      ProcessNode(Node^.Children[0],SquaredDistances[0]);
+      ProcessNode(Node^.FirstLeftChild,SquaredDistances[0]);
      end;
      if (SquaredDistances[1]-SquaredThicknessEpsilon)<result then begin
-      ProcessNode(Node^.Children[1],SquaredDistances[1]);
+      ProcessNode(Node^.FirstLeftChild+1,SquaredDistances[1]);
      end;
     end else begin
      if (SquaredDistances[1]-SquaredThicknessEpsilon)<result then begin
-      ProcessNode(Node^.Children[1],SquaredDistances[1]);
+      ProcessNode(Node^.FirstLeftChild+1,SquaredDistances[1]);
      end;
      if (SquaredDistances[0]-SquaredThicknessEpsilon)<result then begin
-      ProcessNode(Node^.Children[0],SquaredDistances[0]);
-     end;
-    end;
-   end else begin
-    if Node^.Children[0]>=0 then begin
-     SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fNodes[Node^.Children[0]].AABB,Position);
-     if (SquaredDistances[0]-SquaredThicknessEpsilon)<result then begin
-      ProcessNode(Node^.Children[0],SquaredDistances[0]);
-     end;
-    end;
-    if Node^.Children[1]>=0 then begin
-     SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fNodes[Node^.Children[1]].AABB,Position);
-     if (SquaredDistances[1]-SquaredThicknessEpsilon)<result then begin
-      ProcessNode(Node^.Children[0],SquaredDistances[1]);
+      ProcessNode(Node^.FirstLeftChild,SquaredDistances[0]);
      end;
     end;
    end;
   end;
  end;
 begin
- if fCountNodes>0 then begin
+ if fCountTreeNodes>0 then begin
   result:=MAX_SCALAR;
   BestTriangle:=nil;
   if fDoubleSided then begin
@@ -19573,7 +22271,7 @@ begin
    SquaredThickness:=0.0;
   end;
   SquaredThicknessEpsilon:=SquaredThickness+sqr(EPSILON);
-  ProcessNode(0,SquaredDistanceFromPointToAABB(fNodes[0].AABB,Position));
+  ProcessNode(fTreeNodeRoot,SquaredDistanceFromPointToAABB(fTreeNodes[fTreeNodeRoot].AABB,Position));
   result:=sqrt(result);
   if fDoubleSided then begin
    result:=result-(2.0*Physics.fLinearSlop);
@@ -19588,6 +22286,691 @@ begin
 end;
 {$endif}
 
+function TKraftMesh.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+{$ifdef KraftSingleThreadedUsage}
+type PStackItem=^TStackItem;
+     TStackItem=record
+      NodeIndex:TKraftInt32;
+      SquaredDistance:TKraftScalar;
+     end;
+     TStackItems=array[0..31] of TStackItem;
+var LocalStack:TStackItems;
+    LocalStackPointer,TriangleIndex:TKraftInt32;
+    Node:PKraftMeshNode;
+    Triangle,BestTriangle:PKraftMeshTriangle;
+    StackItem:PStackItem;
+    SquaredDistances:array[0..1] of TKraftScalar;
+    BestDistance,SquaredDistance,SquaredThickness,SquaredThicknessEpsilon:TKraftScalar;
+begin
+ if fCountTreeNodes>0 then begin
+  BestDistance:=MAX_SCALAR;
+  BestTriangle:=nil;
+  if fDoubleSided then begin
+   SquaredThickness:=sqr(2.0*Physics.fLinearSlop);
+  end else begin
+   SquaredThickness:=0.0;
+  end;
+  SquaredThicknessEpsilon:=SquaredThickness+sqr(EPSILON);
+  LocalStackPointer:=0;
+  StackItem:=@LocalStack[LocalStackPointer];
+  inc(LocalStackPointer);
+  StackItem^.NodeIndex:=fTreeNodeRoot;
+  StackItem^.SquaredDistance:=SquaredDistanceFromPointToAABB(fTreeNodes[fTreeNodeRoot].AABB,Position);
+  while LocalStackPointer>0 do begin
+   dec(LocalStackPointer);
+   StackItem:=@LocalStack[LocalStackPointer];
+   if (StackItem^.SquaredDistance-SquaredThicknessEpsilon)<BestDistance then begin
+    if StackItem^.NodeIndex>=0 then begin
+     Node:=@fTreeNodes[StackItem^.NodeIndex];
+     if Node^.CountTriangles>0 then begin
+      for TriangleIndex:=Node^.FirstTriangleIndex to Node^.FirstTriangleIndex+(Node^.CountTriangles-1) do begin
+       SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
+       if BestDistance>SquaredDistance then begin
+        BestDistance:=SquaredDistance;
+        BestTriangle:=Triangle;
+       end;
+      end;
+     end;
+     if Node^.FirstLeftChild>=0 then begin
+      SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild].AABB,Position);
+      SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild+1].AABB,Position);
+      if SquaredDistances[0]<SquaredDistances[1] then begin
+       if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild;
+        StackItem^.SquaredDistance:=SquaredDistances[0];
+       end;
+       if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild+1;
+        StackItem^.SquaredDistance:=SquaredDistances[1];
+       end;
+      end else begin
+       if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild+1;
+        StackItem^.SquaredDistance:=SquaredDistances[1];
+       end;
+       if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild;
+        StackItem^.SquaredDistance:=SquaredDistances[0];
+       end;
+      end;
+     end;
+    end;
+   end;
+  end;
+  BestDistance:=sqrt(BestDistance);
+  if assigned(BestTriangle) then begin
+   if SIMDTriangleClosestPointTo(self,BestTriangle^,Position,Direction) then begin
+    Direction:=Vector3Sub(Position,Direction);
+    result:=Vector3LengthNormalize(Direction);
+    if fDoubleSided then begin
+     result:=result-(2.0*Physics.fLinearSlop);
+    end;
+   end else begin
+    Direction:=BestTriangle^.Plane.Normal;
+    result:=BestDistance;
+   end;
+  end else begin
+   Direction:=Vector3XAxis;
+   result:=MAX_SCALAR;
+  end;
+ end else begin
+  Direction:=Vector3XAxis;
+  result:=MAX_SCALAR;
+ end;
+end;
+{$else}
+var BestTriangle:PKraftMeshTriangle;
+    SquaredDistances:array[0..1] of TKraftScalar;
+    BestDistance,SquaredThickness,SquaredThicknessEpsilon:TKraftScalar;
+ procedure ProcessNode(const NodeIndex:TKraftInt32;SquaredDistance:TKraftScalar);
+ var TriangleIndex:TKraftInt32;
+     Triangle:PKraftMeshTriangle;
+     Node:PKraftMeshTreeNode;
+ begin
+  if (NodeIndex>=0) and ((SquaredDistance-SquaredThicknessEpsilon)<BestDistance) then begin
+   Node:=@fTreeNodes[NodeIndex];
+   if Node^.CountTriangles>0 then begin
+    for TriangleIndex:=Node^.FirstTriangleIndex to Node^.FirstTriangleIndex+(Node^.CountTriangles-1) do begin
+     Triangle:=@fTriangles[TriangleIndex];
+     SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
+     if BestDistance>SquaredDistance then begin
+      BestDistance:=SquaredDistance;
+      BestTriangle:=Triangle;
+     end;
+    end;
+   end;
+   if Node^.FirstLeftChild>=0 then begin
+    SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild].AABB,Position);
+    SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild+1].AABB,Position);
+    if SquaredDistances[0]<SquaredDistances[1] then begin
+     if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild,SquaredDistances[0]);
+     end;
+     if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild+1,SquaredDistances[1]);
+     end;
+    end else begin
+     if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild+1,SquaredDistances[1]);
+     end;
+     if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild,SquaredDistances[0]);
+     end;
+    end;
+   end;
+  end;
+ end;
+begin
+ if fCountTreeNodes>0 then begin
+  BestDistance:=MAX_SCALAR;
+  BestTriangle:=nil;
+  if fDoubleSided then begin
+   SquaredThickness:=sqr(2.0*Physics.fLinearSlop);
+  end else begin
+   SquaredThickness:=0.0;
+  end;
+  SquaredThicknessEpsilon:=SquaredThickness+sqr(EPSILON);
+  ProcessNode(fTreeNodeRoot,SquaredDistanceFromPointToAABB(fTreeNodes[fTreeNodeRoot].AABB,Position));
+  BestDistance:=sqrt(BestDistance);
+  if fDoubleSided then begin
+   BestDistance:=BestDistance-(2.0*Physics.fLinearSlop);
+  end else begin
+   if assigned(BestTriangle) and (PlaneVectorDistance(BestTriangle^.Plane,Position)<0.0) then begin
+    BestDistance:=-BestDistance;
+   end;
+  end;
+  if assigned(BestTriangle) then begin
+   if SIMDTriangleClosestPointTo(self,BestTriangle^,Position,Direction) then begin
+    Direction:=Vector3Sub(Position,Direction);
+    result:=Vector3LengthNormalize(Direction);
+    if fDoubleSided then begin
+     result:=result-(2.0*Physics.fLinearSlop);
+    end;
+   end else begin
+    Direction:=BestTriangle^.Plane.Normal;
+    result:=BestDistance;
+   end;
+  end else begin
+   Direction:=Vector3XAxis;
+   result:=MAX_SCALAR;
+  end;
+ end else begin
+  Direction:=Vector3XAxis;
+  result:=MAX_SCALAR;
+ end;
+end;
+{$endif}
+
+function TKraftMesh.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+{$ifdef KraftSingleThreadedUsage}
+type PStackItem=^TStackItem;
+     TStackItem=record
+      NodeIndex:TKraftInt32;
+      SquaredDistance:TKraftScalar;
+     end;
+     TStackItems=array[0..31] of TStackItem;
+var LocalStack:TStackItems;
+    LocalStackPointer,TriangleIndex:TKraftInt32;
+    Node:PKraftMeshNode;
+    Triangle,BestTriangle:PKraftMeshTriangle;
+    StackItem:PStackItem;
+    SquaredDistances:array[0..1] of TKraftScalar;
+    BestDistance,SquaredDistance,SquaredThickness,SquaredThicknessEpsilon:TKraftScalar;
+begin
+ if fCountTreeNodes>0 then begin
+  BestDistance:=MAX_SCALAR;
+  BestTriangle:=nil;
+  if fDoubleSided then begin
+   SquaredThickness:=sqr(2.0*Physics.fLinearSlop);
+  end else begin
+   SquaredThickness:=0.0;
+  end;
+  SquaredThicknessEpsilon:=SquaredThickness+sqr(EPSILON);
+  LocalStackPointer:=0;
+  StackItem:=@LocalStack[LocalStackPointer];
+  inc(LocalStackPointer);
+  StackItem^.NodeIndex:=fTreeNodeRoot;
+  StackItem^.SquaredDistance:=SquaredDistanceFromPointToAABB(fTreeNodes[fTreeNodeRoot].AABB,Position);
+  while LocalStackPointer>0 do begin
+   dec(LocalStackPointer);
+   StackItem:=@LocalStack[LocalStackPointer];
+   if (StackItem^.SquaredDistance-SquaredThicknessEpsilon)<BestDistance then begin
+    if StackItem^.NodeIndex>=0 then begin
+     Node:=@fTreeNodes[StackItem^.NodeIndex];
+     if Node^.CountTriangles>0 then begin
+      for TriangleIndex:=Node^.FirstTriangleIndex to Node^.FirstTriangleIndex+(Node^.CountTriangles-1) do begin
+       Triangle:=@fTriangles[TriangleIndex];
+       SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
+       if BestDistance>SquaredDistance then begin
+        BestDistance:=SquaredDistance;
+        BestTriangle:=Triangle;
+       end;
+      end;
+     end;
+     if Node^.FirstLeftChild>=0 then begin
+      SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild].AABB,Position);
+      SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild+1].AABB,Position);
+      if SquaredDistances[0]<SquaredDistances[1] then begin
+       if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild;
+        StackItem^.SquaredDistance:=SquaredDistances[0];
+       end;
+       if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild+1;
+        StackItem^.SquaredDistance:=SquaredDistances[1];
+       end;
+      end else begin
+       if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild+1;
+        StackItem^.SquaredDistance:=SquaredDistances[1];
+       end;
+       if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild;
+        StackItem^.SquaredDistance:=SquaredDistances[0];
+       end;
+      end;
+     end;
+    end;
+   end;
+  end;
+  BestDistance:=sqrt(BestDistance);
+  if assigned(BestTriangle) then begin
+   if SIMDTriangleClosestPointTo(self,BestTriangle^,Position,result) then begin
+    result:=Vector3Sub(Position,result);
+    if fDoubleSided and assigned(BestTriangle) and (PlaneVectorDistance(BestTriangle^.Plane,Position)<0.0) then begin
+     result:=Vector3Neg(result);
+    end;
+   end else begin
+    result:=Vector3ScalarMul(BestTriangle^.Plane.Normal,BestDistance);
+   end;
+  end else begin
+   result:=Vector3(MAX_SCALAR,MAX_SCALAR,MAX_SCALAR);
+  end;
+ end else begin
+  result:=Vector3(MAX_SCALAR,MAX_SCALAR,MAX_SCALAR);
+ end;
+ Vector3Normalize(result);
+end;
+{$else}
+var BestTriangle:PKraftMeshTriangle;
+    SquaredDistances:array[0..1] of TKraftScalar;
+    BestDistance,SquaredThickness,SquaredThicknessEpsilon:TKraftScalar;
+ procedure ProcessNode(const NodeIndex:TKraftInt32;SquaredDistance:TKraftScalar);
+ var TriangleIndex:TKraftInt32;
+     Triangle:PKraftMeshTriangle;
+     Node:PKraftMeshTreeNode;
+ begin
+  if (NodeIndex>=0) and ((SquaredDistance-SquaredThicknessEpsilon)<BestDistance) then begin
+   Node:=@fTreeNodes[NodeIndex];
+   if Node^.CountTriangles>0 then begin
+    for TriangleIndex:=Node^.FirstTriangleIndex to Node^.FirstTriangleIndex+(Node^.CountTriangles-1) do begin
+     Triangle:=@fTriangles[TriangleIndex];
+     SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
+     if BestDistance>SquaredDistance then begin
+      BestDistance:=SquaredDistance;
+      BestTriangle:=Triangle;
+     end;
+    end;
+   end;
+   if Node^.FirstLeftChild>=0 then begin
+    SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild].AABB,Position);
+    SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild+1].AABB,Position);
+    if SquaredDistances[0]<SquaredDistances[1] then begin
+     if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild,SquaredDistances[0]);
+     end;
+     if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild+1,SquaredDistances[1]);
+     end;
+    end else begin
+     if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild+1,SquaredDistances[1]);
+     end;
+     if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild,SquaredDistances[0]);
+     end;
+    end;
+   end;
+  end;
+ end;
+begin
+ if fCountTreeNodes>0 then begin
+  BestDistance:=MAX_SCALAR;
+  BestTriangle:=nil;
+  if fDoubleSided then begin
+   SquaredThickness:=sqr(2.0*Physics.fLinearSlop);
+  end else begin
+   SquaredThickness:=0.0;
+  end;
+  SquaredThicknessEpsilon:=SquaredThickness+sqr(EPSILON);
+  ProcessNode(fTreeNodeRoot,SquaredDistanceFromPointToAABB(fTreeNodes[fTreeNodeRoot].AABB,Position));
+  BestDistance:=sqrt(BestDistance);
+  if fDoubleSided then begin
+   BestDistance:=BestDistance-(2.0*Physics.fLinearSlop);
+  end else begin
+   if assigned(BestTriangle) and (PlaneVectorDistance(BestTriangle^.Plane,Position)<0.0) then begin
+    BestDistance:=-BestDistance;
+   end;
+  end;
+  if assigned(BestTriangle) then begin
+   if SIMDTriangleClosestPointTo(self,BestTriangle^,Position,result) then begin
+    result:=Vector3Sub(Position,result);
+    if fDoubleSided and assigned(BestTriangle) and (PlaneVectorDistance(BestTriangle^.Plane,Position)<0.0) then begin
+     result:=Vector3Neg(result);
+    end;
+   end else begin
+    result:=Vector3ScalarMul(BestTriangle^.Plane.Normal,BestDistance);
+   end;
+  end else begin
+   result:=Vector3(MAX_SCALAR,MAX_SCALAR,MAX_SCALAR);
+  end;
+ end else begin
+  result:=Vector3(MAX_SCALAR,MAX_SCALAR,MAX_SCALAR);
+ end;
+ Vector3Normalize(result);
+end;
+{$endif}
+
+function TKraftMesh.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+{$ifdef KraftSingleThreadedUsage}
+type PStackItem=^TStackItem;
+     TStackItem=record
+      NodeIndex:TKraftInt32;
+      SquaredDistance:TKraftScalar;
+     end;
+     TStackItems=array[0..31] of TStackItem;
+var LocalStack:TStackItems;
+    LocalStackPointer,TriangleIndex:TKraftInt32;
+    Node:PKraftMeshNode;
+    Triangle,BestTriangle:PKraftMeshTriangle;
+    StackItem:PStackItem;
+    SquaredDistances:array[0..1] of TKraftScalar;
+    BestDistance,SquaredDistance,SquaredThickness,SquaredThicknessEpsilon:TKraftScalar;
+begin
+ if fCountTreeNodes>0 then begin
+  BestDistance:=MAX_SCALAR;
+  BestTriangle:=nil;
+  if fDoubleSided then begin
+   SquaredThickness:=sqr(2.0*Physics.fLinearSlop);
+  end else begin
+   SquaredThickness:=0.0;
+  end;
+  SquaredThicknessEpsilon:=SquaredThickness+sqr(EPSILON);
+  LocalStackPointer:=0;
+  StackItem:=@LocalStack[LocalStackPointer];
+  inc(LocalStackPointer);
+  StackItem^.NodeIndex:=fTreeNodeRoot;
+  StackItem^.SquaredDistance:=SquaredDistanceFromPointToAABB(fTreeNodes[fTreeNodeRoot].AABB,Position);
+  while LocalStackPointer>0 do begin
+   dec(LocalStackPointer);
+   StackItem:=@LocalStack[LocalStackPointer];
+   if (StackItem^.SquaredDistance-SquaredThicknessEpsilon)<BestDistance then begin
+    if StackItem^.NodeIndex>=0 then begin
+     Node:=@fTreeNodes[StackItem^.NodeIndex];
+     if Node^.CountTriangles>0 then begin
+      for TriangleIndex:=Node^.FirstTriangleIndex to Node^.FirstTriangleIndex+(Node^.CountTriangles-1) do begin
+       Triangle:=@fTriangles[TriangleIndex];
+       SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
+       if BestDistance>SquaredDistance then begin
+        BestDistance:=SquaredDistance;
+        BestTriangle:=Triangle;
+       end;
+      end;
+     end;
+     if Node^.FirstLeftChild>=0 then begin
+      SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild].AABB,Position);
+      SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild+1].AABB,Position);
+      if SquaredDistances[0]<SquaredDistances[1] then begin
+       if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild;
+        StackItem^.SquaredDistance:=SquaredDistances[0];
+       end;
+       if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild+1;
+        StackItem^.SquaredDistance:=SquaredDistances[1];
+       end;
+      end else begin
+       if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild+1;
+        StackItem^.SquaredDistance:=SquaredDistances[1];
+       end;
+       if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild;
+        StackItem^.SquaredDistance:=SquaredDistances[0];
+       end;
+      end;
+     end;
+    end;
+   end;
+  end;
+  if assigned(BestTriangle) then begin
+   result:=BestTriangle^.Plane.Normal;
+   if fDoubleSided and assigned(BestTriangle) and (PlaneVectorDistance(BestTriangle^.Plane,Position)<0.0) then begin
+    result:=Vector3Neg(result);
+   end;
+  end else begin
+   result:=Vector3Origin;
+  end;
+ end else begin
+  result:=Vector3Origin;
+ end;
+end;
+{$else}
+var BestTriangle:PKraftMeshTriangle;
+    SquaredDistances:array[0..1] of TKraftScalar;
+    BestDistance,SquaredThickness,SquaredThicknessEpsilon:TKraftScalar;
+ procedure ProcessNode(const NodeIndex:TKraftInt32;SquaredDistance:TKraftScalar);
+ var TriangleIndex:TKraftInt32;
+     Triangle:PKraftMeshTriangle;
+     Node:PKraftMeshTreeNode;
+ begin
+  if (NodeIndex>=0) and ((SquaredDistance-SquaredThicknessEpsilon)<BestDistance) then begin
+   Node:=@fTreeNodes[NodeIndex];
+   if Node^.CountTriangles>0 then begin
+    for TriangleIndex:=Node^.FirstTriangleIndex to Node^.FirstTriangleIndex+(Node^.CountTriangles-1) do begin
+     Triangle:=@fTriangles[TriangleIndex];
+     SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
+     if BestDistance>SquaredDistance then begin
+      BestDistance:=SquaredDistance;
+      BestTriangle:=Triangle;
+     end;
+    end;
+   end;
+   if Node^.FirstLeftChild>=0 then begin
+    SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild].AABB,Position);
+    SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild+1].AABB,Position);
+    if SquaredDistances[0]<SquaredDistances[1] then begin
+     if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild,SquaredDistances[0]);
+     end;
+     if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild+1,SquaredDistances[1]);
+     end;
+    end else begin
+     if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild+1,SquaredDistances[1]);
+     end;
+     if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild,SquaredDistances[0]);
+     end;
+    end;
+   end;
+  end;
+ end;
+begin
+ if fCountTreeNodes>0 then begin
+  BestDistance:=MAX_SCALAR;
+  BestTriangle:=nil;
+  if fDoubleSided then begin
+   SquaredThickness:=sqr(2.0*Physics.fLinearSlop);
+  end else begin
+   SquaredThickness:=0.0;
+  end;
+  SquaredThicknessEpsilon:=SquaredThickness+sqr(EPSILON);
+  ProcessNode(fTreeNodeRoot,SquaredDistanceFromPointToAABB(fTreeNodes[fTreeNodeRoot].AABB,Position));
+  BestDistance:=sqrt(BestDistance);
+  if fDoubleSided then begin
+   BestDistance:=BestDistance-(2.0*Physics.fLinearSlop);
+  end else begin
+   if assigned(BestTriangle) and (PlaneVectorDistance(BestTriangle^.Plane,Position)<0.0) then begin
+    BestDistance:=-BestDistance;
+   end;
+  end;
+  if assigned(BestTriangle) then begin
+   result:=BestTriangle^.Plane.Normal;
+   if fDoubleSided and assigned(BestTriangle) and (PlaneVectorDistance(BestTriangle^.Plane,Position)<0.0) then begin
+    result:=Vector3Neg(result);
+   end;
+  end else begin
+   result:=Vector3Origin;
+  end;
+ end else begin
+  result:=Vector3Origin;
+ end;
+end;
+{$endif}
+
+function TKraftMesh.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+{$ifdef KraftSingleThreadedUsage}
+type PStackItem=^TStackItem;
+     TStackItem=record
+      NodeIndex:TKraftInt32;
+      SquaredDistance:TKraftScalar;
+     end;
+     TStackItems=array[0..31] of TStackItem;
+var LocalStack:TStackItems;
+    LocalStackPointer,TriangleIndex:TKraftInt32;
+    Node:PKraftMeshNode;
+    Triangle,BestTriangle:PKraftMeshTriangle;
+    StackItem:PStackItem;
+    SquaredDistances:array[0..1] of TKraftScalar;
+    BestDistance,SquaredDistance,SquaredThickness,SquaredThicknessEpsilon:TKraftScalar;
+begin
+ if fCountTreeNodes>0 then begin
+  BestDistance:=MAX_SCALAR;
+  BestTriangle:=nil;
+  if fDoubleSided then begin
+   SquaredThickness:=sqr(2.0*Physics.fLinearSlop);
+  end else begin
+   SquaredThickness:=0.0;
+  end;
+  SquaredThicknessEpsilon:=SquaredThickness+sqr(EPSILON);
+  LocalStackPointer:=0;
+  StackItem:=@LocalStack[LocalStackPointer];
+  inc(LocalStackPointer);
+  StackItem^.NodeIndex:=fTreeNodeRoot;
+  StackItem^.SquaredDistance:=SquaredDistanceFromPointToAABB(fTreeNodes[fTreeNodeRoot].AABB,Position);
+  while LocalStackPointer>0 do begin
+   dec(LocalStackPointer);
+   StackItem:=@LocalStack[LocalStackPointer];
+   if (StackItem^.SquaredDistance-SquaredThicknessEpsilon)<BestDistance then begin
+    if StackItem^.NodeIndex>=0 then begin
+     Node:=@fTreeNodes[StackItem^.NodeIndex];
+     if Node^.CountTriangles>0 then begin
+      for TriangleIndex:=Node^.FirstTriangleIndex to Node^.FirstTriangleIndex+(Node^.CountTriangles-1) do begin
+       Triangle:=@fTriangles[TriangleIndex];
+       SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
+       if BestDistance>SquaredDistance then begin
+        BestDistance:=SquaredDistance;
+        BestTriangle:=Triangle;
+       end;
+      end;
+     end;
+     if Node^.FirstLeftChild>=0 then begin
+      SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild].AABB,Position);
+      SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild+1].AABB,Position);
+      if SquaredDistances[0]<SquaredDistances[1] then begin
+       if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild;
+        StackItem^.SquaredDistance:=SquaredDistances[0];
+       end;
+       if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild+1;
+        StackItem^.SquaredDistance:=SquaredDistances[1];
+       end;
+      end else begin
+       if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild+1;
+        StackItem^.SquaredDistance:=SquaredDistances[1];
+       end;
+       if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+        StackItem:=@LocalStack[LocalStackPointer];
+        inc(LocalStackPointer);
+        StackItem^.NodeIndex:=Node^.FirstLeftChild;
+        StackItem^.SquaredDistance:=SquaredDistances[0];
+       end;
+      end;
+     end;
+    end;
+   end;
+  end;
+  if not (assigned(BestTriangle) and SIMDTriangleClosestPointTo(self,BestTriangle^,Position,result)) then begin
+   result:=Vector3Origin;
+  end;
+ end else begin
+  result:=Vector3Origin;
+ end;
+end;
+{$else}
+var BestTriangle:PKraftMeshTriangle;
+    SquaredDistances:array[0..1] of TKraftScalar;
+    BestDistance,SquaredThickness,SquaredThicknessEpsilon:TKraftScalar;
+ procedure ProcessNode(const NodeIndex:TKraftInt32;SquaredDistance:TKraftScalar);
+ var TriangleIndex:TKraftInt32;
+     Triangle:PKraftMeshTriangle;
+     Node:PKraftMeshTreeNode;
+ begin
+  if (NodeIndex>=0) and ((SquaredDistance-SquaredThicknessEpsilon)<BestDistance) then begin
+   Node:=@fTreeNodes[NodeIndex];
+   if Node^.CountTriangles>0 then begin
+    for TriangleIndex:=Node^.FirstTriangleIndex to Node^.FirstTriangleIndex+(Node^.CountTriangles-1) do begin
+     Triangle:=@fTriangles[TriangleIndex];
+     SquaredDistance:=SquaredDistanceFromPointToTriangle(Position,fVertices[Triangle^.Vertices[0]],fVertices[Triangle^.Vertices[1]],fVertices[Triangle^.Vertices[2]]);
+     if BestDistance>SquaredDistance then begin
+      BestDistance:=SquaredDistance;
+      BestTriangle:=Triangle;
+     end;
+    end;
+   end;
+   if Node^.FirstLeftChild>=0 then begin
+    SquaredDistances[0]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild].AABB,Position);
+    SquaredDistances[1]:=SquaredDistanceFromPointToAABB(fTreeNodes[Node^.FirstLeftChild+1].AABB,Position);
+    if SquaredDistances[0]<SquaredDistances[1] then begin
+     if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild,SquaredDistances[0]);
+     end;
+     if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild+1,SquaredDistances[1]);
+     end;
+    end else begin
+     if (SquaredDistances[1]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild+1,SquaredDistances[1]);
+     end;
+     if (SquaredDistances[0]-SquaredThicknessEpsilon)<BestDistance then begin
+      ProcessNode(Node^.FirstLeftChild,SquaredDistances[0]);
+     end;
+    end;
+   end;
+  end;
+ end;
+begin
+ if fCountTreeNodes>0 then begin
+  BestDistance:=MAX_SCALAR;
+  BestTriangle:=nil;
+  if fDoubleSided then begin
+   SquaredThickness:=sqr(2.0*Physics.fLinearSlop);
+  end else begin
+   SquaredThickness:=0.0;
+  end;
+  SquaredThicknessEpsilon:=SquaredThickness+sqr(EPSILON);
+  ProcessNode(fTreeNodeRoot,SquaredDistanceFromPointToAABB(fTreeNodes[fTreeNodeRoot].AABB,Position));
+  BestDistance:=sqrt(BestDistance);
+  if fDoubleSided then begin
+   BestDistance:=BestDistance-(2.0*Physics.fLinearSlop);
+  end else begin
+   if assigned(BestTriangle) and (PlaneVectorDistance(BestTriangle^.Plane,Position)<0.0) then begin
+    BestDistance:=-BestDistance;
+   end;
+  end;
+  if not (assigned(BestTriangle) and SIMDTriangleClosestPointTo(self,BestTriangle^,Position,result)) then begin
+   result:=Vector3Origin;
+  end;
+ end else begin
+  result:=Vector3Origin;
+ end;
+end;
+{$endif}
+
 constructor TKraftShape.Create(const APhysics:TKraft;const ARigidBody:TKraftRigidBody);
 begin
  inherited Create;
@@ -19596,7 +22979,7 @@ begin
 
  fPhysics:=APhysics;
 
- fPhysics.fNewShapes:=true;
+ fPhysics.InvalidateShapes;
 
  fRigidBody:=ARigidBody;
 
@@ -19662,38 +23045,32 @@ begin
  fContinuousMinimumRadiusScaleFactor:=0.0;
 
 {$ifdef DebugDraw}
+{$ifndef NoOpenGL}
  fDrawDisplayList:=0;
+{$endif}
 {$endif}
 
  fOnContactBegin:=nil;
  fOnContactEnd:=nil;
  fOnContactStay:=nil;
 
+ fOnCanCollideWith:=nil;
+
 end;
 
 destructor TKraftShape.Destroy;
-var ContactPairEdge,NextContactPairEdge:PKraftContactPairEdge;
-    ContactPair:PKraftContactPair;
 begin
 
 {$ifdef DebugDraw}
+{$ifndef NoOpenGL}
  if fDrawDisplayList<>0 then begin
   glDeleteLists(fDrawDisplayList,1);
   fDrawDisplayList:=0;
  end;
 {$endif}
+{$endif}
 
- if assigned(fRigidBody) then begin
-  ContactPairEdge:=fRigidBody.fContactPairEdgeFirst;
-  while assigned(ContactPairEdge) do begin
-   ContactPair:=ContactPairEdge^.ContactPair;
-   NextContactPairEdge:=ContactPairEdge^.Next;
-   if (ContactPair^.Shapes[0]=self) or (ContactPair^.Shapes[1]=self) then begin
-    fPhysics.fContactManager.RemoveContact(ContactPair);
-   end;
-   ContactPairEdge:=NextContactPairEdge;
-  end;
- end;
+ RemoveContactPairEdges;
 
  if fStaticAABBTreeProxy>=0 then begin
   fPhysics.fBroadPhase.StaticMoveBuffer.Remove(fStaticAABBTreeProxy);
@@ -19752,6 +23129,23 @@ begin
   result:=@fPhysics.fKinematicAABBTree.fNodes[fKinematicAABBTreeProxy].AABB;
  end else begin
   result:=@fWorldAABB;
+ end;
+end;
+
+procedure TKraftShape.RemoveContactPairEdges;
+var ContactPairEdge,NextContactPairEdge:PKraftContactPairEdge;
+    ContactPair:PKraftContactPair;
+begin
+ if assigned(fRigidBody) then begin
+  ContactPairEdge:=fRigidBody.fContactPairEdgeFirst;
+  while assigned(ContactPairEdge) do begin
+   ContactPair:=ContactPairEdge^.ContactPair;
+   NextContactPairEdge:=ContactPairEdge^.Next;
+   if (ContactPair^.Shapes[0]=self) or (ContactPair^.Shapes[1]=self) then begin
+    fPhysics.fContactManager.RemoveContact(ContactPair);
+   end;
+   ContactPairEdge:=NextContactPairEdge;
+  end;
  end;
 end;
 
@@ -19879,9 +23273,84 @@ begin
  fAngularMotionDisc:=Vector3Length(fShapeSphere.Center)+fShapeSphere.Radius;
 end;
 
+function TKraftShape.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
+begin
+ result:=MAX_SCALAR;
+end;
+
+function TKraftShape.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+var Center:TKraftScalar;
+begin
+ Center:=GetLocalSignedDistance(Position);
+ Direction.x:=GetLocalSignedDistance(Vector3(Position.x+EPSILON,Position.y,Position.z))-Center;
+ Direction.y:=GetLocalSignedDistance(Vector3(Position.x,Position.y+EPSILON,Position.z))-Center;
+ Direction.z:=GetLocalSignedDistance(Vector3(Position.x,Position.y,Position.z+EPSILON))-Center;
+{$ifdef SIMD}
+ Direction.w:=0.0;
+{$endif}
+ Vector3Normalize(Direction);
+ result:=Center;
+end;
+
+function TKraftShape.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+var Center:TKraftScalar;
+begin
+ Center:=GetLocalSignedDistance(Position);
+ result.x:=GetLocalSignedDistance(Vector3(Position.x+EPSILON,Position.y,Position.z))-Center;
+ result.y:=GetLocalSignedDistance(Vector3(Position.x,Position.y+EPSILON,Position.z))-Center;
+ result.z:=GetLocalSignedDistance(Vector3(Position.x,Position.y,Position.z+EPSILON))-Center;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
+ Vector3Normalize(result);
+end;
+
+function TKraftShape.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+var Center:TKraftScalar;
+begin
+ Center:=GetLocalSignedDistance(Position);
+ result.x:=GetLocalSignedDistance(Vector3(Position.x+EPSILON,Position.y,Position.z))-Center;
+ result.y:=GetLocalSignedDistance(Vector3(Position.x,Position.y+EPSILON,Position.z))-Center;
+ result.z:=GetLocalSignedDistance(Vector3(Position.x,Position.y,Position.z+EPSILON))-Center;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
+ Vector3Normalize(result);
+end;
+
+function TKraftShape.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+var Distance:TKraftScalar;
+    Direction:TKraftVector3;
+begin
+ Distance:=GetLocalSignedDistanceAndDirection(Position,Direction);
+ result:=Vector3Sub(Position,Vector3ScalarMul(Direction,Distance));
+end;
+
+function TKraftShape.GetSignedDistance(const Position:TKraftVector3;const Transform:TKraftMatrix4x4):TKraftScalar;
+begin
+ result:=GetLocalSignedDistance(Vector3TermMatrixMulInverted(Position,Transform));
+end;
+
 function TKraftShape.GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
 begin
- result:=0.0;
+ result:=GetLocalSignedDistance(Vector3TermMatrixMulInverted(Position,fWorldTransform));
+end;
+
+function TKraftShape.GetSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3;const Transform:TKraftMatrix4x4):TKraftScalar;
+begin
+ result:=GetLocalSignedDistanceAndDirection(Vector3TermMatrixMulInverted(Position,Transform),Direction);
+ Vector3MatrixMulBasis(Direction,Transform);
+end;
+
+function TKraftShape.GetSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+begin
+ result:=GetLocalSignedDistanceAndDirection(Vector3TermMatrixMulInverted(Position,fWorldTransform),Direction);
+ Vector3MatrixMulBasis(Direction,fWorldTransform);
+end;
+
+function TKraftShape.GetClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=Vector3TermMatrixMul(GetLocalClosestPointTo(Vector3TermMatrixMulInverted(Position,fWorldTransform)),fWorldTransform);
 end;
 
 function TKraftShape.GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
@@ -19889,12 +23358,12 @@ begin
  result:=Vector3Origin;
 end;
 
-function TKraftShape.GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3;
+function TKraftShape.GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
 begin
  result:=Vector3Origin;
 end;
 
-function TKraftShape.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint;
+function TKraftShape.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
 begin
  result:=-1;
 end;
@@ -19953,9 +23422,15 @@ begin
  fShapeAABB.Min.x:=-fRadius;
  fShapeAABB.Min.y:=-fRadius;
  fShapeAABB.Min.z:=-fRadius;
+{$ifdef SIMD}
+ fShapeAABB.Min.w:=0.0;
+{$endif}
  fShapeAABB.Max.x:=fRadius;
  fShapeAABB.Max.y:=fRadius;
  fShapeAABB.Max.z:=fRadius;
+{$ifdef SIMD}
+ fShapeAABB.Max.w:=0.0;
+{$endif}
 end;
 
 procedure TKraftShapeSphere.CalculateMassData;
@@ -19981,13 +23456,37 @@ begin
   fMassData.Center.x:=fLocalTransform[3,0];
   fMassData.Center.y:=fLocalTransform[3,1];
   fMassData.Center.z:=fLocalTransform[3,2];
+{$ifdef SIMD}
+  fMassData.Center.w:=0.0;
+{$endif}
  end;
  Matrix3x3Add(fMassData.Inertia,InertiaTensorParallelAxisTheorem(fMassData.Center,fMassData.Mass));
 end;
 
-function TKraftShapeSphere.GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
+function TKraftShapeSphere.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
 begin
  result:=Vector3Length(Vector3TermMatrixMulInverted(Position,fWorldTransform))-fRadius;
+end;
+
+function TKraftShapeSphere.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+begin
+ Direction:=Position;
+ result:=Vector3LengthNormalize(Direction)-fRadius;
+end;
+
+function TKraftShapeSphere.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=Vector3Norm(Vector3Sub(Position,Vector3ScalarMul(Vector3Norm(Position),fRadius)));
+end;
+
+function TKraftShapeSphere.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=Vector3Norm(Position);
+end;
+
+function TKraftShapeSphere.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=Vector3ScalarMul(Vector3Norm(Position),fRadius);
 end;
 
 function TKraftShapeSphere.GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
@@ -19995,19 +23494,24 @@ begin
  result:=Vector3ScalarMul(Vector3SafeNorm(Direction),fRadius);
 end;
 
-function TKraftShapeSphere.GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3;
+function TKraftShapeSphere.GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
 begin
  result:=Vector3Origin;
 end;
 
-function TKraftShapeSphere.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint;
+function TKraftShapeSphere.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
 begin
  result:=0;
 end;
 
 function TKraftShapeSphere.GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3;
 begin
+{$ifdef SIMD}
+ result.RawVector:=PKraftRawVector3(pointer(@Transform[3,0]))^;
+ result.w:=0.0;
+{$else}
  result:=PKraftVector3(pointer(@Transform[3,0]))^;
+{$endif}
 end;
 
 function TKraftShapeSphere.TestPoint(const p:TKraftVector3):boolean;
@@ -20051,6 +23555,7 @@ function TKraftShapeSphere.SphereCast(var SphereCastData:TKraftSphereCastData):b
 var Origin,Direction:TKraftVector3;
     Time,SecondTime:TKraftScalar;
 begin
+ result:=false;
  if ksfSphereCastable in fFlags then begin
   Origin:=Vector3TermMatrixMulInverted(SphereCastData.Origin,fWorldTransform);
   Direction:=Vector3SafeNorm(Vector3TermMatrixMulTransposedBasis(SphereCastData.Direction,fWorldTransform));
@@ -20075,17 +23580,21 @@ end;
 
 {$ifdef DebugDraw}
 procedure TKraftShapeSphere.Draw(const CameraMatrix:TKraftMatrix4x4);
+{$ifdef NoOpenGL}
+begin
+end;
+{$else}
 const lats=16;
       longs=16;
       pi2=pi*2.0;
-var i,j:longint;
+var i,j:TKraftInt32;
     lat0,z0,zr0,lat1,z1,zr1,lng,x,y:TKraftScalar;
     ModelViewMatrix:TKraftMatrix4x4;
 begin
  glPushMatrix;
  glMatrixMode(GL_MODELVIEW);
  ModelViewMatrix:=Matrix4x4TermMul(fInterpolatedWorldTransform,CameraMatrix);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
  glLoadMatrixd(pointer(@ModelViewMatrix));
 {$else}
  glLoadMatrixf(pointer(@ModelViewMatrix));
@@ -20125,6 +23634,7 @@ begin
  glPopMatrix;
 end;
 {$endif}
+{$endif}
 
 constructor TKraftShapeCapsule.Create(const APhysics:TKraft;const ARigidBody:TKraftRigidBody;const ARadius,AHeight:TKraftScalar);
 begin
@@ -20145,9 +23655,15 @@ begin
  fShapeAABB.Min.x:=-fRadius;
  fShapeAABB.Min.y:=-(fRadius+(fHeight*0.5));
  fShapeAABB.Min.z:=-fRadius;
+{$ifdef SIMD}
+ fShapeAABB.Min.w:=0.0;
+{$endif}
  fShapeAABB.Max.x:=fRadius;
  fShapeAABB.Max.y:=fRadius+(fHeight*0.5);
  fShapeAABB.Max.z:=fRadius;
+{$ifdef SIMD}
+ fShapeAABB.Max.w:=0.0;
+{$endif}
 end;
 
 //{$define UseTKraftShapeCapsuleCalculateMassDataReferenceTestImplementation}
@@ -20204,9 +23720,12 @@ begin
   fMassData.Center.x:=fLocalTransform[3,0];
   fMassData.Center.y:=fLocalTransform[3,1];
   fMassData.Center.z:=fLocalTransform[3,2];
+{$ifdef SIMD}
+  fMassData.Center.w:=0.0;
+{$endif}
  end;
  fMassData.Inertia:=Matrix3x3TermAdd(InertiaTensorTransform(fMassData.Inertia,Matrix3x3(fLocalTransform)),
-                                    InertiaTensorParallelAxisTheorem(fMassData.Center,fMassData.Mass));
+                                     InertiaTensorParallelAxisTheorem(fMassData.Center,fMassData.Mass));
 end;
 {$else}
 procedure TKraftShapeCapsule.CalculateMassData;
@@ -20232,27 +23751,131 @@ begin
   fMassData.Center.x:=fLocalTransform[3,0];
   fMassData.Center.y:=fLocalTransform[3,1];
   fMassData.Center.z:=fLocalTransform[3,2];
+{$ifdef SIMD}
+  fMassData.Center.w:=0.0;
+{$endif}
  end;
  fMassData.Inertia:=Matrix3x3TermAdd(InertiaTensorTransform(fMassData.Inertia,Matrix3x3(fLocalTransform)),
-                                    InertiaTensorParallelAxisTheorem(fMassData.Center,fMassData.Mass));
+                                     InertiaTensorParallelAxisTheorem(fMassData.Center,fMassData.Mass));
 end;
 {$endif}
 
-function TKraftShapeCapsule.GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
+function TKraftShapeCapsule.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
 var p,a,b,pa,ba:TKraftVector3;
     HalfHeight:TKraftScalar;
 begin
  HalfHeight:=fHeight*0.5;
- p:=Vector3TermMatrixMulInverted(Position,fWorldTransform);
+ p:=Position;
  a.x:=0.0;
  a.y:=-HalfHeight;
  a.z:=0.0;
+{$ifdef SIMD}
+ a.w:=0.0;
+{$endif}
  b.x:=0.0;
  b.y:=HalfHeight;
  b.z:=0.0;
+{$ifdef SIMD}
+ b.w:=0.0;
+{$endif}
  pa:=Vector3Sub(p,a);
  ba:=Vector3Sub(b,a);
- result:=Vector3Length(Vector3Sub(pa,Vector3ScalarMul(b,Min(Max(Vector3Dot(pa,ba)/Vector3Dot(ba,ba),0.0),1.0))))-fRadius;
+ result:=Vector3Length(Vector3Sub(pa,Vector3ScalarMul(ba,Min(Max(Vector3Dot(pa,ba)/Vector3Dot(ba,ba),0.0),1.0))))-fRadius;
+end;
+
+function TKraftShapeCapsule.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+var p,a,b,pa,ba:TKraftVector3;
+    HalfHeight:TKraftScalar;
+begin
+ HalfHeight:=fHeight*0.5;
+ p:=Position;
+ a.x:=0.0;
+ a.y:=-HalfHeight;
+ a.z:=0.0;
+{$ifdef SIMD}
+ a.w:=0.0;
+{$endif}
+ b.x:=0.0;
+ b.y:=HalfHeight;
+ b.z:=0.0;
+{$ifdef SIMD}
+ b.w:=0.0;
+{$endif}
+ pa:=Vector3Sub(p,a);
+ ba:=Vector3Sub(b,a);
+ Direction:=Vector3Sub(pa,Vector3ScalarMul(ba,Min(Max(Vector3Dot(pa,ba)/Vector3Dot(ba,ba),0.0),1.0)));
+ result:=Vector3LengthNormalize(Direction)-fRadius;
+end;
+
+function TKraftShapeCapsule.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+var p,a,b,pa,ba:TKraftVector3;
+    HalfHeight:TKraftScalar;
+begin
+ HalfHeight:=fHeight*0.5;
+ p:=Position;
+ a.x:=0.0;
+ a.y:=-HalfHeight;
+ a.z:=0.0;
+{$ifdef SIMD}
+ a.w:=0.0;
+{$endif}
+ b.x:=0.0;
+ b.y:=HalfHeight;
+ b.z:=0.0;
+{$ifdef SIMD}
+ b.w:=0.0;
+{$endif}
+ pa:=Vector3Sub(p,a);
+ ba:=Vector3Sub(b,a);
+ result:=Vector3ScalarMul(ba,Min(Max(Vector3Dot(pa,ba)/Vector3Dot(ba,ba),0.0),1.0));
+ result:=Vector3Norm(Vector3Sub(Position,Vector3Add(result,Vector3ScalarMul(Vector3Norm(Vector3Sub(pa,result)),Radius))));
+end;
+
+function TKraftShapeCapsule.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+var p,a,b,pa,ba:TKraftVector3;
+    HalfHeight:TKraftScalar;
+begin
+ HalfHeight:=fHeight*0.5;
+ p:=Position;
+ a.x:=0.0;
+ a.y:=-HalfHeight;
+ a.z:=0.0;
+{$ifdef SIMD}
+ a.w:=0.0;
+{$endif}
+ b.x:=0.0;
+ b.y:=HalfHeight;
+ b.z:=0.0;
+{$ifdef SIMD}
+ b.w:=0.0;
+{$endif}
+ pa:=Vector3Sub(p,a);
+ ba:=Vector3Sub(b,a);
+ result:=Vector3Norm(Vector3Sub(pa,Vector3ScalarMul(ba,Min(Max(Vector3Dot(pa,ba)/Vector3Dot(ba,ba),0.0),1.0))));
+end;
+
+function TKraftShapeCapsule.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+var p,a,b,pa,ba,t:TKraftVector3;
+    HalfHeight:TKraftScalar;
+begin
+ HalfHeight:=fHeight*0.5;
+ p:=Position;
+ a.x:=0.0;
+ a.y:=-HalfHeight;
+ a.z:=0.0;
+{$ifdef SIMD}
+ a.w:=0.0;
+{$endif}
+ b.x:=0.0;
+ b.y:=HalfHeight;
+ b.z:=0.0;
+{$ifdef SIMD}
+ b.w:=0.0;
+{$endif}
+ pa:=Vector3Sub(p,a);
+ ba:=Vector3Sub(b,a);
+ t:=Vector3ScalarMul(ba,Min(Max(Vector3Dot(pa,ba)/Vector3Dot(ba,ba),0.0),1.0));
+ result:=Vector3Add(t,Vector3ScalarMul(Vector3Norm(Vector3Sub(pa,t)),Radius));
 end;
 
 function TKraftShapeCapsule.GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
@@ -20264,9 +23887,15 @@ begin
  p0.x:=(Normal.x*fRadius);
  p0.y:=(Normal.y*fRadius)-HalfHeight;
  p0.z:=(Normal.z*fRadius);
+{$ifdef SIMD}
+ p0.w:=0.0;
+{$endif}
  p1.x:=(Normal.x*fRadius);
  p1.y:=(Normal.y*fRadius)+HalfHeight;
  p1.z:=(Normal.z*fRadius);
+{$ifdef SIMD}
+ p1.w:=0.0;
+{$endif}
  if Vector3Dot(p0,Normal)<Vector3Dot(p1,Normal) then begin
   result:=p1;
  end else begin
@@ -20274,7 +23903,7 @@ begin
  end;
 end;
 
-function TKraftShapeCapsule.GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3;
+function TKraftShapeCapsule.GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
 begin
  result.x:=0.0;
  case Index of
@@ -20286,9 +23915,12 @@ begin
   end;
  end;
  result.z:=0.0;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
 end;
 
-function TKraftShapeCapsule.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint;
+function TKraftShapeCapsule.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
 begin
  if Direction.y<0.0 then begin
   result:=0;
@@ -20299,7 +23931,12 @@ end;
 
 function TKraftShapeCapsule.GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3;
 begin
+{$ifdef SIMD}
+ result.RawVector:=PKraftRawVector3(pointer(@Transform[3,0]))^;
+ result.w:=0.0;
+{$else}
  result:=PKraftVector3(pointer(@Transform[3,0]))^;
+{$endif}
 end;
 
 function TKraftShapeCapsule.TestPoint(const p:TKraftVector3):boolean;
@@ -20427,6 +24064,7 @@ function TKraftShapeCapsule.SphereCast(var SphereCastData:TKraftSphereCastData):
 var Origin,Direction,Normal,Point:TKraftVector3;
     Time,HalfHeight:TKraftScalar;
 begin
+ result:=false;
  if ksfSphereCastable in fFlags then begin
   Origin:=Vector3TermMatrixMulInverted(SphereCastData.Origin,fWorldTransform);
   Direction:=Vector3SafeNorm(Vector3TermMatrixMulTransposedBasis(SphereCastData.Direction,fWorldTransform));
@@ -20464,17 +24102,21 @@ end;
 
 {$ifdef DebugDraw}
 procedure TKraftShapeCapsule.Draw(const CameraMatrix:TKraftMatrix4x4);
+{$ifdef NoOpenGL}
+begin
+end;
+{$else}
 const lats=16;
       longs=16;
      pi2=pi*2.0;
 var ModelViewMatrix:TKraftMatrix4x4;
-    i,j:longint;
+    i,j:TKraftInt32;
     HalfHeight,lat0,y0,yr0,lat1,y1,yr1,lng,x,z,yo0,yo1:TKraftScalar;
 begin
  glPushMatrix;
  glMatrixMode(GL_MODELVIEW);
  ModelViewMatrix:=Matrix4x4TermMul(fInterpolatedWorldTransform,CameraMatrix);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
  glLoadMatrixd(pointer(@ModelViewMatrix));
 {$else}
  glLoadMatrixf(pointer(@ModelViewMatrix));
@@ -20525,6 +24167,7 @@ begin
 
  glPopMatrix;
 end;
+{$endif}
 {$endif}
 
 constructor TKraftShapeConvexHull.Create(const APhysics:TKraft;const ARigidBody:TKraftRigidBody;const AConvexHull:TKraftConvexHull);
@@ -20579,9 +24222,29 @@ begin
  fMassData.Inertia[2,2]:=fMassData.Inertia[2,2]*fDensity;
 end;
 
-function TKraftShapeConvexHull.GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
+function TKraftShapeConvexHull.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
 begin
- result:=fConvexHull.GetSignedDistance(Vector3TermMatrixMulInverted(Position,fWorldTransform));
+ result:=fConvexHull.GetLocalSignedDistance(Position);
+end;
+
+function TKraftShapeConvexHull.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+begin
+ result:=fConvexHull.GetLocalSignedDistanceAndDirection(Position,Direction);
+end;
+
+function TKraftShapeConvexHull.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=fConvexHull.GetLocalSignedDistanceGradient(Position);
+end;
+
+function TKraftShapeConvexHull.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=fConvexHull.GetLocalSignedDistanceNormal(Position);
+end;
+
+function TKraftShapeConvexHull.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=fConvexHull.GetLocalClosestPointTo(Position);
 end;
 
 function TKraftShapeConvexHull.GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
@@ -20589,12 +24252,12 @@ begin
  result:=fConvexHull.GetLocalFullSupport(Vector3SafeNorm(Direction));
 end;
 
-function TKraftShapeConvexHull.GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3;
+function TKraftShapeConvexHull.GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
 begin
  result:=fConvexHull.GetLocalFeatureSupportVertex(Index);
 end;
 
-function TKraftShapeConvexHull.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint;
+function TKraftShapeConvexHull.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
 begin
  result:=fConvexHull.GetLocalFeatureSupportIndex(Direction);
 end;
@@ -20605,7 +24268,7 @@ begin
 end;
 
 function TKraftShapeConvexHull.TestPoint(const p:TKraftVector3):boolean;
-var i:longint;
+var i:TKraftInt32;
 begin
  result:=true;
  for i:=0 to fConvexHull.fCountFaces-1 do begin
@@ -20617,7 +24280,7 @@ begin
 end;
 
 function TKraftShapeConvexHull.RayCast(var RayCastData:TKraftRayCastData):boolean;
-var FaceIndex,BestFaceIndex:longint;
+var FaceIndex,BestFaceIndex:TKraftInt32;
     Face:PKraftConvexHullFace;
     TimeFirst,TimeLast,Numerator,Denominator,Time:TKraftScalar;
     Origin,Direction:TKraftVector3;
@@ -20666,7 +24329,7 @@ begin
 end;
 
 function TKraftShapeConvexHull.SphereCast(var SphereCastData:TKraftSphereCastData):boolean;
-var FaceIndex,BestFaceIndex:longint;
+var FaceIndex,BestFaceIndex:TKraftInt32;
     Face:PKraftConvexHullFace;
     Time,Distance,BestDistance:TKraftScalar;
     Origin,Direction:TKraftVector3;
@@ -20727,14 +24390,18 @@ end;
 
 {$ifdef DebugDraw}
 procedure TKraftShapeConvexHull.Draw(const CameraMatrix:TKraftMatrix4x4);
-var i,j:longint;
+{$ifdef NoOpenGL}
+begin
+end;
+{$else}
+var i,j:TKraftInt32;
     ModelViewMatrix:TKraftMatrix4x4;
     Face:PKraftConvexHullFace;
 begin
  glPushMatrix;
  glMatrixMode(GL_MODELVIEW);
  ModelViewMatrix:=Matrix4x4TermMul(fInterpolatedWorldTransform,CameraMatrix);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
  glLoadMatrixd(pointer(@ModelViewMatrix));
 {$else}
  glLoadMatrixf(pointer(@ModelViewMatrix));
@@ -20748,7 +24415,7 @@ begin
   glBegin(GL_TRIANGLES);
   for i:=0 to fConvexHull.CountFaces-1 do begin
    Face:=@fConvexHull.fFaces[i];
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
    glNormal3dv(@Face^.Plane.Normal);
    for j:=1 to Face^.CountVertices-2 do begin
     glVertex3dv(@fConvexHull.fVertices[Face^.Vertices[0]].Position);
@@ -20787,9 +24454,10 @@ begin
  glPopMatrix;
 end;
 {$endif}
+{$endif}
 
 constructor TKraftShapeBox.Create(const APhysics:TKraft;const ARigidBody:TKraftRigidBody;const AExtents:TKraftVector3);
-var i:longint;
+var i:TKraftInt32;
     BoxPoints:array[0..7] of TKraftVector3;
 begin
  fExtents:=AExtents;
@@ -20809,6 +24477,9 @@ begin
   end else begin
    BoxPoints[i].z:=-fExtents.z;
   end;
+{$ifdef SIMD}
+  BoxPoints[i].w:=0.0;
+{$endif}
  end;
  fShapeConvexHull:=TKraftConvexHull.Create(APhysics);
  fShapeConvexHull.Load(pointer(@BoxPoints[0]),length(BoxPoints));
@@ -20831,13 +24502,19 @@ begin
  fShapeAABB.Min.x:=-fExtents.x;
  fShapeAABB.Min.y:=-fExtents.y;
  fShapeAABB.Min.z:=-fExtents.z;
+{$ifdef SIMD}
+ fShapeAABB.Min.w:=0.0;
+{$endif}
  fShapeAABB.Max.x:=fExtents.x;
  fShapeAABB.Max.y:=fExtents.y;
  fShapeAABB.Max.z:=fExtents.z;
+{$ifdef SIMD}
+ fShapeAABB.Max.w:=0.0;
+{$endif}
 end;
 
 procedure TKraftShapeBox.CalculateMassData;
-begin                                                   
+begin
  fMassData.Volume:=fExtents.x*fExtents.y*fExtents.z;
  if fForcedMass>EPSILON then begin
   fMassData.Mass:=fForcedMass;
@@ -20859,74 +24536,310 @@ begin
   fMassData.Center.x:=fLocalTransform[3,0];
   fMassData.Center.y:=fLocalTransform[3,1];
   fMassData.Center.z:=fLocalTransform[3,2];
+{$ifdef SIMD}
+  fMassData.Center.w:=0.0;
+{$endif}
  end;
  fMassData.Inertia:=Matrix3x3TermAdd(InertiaTensorTransform(fMassData.Inertia,Matrix3x3(fLocalTransform)),
                                      InertiaTensorParallelAxisTheorem(fMassData.Center,fMassData.Mass));
 end;
 
-function TKraftShapeBox.GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
-var ClosestBoxPoint,Temp,Direction:TKraftVector3;
-    Overlap:longint;
+function TKraftShapeBox.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
+var q:TKraftVector3;
 begin
- result:=0;
- ClosestBoxPoint:=Vector3TermMatrixMulInverted(Position,fWorldTransform);
- if ClosestBoxPoint.x<-Extents.x then begin
-  result:=result+sqr(ClosestBoxPoint.x-(-Extents.x));
-  ClosestBoxPoint.x:=-Extents.x;
-  Overlap:=0;
- end else if ClosestBoxPoint.x>Extents.x then begin
-  result:=result+sqr(ClosestBoxPoint.x-Extents.x);
-  ClosestBoxPoint.x:=Extents.x;
-  Overlap:=0;
- end else begin
-  Overlap:=1;
- end;
- if ClosestBoxPoint.y<-Extents.y then begin
-  result:=result+sqr(ClosestBoxPoint.y-(-Extents.y));
-  ClosestBoxPoint.y:=-Extents.y;
- end else if ClosestBoxPoint.y>Extents.y then begin
-  result:=result+sqr(ClosestBoxPoint.y-Extents.y);
-  ClosestBoxPoint.y:=Extents.y;
- end else begin
-  Overlap:=Overlap or 2;
- end;
- if ClosestBoxPoint.z<-Extents.z then begin
-  result:=result+sqr(ClosestBoxPoint.z-(-Extents.z));
-  ClosestBoxPoint.z:=-Extents.z;
- end else if ClosestBoxPoint.z>Extents.z then begin
-  result:=result+sqr(ClosestBoxPoint.z-Extents.z);
-  ClosestBoxPoint.z:=Extents.z;
- end else begin
-  Overlap:=Overlap or 3;
- end;
- if Overlap<>7 then begin
-  result:=sqrt(result);
- end else begin
-  Temp:=ClosestBoxPoint;
-  Direction.x:=ClosestBoxPoint.x/Extents.x;
-  Direction.y:=ClosestBoxPoint.y/Extents.y;
-  Direction.z:=ClosestBoxPoint.z/Extents.z;
-  if (abs(Direction.x)>abs(Direction.y)) and (abs(Direction.x)>abs(Direction.z)) then begin
-   if Direction.x<0.0 then begin
-    ClosestBoxPoint.x:=-Extents.x;
-   end else begin
-    ClosestBoxPoint.x:=Extents.x;
+ q:=Vector3Sub(Vector3Abs(Position),Extents);
+ result:=Vector3Length(Vector3(Max(0.0,q.x),Max(0.0,q.y),Max(0.0,q.z)))*Min(0.0,Max(q.x,Max(q.y,q.z)));
+end;
+
+function TKraftShapeBox.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+var ClosestPoint:TKraftVector3;
+    Distance,BestDistance:TKraftScalar;
+    Axis:TKraftInt32;
+begin
+
+ ClosestPoint:=Vector3(Min(Max(Position.x,-Extents.x),Extents.x),
+                       Min(Max(Position.y,-Extents.y),Extents.y),
+                       Min(Max(Position.z,-Extents.z),Extents.z));
+
+ if (abs(Position.x)<Extents.x) or (abs(Position.y)<Extents.y) or (abs(Position.z)<Extents.z) then begin
+
+  // Inside box
+
+  Distance:=Extents.x-Position.x;
+  BestDistance:=Distance;
+  Axis:=1;
+
+  Distance:=Position.x-Extents.x;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-1;
+  end;
+
+  Distance:=Extents.y-Position.y;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=2;
+  end;
+
+  Distance:=Position.y-Extents.y;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-2;
+  end;
+
+  Distance:=Extents.z-Position.z;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=3;
+  end;
+
+  Distance:=Position.z-Extents.z;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-3;
+  end;
+
+  case abs(Axis) of
+   1:begin
+    ClosestPoint:=Vector3(Extents.x*Sign(Axis),Position.y,Position.z);
    end;
-  end else if (abs(Direction.y)>abs(Direction.x)) and (abs(Direction.y)>abs(Direction.z)) then begin
-   if Direction.y<0.0 then begin
-    ClosestBoxPoint.y:=-Extents.y;
-   end else begin
-    ClosestBoxPoint.y:=Extents.y;
+   2:begin
+    ClosestPoint:=Vector3(Position.x,Extents.y*Sign(Axis),Position.z);
    end;
-  end else begin
-   if Direction.z<0.0 then begin
-    ClosestBoxPoint.z:=-Extents.z;
-   end else begin
-    ClosestBoxPoint.z:=Extents.z;
+   3:begin
+    ClosestPoint:=Vector3(Position.x,Position.y,Extents.z*Sign(Axis));
+   end;
+   else begin
    end;
   end;
-  result:=-Vector3Dist(ClosestBoxPoint,Temp);
+
+  Direction:=Vector3Sub(ClosestPoint,Position);
+
+  result:=-Vector3LengthNormalize(Direction);
+
+ end else begin
+
+  // Outside or on box
+
+  Direction:=Vector3Sub(Position,ClosestPoint);
+
+  result:=Vector3LengthNormalize(Direction);
+
  end;
+
+end;
+
+function TKraftShapeBox.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+var ClosestPoint:TKraftVector3;
+    Distance,BestDistance:TKraftScalar;
+    Axis:TKraftInt32;
+begin
+
+ ClosestPoint:=Vector3(Min(Max(Position.x,-Extents.x),Extents.x),
+                       Min(Max(Position.y,-Extents.y),Extents.y),
+                       Min(Max(Position.z,-Extents.z),Extents.z));
+
+ if (abs(Position.x)<Extents.x) or (abs(Position.y)<Extents.y) or (abs(Position.z)<Extents.z) then begin
+
+  // Inside box
+
+  Distance:=Extents.x-Position.x;
+  BestDistance:=Distance;
+  Axis:=1;
+
+  Distance:=Position.x-Extents.x;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-1;
+  end;
+
+  Distance:=Extents.y-Position.y;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=2;
+  end;
+
+  Distance:=Position.y-Extents.y;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-2;
+  end;
+
+  Distance:=Extents.z-Position.z;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=3;
+  end;
+
+  Distance:=Position.z-Extents.z;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-3;
+  end;
+
+  case abs(Axis) of
+   1:begin
+    ClosestPoint:=Vector3(Extents.x*Sign(Axis),Position.y,Position.z);
+   end;
+   2:begin
+    ClosestPoint:=Vector3(Position.x,Extents.y*Sign(Axis),Position.z);
+   end;
+   3:begin
+    ClosestPoint:=Vector3(Position.x,Position.y,Extents.z*Sign(Axis));
+   end;
+   else begin
+   end;
+  end;
+
+  result:=Vector3Norm(Vector3Sub(ClosestPoint,Position));
+
+ end else begin
+
+  // Outside or on box
+
+  result:=Vector3Norm(Vector3Sub(Position,ClosestPoint));
+
+ end;
+
+end;
+
+function TKraftShapeBox.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+var ClosestPoint:TKraftVector3;
+    Distance,BestDistance:TKraftScalar;
+    Axis:TKraftInt32;
+begin
+
+ ClosestPoint:=Vector3(Min(Max(Position.x,-Extents.x),Extents.x),
+                       Min(Max(Position.y,-Extents.y),Extents.y),
+                       Min(Max(Position.z,-Extents.z),Extents.z));
+
+ if (abs(Position.x)<Extents.x) or (abs(Position.y)<Extents.y) or (abs(Position.z)<Extents.z) then begin
+
+  // Inside box
+
+  Distance:=Extents.x-Position.x;
+  BestDistance:=Distance;
+  Axis:=1;
+
+  Distance:=Position.x-Extents.x;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-1;
+  end;
+
+  Distance:=Extents.y-Position.y;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=2;
+  end;
+
+  Distance:=Position.y-Extents.y;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-2;
+  end;
+
+  Distance:=Extents.z-Position.z;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=3;
+  end;
+
+  Distance:=Position.z-Extents.z;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-3;
+  end;
+
+  case abs(Axis) of
+   1:begin
+    ClosestPoint:=Vector3(Extents.x*Sign(Axis),Position.y,Position.z);
+   end;
+   2:begin
+    ClosestPoint:=Vector3(Position.x,Extents.y*Sign(Axis),Position.z);
+   end;
+   3:begin
+    ClosestPoint:=Vector3(Position.x,Position.y,Extents.z*Sign(Axis));
+   end;
+   else begin
+   end;
+  end;
+
+  result:=Vector3Norm(Vector3Sub(ClosestPoint,Position));
+
+ end else begin
+
+  // Outside or on box
+
+  result:=Vector3Norm(Vector3Sub(Position,ClosestPoint));
+
+ end;
+
+end;
+
+function TKraftShapeBox.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+var Distance,BestDistance:TKraftScalar;
+    Axis:TKraftInt32;
+begin
+
+ result:=Vector3(Min(Max(Position.x,-Extents.x),Extents.x),
+                 Min(Max(Position.y,-Extents.y),Extents.y),
+                 Min(Max(Position.z,-Extents.z),Extents.z));
+
+ if (abs(Position.x)<Extents.x) or (abs(Position.y)<Extents.y) or (abs(Position.z)<Extents.z) then begin
+
+  // Inside box
+
+  Distance:=Extents.x-Position.x;
+  BestDistance:=Distance;
+  Axis:=1;
+
+  Distance:=Position.x-Extents.x;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-1;
+  end;
+
+  Distance:=Extents.y-Position.y;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=2;
+  end;
+
+  Distance:=Position.y-Extents.y;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-2;
+  end;
+
+  Distance:=Extents.z-Position.z;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=3;
+  end;
+
+  Distance:=Position.z-Extents.z;
+  if BestDistance<Distance then begin
+   BestDistance:=Distance;
+   Axis:=-3;
+  end;
+
+  case abs(Axis) of
+   1:begin
+    result:=Vector3(Extents.x*Sign(Axis),Position.y,Position.z);
+   end;
+   2:begin
+    result:=Vector3(Position.x,Extents.y*Sign(Axis),Position.z);
+   end;
+   3:begin
+    result:=Vector3(Position.x,Position.y,Extents.z*Sign(Axis));
+   end;
+   else begin
+   end;
+  end;
+
+ end;
+
 end;
 
 function TKraftShapeBox.GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
@@ -20950,25 +24863,33 @@ begin
   result.z:=fExtents.z;
  end;
 {$else}
- result.x:=fExtents.x*(1-longint(longword(longword(pointer(@Normal.x)^) shr 31) shl 1));
- result.y:=fExtents.y*(1-longint(longword(longword(pointer(@Normal.y)^) shr 31) shl 1));
- result.z:=fExtents.z*(1-longint(longword(longword(pointer(@Normal.z)^) shr 31) shl 1));
+ result.x:=fExtents.x*(1-TKraftInt32(TKraftUInt32(TKraftUInt32(pointer(@Normal.x)^) shr 31) shl 1));
+ result.y:=fExtents.y*(1-TKraftInt32(TKraftUInt32(TKraftUInt32(pointer(@Normal.y)^) shr 31) shl 1));
+ result.z:=fExtents.z*(1-TKraftInt32(TKraftUInt32(TKraftUInt32(pointer(@Normal.z)^) shr 31) shl 1));
+{$endif}
+{$ifdef SIMD}
+ result.w:=0.0;
 {$endif}
 end;
 
-function TKraftShapeBox.GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3;
+function TKraftShapeBox.GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
 begin
  result:=inherited GetLocalFeatureSupportVertex(Index);
 end;
 
-function TKraftShapeBox.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint;
+function TKraftShapeBox.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
 begin
  result:=inherited GetLocalFeatureSupportIndex(Direction);
 end;
 
 function TKraftShapeBox.GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3;
 begin
+{$ifdef SIMD}
+ result.RawVector:=PKraftRawVector3(pointer(@Transform[3,0]))^;
+ result.w:=0.0;
+{$else}
  result:=PKraftVector3(pointer(@Transform[3,0]))^;
+{$endif}
 end;
 
 function TKraftShapeBox.TestPoint(const p:TKraftVector3):boolean;
@@ -20983,7 +24904,7 @@ end;
 function TKraftShapeBox.RayCast(var RayCastData:TKraftRayCastData):boolean;
 var s,v,h:TKraftVector3;
     lo,hi,k,Alpha:TKraftScalar;
-    nlo,nhi,n:longint;
+    nlo,nhi,n:TKraftInt32;
     sign:array[0..2] of TKraftScalar;
 begin
  result:=false;
@@ -21011,6 +24932,10 @@ begin
   end else begin
    sign[2]:=-1;
   end;
+{$ifdef SIMD}
+  s.w:=0.0;
+  v.w:=0.0;
+{$endif}
   h:=fExtents;
   if (((s.x<-h.x) and (v.x<=0)) or (s.x>h.x)) or
      (((s.y<-h.y) and (v.y<=0)) or (s.y>h.y)) or
@@ -21080,7 +25005,7 @@ end;
 function TKraftShapeBox.SphereCast(var SphereCastData:TKraftSphereCastData):boolean;
 var s,v,h:TKraftVector3;
     lo,hi,k,Alpha:TKraftScalar;
-    nlo,nhi,n:longint;
+    nlo,nhi,n:TKraftInt32;
     sign:array[0..2] of TKraftScalar;
 begin
  result:=false;
@@ -21108,9 +25033,16 @@ begin
   end else begin
    sign[2]:=-1;
   end;
+{$ifdef SIMD}
+  s.w:=0.0;
+  v.w:=0.0;
+{$endif}
   h.x:=fExtents.x+SphereCastData.Radius;
   h.y:=fExtents.y+SphereCastData.Radius;
   h.z:=fExtents.z+SphereCastData.Radius;
+{$ifdef SIMD}
+  h.w:=0.0;
+{$endif}
   if (((s.x<-h.x) and (v.x<=0)) or (s.x>h.x)) or
      (((s.y<-h.y) and (v.y<=0)) or (s.y>h.y)) or
      (((s.z<-h.z) and (v.z<=0)) or (s.z>h.z)) then begin
@@ -21178,12 +25110,16 @@ end;
 
 {$ifdef DebugDraw}
 procedure TKraftShapeBox.Draw(const CameraMatrix:TKraftMatrix4x4);
+{$ifdef NoOpenGL}
+begin
+end;
+{$else}
 var ModelViewMatrix:TKraftMatrix4x4;
 begin
  glPushMatrix;
  glMatrixMode(GL_MODELVIEW);
  ModelViewMatrix:=Matrix4x4TermMul(fInterpolatedWorldTransform,CameraMatrix);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
  glLoadMatrixd(pointer(@ModelViewMatrix));
 {$else}
  glLoadMatrixf(pointer(@ModelViewMatrix));
@@ -21233,6 +25169,7 @@ begin
 
  glPopMatrix;
 end;
+{$endif}
 {$endif}
 
 const PlaneSize=32768.0;
@@ -21286,22 +25223,49 @@ begin
  fShapeAABB.Min.x:=Min(Min(Min(Min(fPlaneVertices[0].x,fPlaneVertices[1].x),fPlaneVertices[2].x),fPlaneVertices[3].x),b.x)-0.1;
  fShapeAABB.Min.y:=Min(Min(Min(Min(fPlaneVertices[0].y,fPlaneVertices[1].y),fPlaneVertices[2].y),fPlaneVertices[3].y),b.y)-0.1;
  fShapeAABB.Min.z:=Min(Min(Min(Min(fPlaneVertices[0].z,fPlaneVertices[1].z),fPlaneVertices[2].z),fPlaneVertices[3].z),b.z)-0.1;
+{$ifdef SIMD}
+ fShapeAABB.Min.w:=0.0;
+{$endif}
  fShapeAABB.Max.x:=Max(Max(Max(Max(fPlaneVertices[0].x,fPlaneVertices[1].x),fPlaneVertices[2].x),fPlaneVertices[3].x),b.x)+0.1;
  fShapeAABB.Max.y:=Max(Max(Max(Max(fPlaneVertices[0].y,fPlaneVertices[1].y),fPlaneVertices[2].y),fPlaneVertices[3].y),b.y)+0.1;
  fShapeAABB.Max.z:=Max(Max(Max(Max(fPlaneVertices[0].z,fPlaneVertices[1].z),fPlaneVertices[2].z),fPlaneVertices[3].z),b.z)+0.1;
+{$ifdef SIMD}
+ fShapeAABB.Max.w:=0.0;
+{$endif}
 end;
 
 procedure TKraftShapePlane.CalculateMassData;
 begin
 end;
 
-function TKraftShapePlane.GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
+function TKraftShapePlane.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
 begin
- result:=Vector3Dot(Plane.Normal,Vector3TermMatrixMulInverted(Position,fWorldTransform))+Plane.Distance;
+ result:=PlaneVectorDistance(Plane,Position);
+end;
+
+function TKraftShapePlane.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+begin
+ Direction:=Plane.Normal;
+ result:=PlaneVectorDistance(Plane,Position);
+end;
+
+function TKraftShapePlane.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=Vector3Norm(Vector3ScalarMul(Plane.Normal,PlaneVectorDistance(Plane,Position)));
+end;
+
+function TKraftShapePlane.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=Vector3ScalarMul(Plane.Normal,SignNonZero(PlaneVectorDistance(Plane,Position)));
+end;
+
+function TKraftShapePlane.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=Vector3Sub(Position,Vector3ScalarMul(Plane.Normal,PlaneVectorDistance(Plane,Position)));
 end;
 
 function TKraftShapePlane.GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
-var Index,BestIndex:longint;
+var Index,BestIndex:TKraftInt32;
     BestDistance,NewDistance:TKraftScalar;
     Normal:TKraftVector3;
 begin
@@ -21321,7 +25285,7 @@ begin
  end;
 end;
 
-function TKraftShapePlane.GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3;
+function TKraftShapePlane.GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
 begin
  if (Index>=0) and (Index<4) then begin
   result:=fPlaneVertices[Index];
@@ -21330,8 +25294,8 @@ begin
  end;
 end;
 
-function TKraftShapePlane.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint;
-var Index:longint;
+function TKraftShapePlane.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
+var Index:TKraftInt32;
     BestDistance,NewDistance:TKraftScalar;
     Normal:TKraftVector3;
 begin
@@ -21452,6 +25416,10 @@ end;
 
 {$ifdef DebugDraw}
 procedure TKraftShapePlane.Draw(const CameraMatrix:TKraftMatrix4x4);
+{$ifdef NoOpenGL}
+begin
+end;
+{$else}
 const PlaneSize=2048;
 var ModelViewMatrix:TKraftMatrix4x4;
     n,b,p,q:TKraftVector3;
@@ -21461,7 +25429,7 @@ begin
  glPushMatrix;
  glMatrixMode(GL_MODELVIEW);
  ModelViewMatrix:=Matrix4x4TermMul(fInterpolatedWorldTransform,CameraMatrix);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
  glLoadMatrixd(pointer(@ModelViewMatrix));
 {$else}
  glLoadMatrixf(pointer(@ModelViewMatrix));
@@ -21481,7 +25449,7 @@ begin
 
   n:=Vector3NormEx(Vector3Cross(Vector3Sub(PlaneVertices[1],PlaneVertices[0]),Vector3Sub(PlaneVertices[2],PlaneVertices[0])));
 
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
   glBegin(GL_TRIANGLES);
   glNormal3dv(@n);
   glVertex3dv(@PlaneVertices[0]);
@@ -21528,6 +25496,7 @@ begin
 
  glPopMatrix;
 end;
+{$endif}
 {$endif}
 
 constructor TKraftShapeTriangle.Create(const APhysics:TKraft;const ARigidBody:TKraftRigidBody;const AVertex0,AVertex1,AVertex2:TKraftVector3);
@@ -21603,9 +25572,15 @@ begin
  fShapeAABB.Min.x:=Min(Min(Vertices^[0].Position.x,Vertices^[1].Position.x),Vertices^[2].Position.x)-0.1;
  fShapeAABB.Min.y:=Min(Min(Vertices^[0].Position.y,Vertices^[1].Position.y),Vertices^[2].Position.y)-0.1;
  fShapeAABB.Min.z:=Min(Min(Vertices^[0].Position.z,Vertices^[1].Position.z),Vertices^[2].Position.z)-0.1;
+{$ifdef SIMD}
+ fShapeAABB.Min.w:=0.0;
+{$endif}
  fShapeAABB.Max.x:=Max(Max(Vertices^[0].Position.x,Vertices^[1].Position.x),Vertices^[2].Position.x)+0.1;
  fShapeAABB.Max.y:=Max(Max(Vertices^[0].Position.y,Vertices^[1].Position.y),Vertices^[2].Position.y)+0.1;
  fShapeAABB.Max.z:=Max(Max(Vertices^[0].Position.z,Vertices^[1].Position.z),Vertices^[2].Position.z)+0.1;
+{$ifdef SIMD}
+ fShapeAABB.Max.w:=0.0;
+{$endif}
 
  fShapeConvexHull.fAABB:=fShapeAABB;
 
@@ -21613,6 +25588,9 @@ begin
  fShapeSphere.Center.x:=(Vertices^[0].Position.x+Vertices^[1].Position.x+Vertices^[2].Position.x)/3.0;
  fShapeSphere.Center.y:=(Vertices^[0].Position.y+Vertices^[1].Position.y+Vertices^[2].Position.y)/3.0;
  fShapeSphere.Center.z:=(Vertices^[0].Position.z+Vertices^[1].Position.z+Vertices^[2].Position.z)/3.0;{}
+{$ifdef SIMD}
+ fShapeSphere.Center.w:=0.0;
+{$endif}
  fShapeSphere.Radius:=sqrt(Max(Max(Vector3DistSquared(fShapeSphere.Center,Vertices^[0].Position),
                                   Vector3DistSquared(fShapeSphere.Center,Vertices^[1].Position)),
                                   Vector3DistSquared(fShapeSphere.Center,Vertices^[2].Position)));
@@ -21641,9 +25619,15 @@ begin
  fShapeAABB.Min.x:=Min(Min(Vertices^[0].Position.x,Vertices^[1].Position.x),Vertices^[2].Position.x)-0.1;
  fShapeAABB.Min.y:=Min(Min(Vertices^[0].Position.y,Vertices^[1].Position.y),Vertices^[2].Position.y)-0.1;
  fShapeAABB.Min.z:=Min(Min(Vertices^[0].Position.z,Vertices^[1].Position.z),Vertices^[2].Position.z)-0.1;
+{$ifdef SIMD}
+ fShapeAABB.Min.w:=0.0;
+{$endif}
  fShapeAABB.Max.x:=Max(Max(Vertices^[0].Position.x,Vertices^[1].Position.x),Vertices^[2].Position.x)+0.1;
  fShapeAABB.Max.y:=Max(Max(Vertices^[0].Position.y,Vertices^[1].Position.y),Vertices^[2].Position.y)+0.1;
  fShapeAABB.Max.z:=Max(Max(Vertices^[0].Position.z,Vertices^[1].Position.z),Vertices^[2].Position.z)+0.1;
+{$ifdef SIMD}
+ fShapeAABB.Max.w:=0.0;
+{$endif}
 end;
 
 procedure TKraftShapeTriangle.CalculateMassData;
@@ -21659,6 +25643,9 @@ begin
  fShapeSphere.Center.x:=(Vertices^[0].Position.x+Vertices^[1].Position.x+Vertices^[2].Position.x)*f1d3;
  fShapeSphere.Center.y:=(Vertices^[0].Position.y+Vertices^[1].Position.y+Vertices^[2].Position.y)*f1d3;
  fShapeSphere.Center.z:=(Vertices^[0].Position.z+Vertices^[1].Position.z+Vertices^[2].Position.z)*f1d3;
+{$ifdef SIMD}
+ fShapeSphere.Center.w:=0.0;
+{$endif}
  fShapeSphere.Radius:=sqrt(Max(Max(Vector3DistSquared(fShapeSphere.Center,Vertices^[0].Position),
                                   Vector3DistSquared(fShapeSphere.Center,Vertices^[1].Position)),
                                   Vector3DistSquared(fShapeSphere.Center,Vertices^[2].Position)));
@@ -21672,16 +25659,72 @@ begin
  fFeatureRadius:=0.0;
 end;
 
-function TKraftShapeTriangle.GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
+function TKraftShapeTriangle.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
 begin
- result:=sqrt(SquaredDistanceFromPointToTriangle(Vector3TermMatrixMulInverted(Position,fWorldTransform),
-                                                 fConvexHull.fVertices[0].Position,
-                                                 fConvexHull.fVertices[1].Position,
-                                                 fConvexHull.fVertices[2].Position))-(2.0*Physics.fLinearSlop);
+ result:=(sqrt(SquaredDistanceFromPointToTriangle(Position,
+                                                  fConvexHull.fVertices[0].Position,
+                                                  fConvexHull.fVertices[1].Position,
+                                                  fConvexHull.fVertices[2].Position)){-(2.0*Physics.fLinearSlop)})*
+          SignNonZero(PlaneVectorDistance(fConvexHull.fFaces[0].Plane,Position));
+end;
+
+function TKraftShapeTriangle.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+var ClosestPoint:TKraftVector3;
+    SignDirection:TKraftScalar;
+begin
+ if SIMDTriangleClosestPointTo(fConvexHull.fVertices[0].Position,
+                               fConvexHull.fVertices[1].Position,
+                               fConvexHull.fVertices[2].Position,
+                               Position,
+                               ClosestPoint) then begin
+  SignDirection:=SignNonZero(PlaneVectorDistance(fConvexHull.fFaces[0].Plane,Position));
+  Direction:=Vector3ScalarMul(Vector3Sub(Position,ClosestPoint),SignDirection);
+  result:=(Vector3LengthNormalize(Direction){-(2.0*Physics.fLinearSlop)})*SignDirection;
+ end else begin
+  Direction:=Vector3Origin;
+  result:=MAX_SCALAR;
+ end;
+end;
+
+function TKraftShapeTriangle.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+begin
+ if SIMDTriangleClosestPointTo(fConvexHull.fVertices[0].Position,
+                               fConvexHull.fVertices[1].Position,
+                               fConvexHull.fVertices[2].Position,
+                               Position,
+                               result) then begin
+  result:=Vector3Norm(Vector3Sub(Position,result));
+ end else begin
+  result:=Vector3(MAX_SCALAR,MAX_SCALAR,MAX_SCALAR);
+ end;
+end;
+
+function TKraftShapeTriangle.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+begin
+ if SIMDTriangleClosestPointTo(fConvexHull.fVertices[0].Position,
+                               fConvexHull.fVertices[1].Position,
+                               fConvexHull.fVertices[2].Position,
+                               Position,
+                               result) then begin
+  result:=Vector3ScalarMul(fConvexHull.fFaces[0].Plane.Normal,SignNonZero(PlaneVectorDistance(fConvexHull.fFaces[0].Plane,Position)));
+ end else begin
+  result:=Vector3Origin;
+ end;
+end;
+
+function TKraftShapeTriangle.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+begin
+ if not SIMDTriangleClosestPointTo(fConvexHull.fVertices[0].Position,
+                                   fConvexHull.fVertices[1].Position,
+                                   fConvexHull.fVertices[2].Position,
+                                   Position,
+                                   result) then begin
+  result:=Vector3Origin;
+ end;
 end;
 
 function TKraftShapeTriangle.GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
-var i:longint;
+var i:TKraftInt32;
     Vertices:PPKraftConvexHullVertices;
     d0,d1,d2:TKraftScalar;
     Normal:TKraftVector3;
@@ -21707,7 +25750,7 @@ begin
  result:=Vertices^[i].Position;
 end;
 
-function TKraftShapeTriangle.GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3;
+function TKraftShapeTriangle.GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
 begin
  if (Index>=0) and (Index<3) then begin
   result:=fConvexHull.fVertices[Index].Position;
@@ -21716,7 +25759,7 @@ begin
  end;
 end;
 
-function TKraftShapeTriangle.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint;
+function TKraftShapeTriangle.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
 var Vertices:PPKraftConvexHullVertices;
     d0,d1,d2:TKraftScalar;
     Normal:TKraftVector3;
@@ -21754,7 +25797,7 @@ end;
 function TKraftShapeTriangle.RayCast(var RayCastData:TKraftRayCastData):boolean;
 var Origin,Direction:TKraftVector3;
     Vertices:PPKraftConvexHullVertices;
-    Time,u,v:TKraftScalar;
+    Time,u,v,w:TKraftScalar;
 begin
  result:=false;
  if ksfRayCastable in fFlags then begin
@@ -21762,11 +25805,18 @@ begin
   Direction:=Vector3NormEx(Vector3TermMatrixMulTransposedBasis(RayCastData.Direction,fWorldTransform));
   if Vector3LengthSquared(Direction)>EPSILON then begin
    Vertices:=@fConvexHull.fVertices[0];
-   if RayIntersectTriangle(Origin,Direction,Vertices^[0].Position,Vertices^[1].Position,Vertices^[2].Position,Time,u,v) then begin
+   if RayIntersectTriangle(Origin,Direction,Vertices^[0].Position,Vertices^[1].Position,Vertices^[2].Position,Time,u,v,w) then begin
     if (Time>=0.0) and (Time<=RayCastData.MaxTime) then begin
      RayCastData.TimeOfImpact:=Time;
      RayCastData.Point:=Vector3TermMatrixMul(Vector3Add(Origin,Vector3ScalarMul(Direction,Time)),fWorldTransform);
      RayCastData.Normal:=Vector3TermMatrixMulBasis(Vector3NormEx(Vector3Cross(Vector3Sub(Vertices^[1].Position,Vertices^[0].Position),Vector3Sub(Vertices^[2].Position,Vertices^[0].Position))),fWorldTransform);
+     result:=true;
+    end;
+   end else if RayIntersectTriangle(Origin,Direction,Vertices^[2].Position,Vertices^[1].Position,Vertices^[0].Position,Time,u,v,w) then begin
+    if (Time>=0.0) and (Time<=RayCastData.MaxTime) then begin
+     RayCastData.TimeOfImpact:=Time;
+     RayCastData.Point:=Vector3TermMatrixMul(Vector3Add(Origin,Vector3ScalarMul(Direction,Time)),fWorldTransform);
+     RayCastData.Normal:=Vector3TermMatrixMulBasis(Vector3NormEx(Vector3Cross(Vector3Sub(Vertices^[1].Position,Vertices^[2].Position),Vector3Sub(Vertices^[0].Position,Vertices^[2].Position))),fWorldTransform);
      result:=true;
     end;
    end;
@@ -21777,8 +25827,9 @@ end;
 function TKraftShapeTriangle.SphereCast(var SphereCastData:TKraftSphereCastData):boolean;
 var Origin,Direction:TKraftVector3;
     Vertices:PPKraftConvexHullVertices;
-    Time,u,v:TKraftScalar;
+    Time,u,v,w:TKraftScalar;
 begin
+ result:=false;
  if ksfSphereCastable in fFlags then begin
   Origin:=Vector3TermMatrixMulInverted(SphereCastData.Origin,fWorldTransform);
   Direction:=Vector3NormEx(Vector3TermMatrixMulTransposedBasis(SphereCastData.Direction,fWorldTransform));
@@ -21792,11 +25843,28 @@ begin
                          Vertices^[2].Position,
                          Time,
                          u,
-                         v) then begin
+                         v,
+                         w) then begin
     if (Time>=0.0) and (Time<=SphereCastData.MaxTime) then begin
      SphereCastData.TimeOfImpact:=Time;
      SphereCastData.Point:=Vector3TermMatrixMul(Vector3Add(Origin,Vector3ScalarMul(Direction,Time)),fWorldTransform);
      SphereCastData.Normal:=Vector3TermMatrixMulBasis(Vector3NormEx(Vector3Cross(Vector3Sub(Vertices^[1].Position,Vertices^[0].Position),Vector3Sub(Vertices^[2].Position,Vertices^[0].Position))),fWorldTransform);
+     result:=true;
+    end;
+   end else if SphereCastTriangle(Origin,
+                                  SphereCastData.Radius,
+                                  Direction,
+                                  Vertices^[2].Position,
+                                  Vertices^[1].Position,
+                                  Vertices^[0].Position,
+                                  Time,
+                                  u,
+                                  v,
+                                  w) then begin
+    if (Time>=0.0) and (Time<=SphereCastData.MaxTime) then begin
+     SphereCastData.TimeOfImpact:=Time;
+     SphereCastData.Point:=Vector3TermMatrixMul(Vector3Add(Origin,Vector3ScalarMul(Direction,Time)),fWorldTransform);
+     SphereCastData.Normal:=Vector3TermMatrixMulBasis(Vector3NormEx(Vector3Cross(Vector3Sub(Vertices^[1].Position,Vertices^[2].Position),Vector3Sub(Vertices^[0].Position,Vertices^[2].Position))),fWorldTransform);
      result:=true;
     end;
    end;
@@ -21806,6 +25874,10 @@ end;
 
 {$ifdef DebugDraw}
 procedure TKraftShapeTriangle.Draw(const CameraMatrix:TKraftMatrix4x4);
+{$ifdef NoOpenGL}
+begin
+end;
+{$else}
 var ModelViewMatrix:TKraftMatrix4x4;
     Vertices:PPKraftConvexHullVertices;
     n:TKraftVector3;
@@ -21814,7 +25886,7 @@ begin
  glPushMatrix;
  glMatrixMode(GL_MODELVIEW);
  ModelViewMatrix:=Matrix4x4TermMul(fInterpolatedWorldTransform,CameraMatrix);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
  glLoadMatrixd(pointer(@ModelViewMatrix));
 {$else}
  glLoadMatrixf(pointer(@ModelViewMatrix));
@@ -21828,7 +25900,7 @@ begin
 
   n:=Vector3NormEx(Vector3Cross(Vector3Sub(Vertices^[1].Position,Vertices^[0].Position),Vector3Sub(Vertices^[2].Position,Vertices^[0].Position)));
 
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
   glBegin(GL_TRIANGLES);
   glNormal3dv(@n);
   glVertex3dv(@Vertices^[0].Position);
@@ -21864,6 +25936,7 @@ begin
  glPopMatrix;
 end;
 {$endif}
+{$endif}
 
 constructor TKraftShapeMesh.Create(const APhysics:TKraft;const ARigidBody:TKraftRigidBody;const AMesh:TKraftMesh);
 begin
@@ -21877,6 +25950,8 @@ begin
  fShapeType:=kstMesh;
 
  fFeatureRadius:=0.0;
+
+ fSmoothNormalsAtCasting:=true;
 
 end;
 
@@ -21894,9 +25969,29 @@ procedure TKraftShapeMesh.CalculateMassData;
 begin
 end;
 
-function TKraftShapeMesh.GetSignedDistance(const Position:TKraftVector3):TKraftScalar;
+function TKraftShapeMesh.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
 begin
- result:=Mesh.GetSignedDistance(Vector3TermMatrixMulInverted(Position,fWorldTransform));
+ result:=fMesh.GetLocalSignedDistance(Position);
+end;
+
+function TKraftShapeMesh.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+begin
+ result:=fMesh.GetLocalSignedDistanceAndDirection(Position,Direction);
+end;
+
+function TKraftShapeMesh.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=fMesh.GetLocalSignedDistanceGradient(Position);
+end;
+
+function TKraftShapeMesh.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=fMesh.GetLocalSignedDistanceNormal(Position);
+end;
+
+function TKraftShapeMesh.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+begin
+ result:=fMesh.GetLocalClosestPointTo(Position);
 end;
 
 function TKraftShapeMesh.GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
@@ -21904,12 +25999,12 @@ begin
  result:=Vector3Origin;
 end;
 
-function TKraftShapeMesh.GetLocalFeatureSupportVertex(const Index:longint):TKraftVector3;
+function TKraftShapeMesh.GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
 begin
  result:=Vector3Origin;
 end;
 
-function TKraftShapeMesh.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):longint;
+function TKraftShapeMesh.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
 begin
  result:=-1;
 end;
@@ -21925,49 +26020,61 @@ begin
 end;
 
 function TKraftShapeMesh.RayCast(var RayCastData:TKraftRayCastData):boolean;
-var SkipListNodeIndex,TriangleIndex:longint;
+var SkipListNodeIndex,TriangleIndex:TKraftInt32;
     SkipListNode:PKraftMeshSkipListNode;
     Triangle:PKraftMeshTriangle;
-    First:boolean;
-    Nearest,Time,u,v:TKraftScalar;
-    Origin,Direction,p,Normal:TKraftVector3;
+    First,SidePass:boolean;
+    Nearest,Time,u,v,w:TKraftScalar;
+    Origin,Direction,InvDirection,p,Normal:TKraftVector3;
 begin
  result:=false;
  if ksfRayCastable in fFlags then begin
   Origin:=Vector3TermMatrixMulInverted(RayCastData.Origin,fWorldTransform);
   Direction:=Vector3NormEx(Vector3TermMatrixMulTransposedBasis(RayCastData.Direction,fWorldTransform));
   if Vector3LengthSquared(Direction)>EPSILON then begin
+   InvDirection:=Vector3Div(Vector3All,Direction);
    Nearest:=MAX_SCALAR;
    First:=true;
    SkipListNodeIndex:=0;
    while SkipListNodeIndex<fMesh.fCountSkipListNodes do begin
     SkipListNode:=@fMesh.fSkipListNodes[SkipListNodeIndex];
-    if AABBRayIntersect(SkipListNode^.AABB,Origin,Direction) then begin
-     TriangleIndex:=SkipListNode^.TriangleIndex;
-     while TriangleIndex>=0 do begin
-      Triangle:=@fMesh.fTriangles[TriangleIndex];
-      if RayIntersectTriangle(Origin,
-                              Direction,
-                              fMesh.fVertices[Triangle^.Vertices[0]],
-                              fMesh.fVertices[Triangle^.Vertices[1]],
-                              fMesh.fVertices[Triangle^.Vertices[2]],
-                              Time,
-                              u,
-                              v) then begin
-       p:=Vector3Add(Origin,Vector3ScalarMul(Direction,Time));
-       if ((Time>=0.0) and (Time<=RayCastData.MaxTime)) and (First or (Time<Nearest)) then begin
-        First:=false;
-        Nearest:=Time;
-        Normal:=Vector3Norm(Vector3Add(Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[0]],1.0-(u+v)),
-                            Vector3Add(Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[1]],u),
-                                       Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[2]],v))));
-        RayCastData.TimeOfImpact:=Time;
-        RayCastData.Point:=p;
-        RayCastData.Normal:=Normal;
-        result:=true;
+    if AABBRayIntersectOpt(SkipListNode^.AABB,Origin,InvDirection) then begin
+     if SkipListNode^.CountTriangles>0 then begin
+      for TriangleIndex:=SkipListNode^.FirstTriangleIndex to SkipListNode^.FirstTriangleIndex+(SkipListNode^.CountTriangles-1) do begin
+       Triangle:=@fMesh.fTriangles[TriangleIndex];
+       for SidePass:=false to fMesh.fDoubleSided do begin
+        if RayIntersectTriangle(Origin,
+                                Direction,
+                                fMesh.fVertices[Triangle^.Vertices[DoubleSidedTriangleVertexOrderIndices[SidePass,0]]],
+                                fMesh.fVertices[Triangle^.Vertices[DoubleSidedTriangleVertexOrderIndices[SidePass,1]]],
+                                fMesh.fVertices[Triangle^.Vertices[DoubleSidedTriangleVertexOrderIndices[SidePass,2]]],
+                                Time,
+                                u,
+                                v,
+                                w) then begin
+         p:=Vector3Add(Origin,Vector3ScalarMul(Direction,Time));
+         if ((Time>=0.0) and (Time<=RayCastData.MaxTime)) and (First or (Time<Nearest)) then begin
+          First:=false;
+          Nearest:=Time;
+          if fSmoothNormalsAtCasting then begin
+           Normal:=Vector3Norm(Vector3Add(Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[DoubleSidedTriangleVertexOrderIndices[SidePass,0]]],u),
+                               Vector3Add(Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[DoubleSidedTriangleVertexOrderIndices[SidePass,1]]],v),
+                                          Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[DoubleSidedTriangleVertexOrderIndices[SidePass,2]]],w))));
+          end else begin
+           Normal:=Triangle^.Plane.Normal;
+          end;
+          RayCastData.TimeOfImpact:=Time;
+          RayCastData.Point:=p;
+          if SidePass then begin
+           RayCastData.Normal:=Vector3Neg(Normal);
+          end else begin
+           RayCastData.Normal:=Normal;
+          end;
+          result:=true;
+         end;
+        end;
        end;
       end;
-      TriangleIndex:=Triangle^.Next;
      end;
      inc(SkipListNodeIndex);
     end else begin
@@ -21983,50 +26090,63 @@ begin
 end;
 
 function TKraftShapeMesh.SphereCast(var SphereCastData:TKraftSphereCastData):boolean;
-var SkipListNodeIndex,TriangleIndex:longint;
+var SkipListNodeIndex,TriangleIndex:TKraftInt32;
     SkipListNode:PKraftMeshSkipListNode;
     Triangle:PKraftMeshTriangle;
-    First:boolean;
-    Radius,Nearest,Time,u,v:TKraftScalar;
-    Origin,Direction,p,Normal:TKraftVector3;
+    First,SidePass:boolean;
+    Radius,Nearest,Time,u,v,w:TKraftScalar;
+    Origin,Direction,InvDirection,p,Normal:TKraftVector3;
 begin
+ result:=false;
  if ksfSphereCastable in fFlags then begin
   Origin:=Vector3TermMatrixMulInverted(SphereCastData.Origin,fWorldTransform);
   Radius:=SphereCastData.Radius;
   Direction:=Vector3NormEx(Vector3TermMatrixMulTransposedBasis(SphereCastData.Direction,fWorldTransform));
   if Vector3LengthSquared(Direction)>EPSILON then begin
+   InvDirection:=Vector3Div(Vector3All,Direction);
    Nearest:=MAX_SCALAR;
    First:=true;
    SkipListNodeIndex:=0;
    while SkipListNodeIndex<fMesh.fCountSkipListNodes do begin
     SkipListNode:=@fMesh.fSkipListNodes[SkipListNodeIndex];
-    if SphereCastAABB(Origin,Radius,Direction,SkipListNode^.AABB) then begin
-     TriangleIndex:=SkipListNode^.TriangleIndex;
-     while TriangleIndex>=0 do begin
-      Triangle:=@fMesh.fTriangles[TriangleIndex];
-      if SphereCastTriangle(Origin,
-                            Radius,
-                            Direction,
-                            fMesh.fVertices[Triangle^.Vertices[0]],
-                            fMesh.fVertices[Triangle^.Vertices[1]],
-                            fMesh.fVertices[Triangle^.Vertices[2]],
-                            Time,
-                            u,
-                            v) then begin
-       p:=Vector3Add(Origin,Vector3ScalarMul(Direction,Time));
-       if ((Time>=0.0) and (Time<=SphereCastData.MaxTime)) and (First or (Time<Nearest)) then begin
-        First:=false;
-        Nearest:=Time;
-        Normal:=Vector3Norm(Vector3Add(Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[0]],1.0-(u+v)),
-                            Vector3Add(Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[1]],u),
-                                       Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[2]],v))));
-        SphereCastData.TimeOfImpact:=Time;
-        SphereCastData.Point:=p;
-        SphereCastData.Normal:=Normal;
-        result:=true;
+    if SphereCastAABBOpt(Origin,Radius,InvDirection,SkipListNode^.AABB) then begin
+     if SkipListNode^.CountTriangles>0 then begin
+      for TriangleIndex:=SkipListNode^.FirstTriangleIndex to SkipListNode^.FirstTriangleIndex+(SkipListNode^.CountTriangles-1) do begin
+       Triangle:=@fMesh.fTriangles[TriangleIndex];
+       for SidePass:=false to fMesh.fDoubleSided do begin
+        if SphereCastTriangle(Origin,
+                              Radius,
+                              Direction,
+                              fMesh.fVertices[Triangle^.Vertices[DoubleSidedTriangleVertexOrderIndices[SidePass,0]]],
+                              fMesh.fVertices[Triangle^.Vertices[DoubleSidedTriangleVertexOrderIndices[SidePass,1]]],
+                              fMesh.fVertices[Triangle^.Vertices[DoubleSidedTriangleVertexOrderIndices[SidePass,2]]],
+                              Time,
+                              u,
+                              v,
+                              w) then begin
+         p:=Vector3Add(Origin,Vector3ScalarMul(Direction,Time));
+         if ((Time>=0.0) and (Time<=SphereCastData.MaxTime)) and (First or (Time<Nearest)) then begin
+          First:=false;
+          Nearest:=Time;
+          if fSmoothNormalsAtCasting then begin
+           Normal:=Vector3Norm(Vector3Add(Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[DoubleSidedTriangleVertexOrderIndices[SidePass,0]]],u),
+                               Vector3Add(Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[DoubleSidedTriangleVertexOrderIndices[SidePass,1]]],v),
+                                          Vector3ScalarMul(fMesh.fNormals[Triangle^.Normals[DoubleSidedTriangleVertexOrderIndices[SidePass,2]]],w))));
+          end else begin
+           Normal:=Triangle^.Plane.Normal;
+          end;
+          SphereCastData.TimeOfImpact:=Time;
+          SphereCastData.Point:=p;
+          if SidePass then begin
+           SphereCastData.Normal:=Vector3Neg(Normal);
+          end else begin
+           SphereCastData.Normal:=Normal;
+          end;
+          result:=true;
+         end;
+        end;
        end;
       end;
-      TriangleIndex:=Triangle^.Next;
      end;
      inc(SkipListNodeIndex);
     end else begin
@@ -22043,14 +26163,18 @@ end;
 
 {$ifdef DebugDraw}
 procedure TKraftShapeMesh.Draw(const CameraMatrix:TKraftMatrix4x4);
-var i:longint;
+{$ifdef NoOpenGL}
+begin
+end;
+{$else}
+var i:TKraftInt32;
     ModelViewMatrix:TKraftMatrix4x4;
     Triangle:PKraftMeshTriangle;
 begin
  glPushMatrix;
  glMatrixMode(GL_MODELVIEW);
  ModelViewMatrix:=Matrix4x4TermMul(fInterpolatedWorldTransform,CameraMatrix);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
  glLoadMatrixd(pointer(@ModelViewMatrix));
 {$else}
  glLoadMatrixf(pointer(@ModelViewMatrix));
@@ -22063,7 +26187,7 @@ begin
   glBegin(GL_TRIANGLES);
   for i:=0 to fMesh.fCountTriangles-1 do begin
    Triangle:=@fMesh.fTriangles[i];
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
    glNormal3dv(@fMesh.fNormals[Triangle^.Normals[0]]);
    glVertex3dv(@fMesh.fVertices[Triangle^.Vertices[0]]);
    glNormal3dv(@fMesh.fNormals[Triangle^.Normals[1]]);
@@ -22092,9 +26216,564 @@ begin
  glPopMatrix;
 end;
 {$endif}
+{$endif}
+
+constructor TKraftShapeSignedDistanceField.Create(const APhysics:TKraft;const ARigidBody:TKraftRigidBody;const aAABB:PKraftAABB=nil);
+begin
+
+ inherited Create(APhysics,ARigidBody);
+
+ fShapeType:=kstSignedDistanceField;
+
+ fFeatureRadius:=0.0;
+
+ if assigned(aAABB) then begin
+  fAABB:=aAABB^;
+ end else begin
+  fAABB.Min:=Vector3(1.0,1.0,1.0);
+  fAABB.Max:=Vector3(-1.0,-1.0,-1.0);
+ end;
+
+end;
+
+destructor TKraftShapeSignedDistanceField.Destroy;
+begin
+ inherited Destroy;
+end;
+
+function TKraftShapeSignedDistanceField.Project(const aDirection:TKraftVector3):TKraftScalar;
+var Current:TKraftVector3;
+begin
+ Current:=Vector3ScalarMul(Vector3Norm(aDirection),KRAFT_SIGNED_DISTANCE_FIELD_LARGEST_SIZE);
+ repeat
+  result:=GetLocalSignedDistance(Current);
+  if result>KRAFT_SIGNED_DISTANCE_FIELD_LARGEST_SIZE then begin
+   result:=Vector3Length(Current)-result;
+   exit;
+  end else begin
+   Vector3Scale(Current,2.0);
+  end;
+ until false;
+end;
+
+procedure TKraftShapeSignedDistanceField.CalculateAABB;
+begin
+ if (Vector3CompareEx(fAABB.Min,Vector3Origin) and Vector3CompareEx(fAABB.Max,Vector3Origin)) or
+    (fAABB.Min.x>fAABB.Max.x) or
+    (fAABB.Min.y>fAABB.Max.y) or
+    (fAABB.Min.z>fAABB.Max.z) then begin
+  fAABB.Min:=Vector3(-Project(Vector3(-1.0,0.0,0.0)),-Project(Vector3(0.0,-1.0,0.0)),-Project(Vector3(0.0,0.0,-1.0)));
+  fAABB.Max:=Vector3(Project(Vector3(1.0,0.0,0.0)),Project(Vector3(0.0,1.0,0.0)),Project(Vector3(0.0,0.0,1.0)));
+ end;
+end;
+
+procedure TKraftShapeSignedDistanceField.UpdateShapeAABB;
+begin
+ CalculateAABB;
+ fShapeAABB:=fAABB;
+end;
+
+procedure TKraftShapeSignedDistanceField.CalculateMassData;
+var IndexZ,IndexY,IndexX,Accumulator,MatrixX,MatrixY:TKraftInt32;
+    Time:TKraftScalar;
+    Total,CenterOfMassX,CenterOfMassY,CenterOfMassZ,Value:Double;
+    InertiaTensor:array[0..2,0..2] of Double;
+    Position,RelativePosition:TKraftVector3;
+begin
+
+ CalculateAABB;
+
+ if fRigidBody.fRigidBodyType=krbtStatic then begin
+
+  fMassData.Volume:=(fAABB.Max.x-fAABB.Min.x)*(fAABB.Max.y-fAABB.Min.y)*(fAABB.Max.z-fAABB.Min.z);
+  if fForcedMass>EPSILON then begin
+   fMassData.Mass:=fForcedMass;
+  end else begin
+   fMassData.Mass:=fMassData.Volume*fDensity;
+  end;
+  fMassData.Center:=Vector3Origin;
+  fMassData.Inertia:=Matrix3x3Identity;
+
+ end else begin
+
+  Accumulator:=0;
+
+  Total:=0.0;
+
+  Position:=Vector3Origin;
+
+  CenterOfMassX:=0.0;
+  CenterOfMassY:=0.0;
+  CenterOfMassZ:=0.0;
+
+  for IndexZ:=0 to KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1 do begin
+
+   Time:=IndexZ/(KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1);
+   Position.z:=(fAABB.Min.z*(1.0-Time))+(fAABB.Max.z*Time);
+
+   for IndexY:=0 to KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1 do begin
+
+    Time:=IndexY/(KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1);
+    Position.y:=(fAABB.Min.y*(1.0-Time))+(fAABB.Max.y*Time);
+
+    for IndexX:=0 to KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1 do begin
+
+     Time:=IndexX/(KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1);
+     Position.x:=(fAABB.Min.x*(1.0-Time))+(fAABB.Max.x*Time);
+
+     if GetLocalSignedDistance(Position)<EPSILON then begin
+
+      inc(Accumulator);
+
+      CenterOfMassX:=CenterOfMassX+(Position.x*fDensity);
+      CenterOfMassY:=CenterOfMassY+(Position.y*fDensity);
+      CenterOfMassZ:=CenterOfMassZ+(Position.z*fDensity);
+
+      Total:=Total+fDensity;
+
+     end;
+
+    end;
+
+   end;
+
+  end;
+
+  if Accumulator>0 then begin
+
+   fMassData.Volume:=(((fAABB.Max.x-fAABB.Min.x)*(fAABB.Max.y-fAABB.Min.y)*(fAABB.Max.z-fAABB.Min.z))*Accumulator)/KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_SAMPLES;
+
+   if fForcedMass>EPSILON then begin
+    fMassData.Mass:=fForcedMass;
+   end else begin
+    fMassData.Mass:=fMassData.Volume*fDensity;
+   end;
+
+   fMassData.Center.x:=CenterOfMassX/Total;
+   fMassData.Center.y:=CenterOfMassY/Total;
+   fMassData.Center.z:=CenterOfMassZ/Total;
+
+   for MatrixY:=0 to 2 do begin
+    for MatrixX:=0 to 2 do begin
+     InertiaTensor[MatrixY,MatrixX]:=0.0;
+    end;
+   end;
+
+   Accumulator:=0;
+
+   Total:=0.0;
+
+   for IndexZ:=0 to KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1 do begin
+
+    Time:=IndexZ/(KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1);
+    Position.z:=(fAABB.Min.z*(1.0-Time))+(fAABB.Max.z*Time);
+
+    for IndexY:=0 to KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1 do begin
+
+     Time:=IndexY/(KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1);
+     Position.y:=(fAABB.Min.y*(1.0-Time))+(fAABB.Max.y*Time);
+
+     for IndexX:=0 to KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1 do begin
+
+      Time:=IndexX/(KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES-1);
+      Position.x:=(fAABB.Min.x*(1.0-Time))+(fAABB.Max.x*Time);
+
+      if GetLocalSignedDistance(Position)<EPSILON then begin
+
+       inc(Accumulator);
+
+       Total:=Total+fDensity;
+
+       RelativePosition:=Vector3Sub(Position,fMassData.Center);
+
+       for MatrixY:=0 to 2 do begin
+        for MatrixX:=0 to 2 do begin
+         Value:=(-RelativePosition.xyz[MatrixY])*RelativePosition.xyz[MatrixX];
+         if MatrixX=MatrixY then begin
+          Value:=Value+Vector3LengthSquared(RelativePosition);
+         end;
+         InertiaTensor[MatrixY,MatrixX]:=InertiaTensor[MatrixY,MatrixX]+(Value*fDensity);
+        end;
+       end;
+
+      end;
+
+     end;
+
+    end;
+
+   end;
+
+   if Total>0.0 then begin
+    for MatrixY:=0 to 2 do begin
+     for MatrixX:=0 to 2 do begin
+      fMassData.Inertia[MatrixY,MatrixX]:=(InertiaTensor[MatrixY,MatrixX]/Total)*fMassData.Mass;
+     end;
+    end;
+   end else begin
+    fMassData.Inertia:=Matrix3x3Null;
+   end;
+
+  end else begin
+
+   fMassData.Volume:=0.0;
+   if fForcedMass>EPSILON then begin
+    fMassData.Mass:=fForcedMass;
+   end else begin
+    fMassData.Mass:=fMassData.Volume*fDensity;
+   end;
+   fMassData.Center:=Vector3Origin;
+   fMassData.Inertia:=Matrix3x3Null;
+
+  end;
+
+ end;
+
+end;
+
+function TKraftShapeSignedDistanceField.GetLocalSignedDistance(const Position:TKraftVector3):TKraftScalar;
+begin
+ result:=MAX_SCALAR;
+end;
+
+function TKraftShapeSignedDistanceField.GetLocalSignedDistanceAndDirection(const Position:TKraftVector3;out Direction:TKraftVector3):TKraftScalar;
+var Center:TKraftScalar;
+begin
+ Center:=GetLocalSignedDistance(Position);
+ Direction.x:=GetLocalSignedDistance(Vector3(Position.x+EPSILON,Position.y,Position.z))-Center;
+ Direction.y:=GetLocalSignedDistance(Vector3(Position.x,Position.y+EPSILON,Position.z))-Center;
+ Direction.z:=GetLocalSignedDistance(Vector3(Position.x,Position.y,Position.z+EPSILON))-Center;
+{$ifdef SIMD}
+ Direction.w:=0.0;
+{$endif}
+ Vector3Normalize(Direction);
+ result:=Center;
+end;
+
+function TKraftShapeSignedDistanceField.GetLocalSignedDistanceGradient(const Position:TKraftVector3):TKraftVector3;
+const EPSILON=1e-3;
+var Center:TKraftScalar;
+begin
+ Center:=GetLocalSignedDistance(Position);
+ result.x:=GetLocalSignedDistance(Vector3(Position.x+EPSILON,Position.y,Position.z))-Center;
+ result.y:=GetLocalSignedDistance(Vector3(Position.x,Position.y+EPSILON,Position.z))-Center;
+ result.z:=GetLocalSignedDistance(Vector3(Position.x,Position.y,Position.z+EPSILON))-Center;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
+ Vector3Normalize(result);
+end;
+
+function TKraftShapeSignedDistanceField.GetLocalSignedDistanceNormal(const Position:TKraftVector3):TKraftVector3;
+var Center:TKraftScalar;
+begin
+ Center:=GetLocalSignedDistance(Position);
+ result.x:=GetLocalSignedDistance(Vector3(Position.x+EPSILON,Position.y,Position.z))-Center;
+ result.y:=GetLocalSignedDistance(Vector3(Position.x,Position.y+EPSILON,Position.z))-Center;
+ result.z:=GetLocalSignedDistance(Vector3(Position.x,Position.y,Position.z+EPSILON))-Center;
+{$ifdef SIMD}
+ result.w:=0.0;
+{$endif}
+ Vector3Normalize(result);
+end;
+
+function TKraftShapeSignedDistanceField.GetLocalClosestPointTo(const Position:TKraftVector3):TKraftVector3;
+var Distance:TKraftScalar;
+    Direction:TKraftVector3;
+begin
+ Distance:=GetLocalSignedDistanceAndDirection(Position,Direction);
+ result:=Vector3Sub(Position,Vector3ScalarMul(Direction,Distance));
+end;
+
+function TKraftShapeSignedDistanceField.GetLocalFullSupport(const Direction:TKraftVector3):TKraftVector3;
+begin
+ result:=Vector3Origin;
+end;
+
+function TKraftShapeSignedDistanceField.GetLocalFeatureSupportVertex(const Index:TKraftInt32):TKraftVector3;
+begin
+ result:=Vector3Origin;
+end;
+
+function TKraftShapeSignedDistanceField.GetLocalFeatureSupportIndex(const Direction:TKraftVector3):TKraftInt32;
+begin
+ result:=-1;
+end;
+
+function TKraftShapeSignedDistanceField.GetCenter(const Transform:TKraftMatrix4x4):TKraftVector3;
+begin
+ result:=Vector3Origin;
+end;
+
+function TKraftShapeSignedDistanceField.TestPoint(const p:TKraftVector3):boolean;
+begin
+ result:=false;
+end;
+
+function TKraftShapeSignedDistanceField.RayCast(var RayCastData:TKraftRayCastData):boolean;
+var Step:TKraftInt32;
+    Time,Distance,Center:TKraftScalar;
+    Current,Origin,Direction:TKraftVector3;
+begin
+ result:=false;
+ if ksfRayCastable in fFlags then begin
+  Origin:=Vector3TermMatrixMulInverted(RayCastData.Origin,fWorldTransform);
+  Direction:=Vector3NormEx(Vector3TermMatrixMulTransposedBasis(RayCastData.Direction,fWorldTransform));
+  if (Vector3LengthSquared(Direction)>EPSILON) and AABBRayIntersect(fShapeAABB,Origin,Direction) then begin
+   Time:=0.0;
+   for Step:=1 to 2048 do begin
+    Current:=Vector3Add(Origin,Vector3ScalarMul(Direction,Time));
+    if AABBContains(fShapeAABB,Current) then begin
+     Distance:=GetLocalSignedDistance(Current);
+     if abs(Distance)<EPSILON then begin
+      RayCastData.TimeOfImpact:=Time;
+      RayCastData.Point:=Vector3TermMatrixMul(Current,fWorldTransform);
+      Center:=GetSignedDistance(RayCastData.Point);
+      RayCastData.Normal.x:=Center-GetSignedDistance(Vector3(RayCastData.Point.x+EPSILON,RayCastData.Point.y,RayCastData.Point.z));
+      RayCastData.Normal.y:=Center-GetSignedDistance(Vector3(RayCastData.Point.x,RayCastData.Point.y+EPSILON,RayCastData.Point.z));
+      RayCastData.Normal.z:=Center-GetSignedDistance(Vector3(RayCastData.Point.x,RayCastData.Point.y,RayCastData.Point.z+EPSILON));
+{$ifdef SIMD}
+      RayCastData.Normal.w:=0.0;
+{$endif}
+      Vector3Normalize(RayCastData.Normal);
+      result:=true;
+      break;
+     end else begin
+      Time:=Time+Distance;
+     end;
+    end else begin
+     break;
+    end;
+   end;
+  end;
+ end;
+end;
+
+function TKraftShapeSignedDistanceField.SphereCast(var SphereCastData:TKraftSphereCastData):boolean;
+var Step:TKraftInt32;
+    Time,Distance,Center:TKraftScalar;
+    Current,Origin,Direction:TKraftVector3;
+begin
+ result:=false;
+ if ksfSphereCastable in fFlags then begin
+  Origin:=Vector3TermMatrixMulInverted(SphereCastData.Origin,fWorldTransform);
+  Direction:=Vector3NormEx(Vector3TermMatrixMulTransposedBasis(SphereCastData.Direction,fWorldTransform));
+  if (Vector3LengthSquared(Direction)>EPSILON) and AABBRayIntersect(fShapeAABB,Origin,Direction) then begin
+   Time:=0.0;
+   for Step:=1 to 2048 do begin
+    Current:=Vector3Add(Origin,Vector3ScalarMul(Direction,Time+SphereCastData.Radius));
+    if AABBContains(fShapeAABB,Current) then begin
+     Distance:=GetLocalSignedDistance(Current);
+     if abs(Distance)<EPSILON then begin
+      SphereCastData.TimeOfImpact:=Time;
+      SphereCastData.Point:=Vector3TermMatrixMul(Current,fWorldTransform);
+      Center:=GetSignedDistance(SphereCastData.Point);
+      SphereCastData.Normal.x:=Center-GetSignedDistance(Vector3(SphereCastData.Point.x+EPSILON,SphereCastData.Point.y,SphereCastData.Point.z));
+      SphereCastData.Normal.y:=Center-GetSignedDistance(Vector3(SphereCastData.Point.x,SphereCastData.Point.y+EPSILON,SphereCastData.Point.z));
+      SphereCastData.Normal.z:=Center-GetSignedDistance(Vector3(SphereCastData.Point.x,SphereCastData.Point.y,SphereCastData.Point.z+EPSILON));
+ {$ifdef SIMD}
+      SphereCastData.Normal.w:=0.0;
+ {$endif}
+      Vector3Normalize(SphereCastData.Normal);
+      result:=true;
+      break;
+     end else begin
+      Time:=Time+Distance;
+     end;
+    end else begin
+     break;
+    end;
+   end;
+  end;
+ end;
+end;
+
+{$ifdef DebugDraw}
+procedure TKraftShapeSignedDistanceField.Draw(const CameraMatrix:TKraftMatrix4x4);
+{$ifdef NoOpenGL}
+begin
+end;
+{$else}
+ function GetOffset(a,b,t:TKraftScalar):TKraftScalar;
+ var d:Double;
+ begin
+  d:=b-a;
+  if abs(d)<EPSILON then begin
+   result:=0.5;
+  end else begin
+   result:=(t-a)/d;
+  end;
+ end;
+ procedure GetNormal(out n:TKraftVector3;const p:TKraftVector3;const Scale:TKraftScalar);
+ begin
+  n:=Vector3Norm(Vector3(GetLocalSignedDistance(Vector3(p.x-Scale,p.y,p.z))-GetLocalSignedDistance(Vector3(p.x+Scale,p.y,p.z)),
+                         GetLocalSignedDistance(Vector3(p.x,p.y-Scale,p.z))-GetLocalSignedDistance(Vector3(p.x,p.y+Scale,p.z)),
+                         GetLocalSignedDistance(Vector3(p.x,p.y,p.z-Scale))-GetLocalSignedDistance(Vector3(p.x,p.y,p.z+Scale))));
+ end;
+ procedure MarchTetrahedron(const fX,fY,fZ,Scale,Threshold:TKraftScalar);
+ const TetrahedronEdgeFlags:array[$0..$f] of TKraftUInt8=($00,$0d,$13,$1e,
+                                                          $26,$2b,$35,$38,
+                                                          $38,$35,$2b,$26,
+                                                          $1e,$13,$0d,$00);
+       TetrahedronTriangles:array[$0..$f,0..6] of TKraftInt8=
+        ((-1, -1, -1, -1, -1, -1, -1),
+         ( 0,  3,  2, -1, -1, -1, -1),
+         ( 0,  1,  4, -1, -1, -1, -1),
+         ( 1,  4,  2,  2,  4,  3, -1),
+         ( 1,  2,  5, -1, -1, -1, -1),
+         ( 0,  3,  5,  0,  5,  1, -1),
+         ( 0,  2,  5,  0,  5,  4, -1),
+         ( 5,  4,  3, -1, -1, -1, -1),
+         ( 3,  4,  5, -1, -1, -1, -1),
+         ( 4,  5,  0,  5,  2,  0, -1),
+         ( 1,  5,  0,  5,  3,  0, -1),
+         ( 5,  2,  1, -1, -1, -1, -1),
+         ( 3,  4,  2,  2,  4,  1, -1),
+         ( 4,  1,  0, -1, -1, -1, -1),
+         ( 2,  3,  0, -1, -1, -1, -1),
+         (-1, -1, -1, -1, -1, -1, -1));
+        TetrahedronEdgeConnection:array[0..5,0..1] of TKraftUInt8=
+         ((0,1),(1,2),(2,0),(0,3),(1,3),(2,3));
+        TetrahedronsInACube:array[0..5,0..3] of TKraftUInt8=
+         ((0,5,1,6),
+          (0,1,2,6),
+          (0,2,3,6),
+          (0,3,7,6),
+          (0,7,4,6),
+          (0,4,5,6));
+ var TetrahedronPosition:array[0..3] of PKraftVector3;
+     TetrahedronValue:array[0..7] of TKraftScalar;
+  procedure FlushTetrahedron;
+  var Edge,v0,v1,EdgeFlags,Triangle,Corner,Vertex,Flags:TKraftInt32;
+      Offset,InvOffset:TKraftScalar;
+      EdgeVertex,EdgeNormal:array[0..5] of TKraftVector3;
+      //FaceIndices:array[0..2] of TKraftInt32;
+  begin
+   Flags:=0;
+   for Vertex:=0 to 3 do begin
+    if TetrahedronValue[Vertex]<=Threshold then begin
+     Flags:=Flags or (1 shl Vertex);
+    end;
+   end;
+   EdgeFlags:=TetrahedronEdgeFlags[Flags];
+   if EdgeFlags=0 then begin
+    exit;
+   end;
+   for Edge:=0 to 5 do begin
+    if (EdgeFlags and (1 shl Edge))<>0 then begin
+     v0:=TetrahedronEdgeConnection[Edge,0];
+     v1:=TetrahedronEdgeConnection[Edge,1];
+     Offset:=GetOffset(TetrahedronValue[v0],TetrahedronValue[v1],Threshold);
+     InvOffset:=1.0-Offset;
+     EdgeVertex[Edge].x:=(InvOffset*TetrahedronPosition[v0]^.x)+(Offset*TetrahedronPosition[v1]^.x);
+     EdgeVertex[Edge].y:=(InvOffset*TetrahedronPosition[v0]^.y)+(Offset*TetrahedronPosition[v1]^.y);
+     EdgeVertex[Edge].z:=(InvOffset*TetrahedronPosition[v0]^.z)+(Offset*TetrahedronPosition[v1]^.z);
+     GetNormal(EdgeNormal[Edge],EdgeVertex[Edge],Scale);
+    end;
+   end;
+   for Triangle:=0 to 1 do begin
+    if TetrahedronTriangles[Flags,3*Triangle]<0 then begin
+     break;
+    end;
+    for Corner:=0 to 2 do begin
+     Vertex:=TetrahedronTriangles[Flags,(3*Triangle)+Corner];
+     glNormal3f(EdgeNormal[Vertex].x,EdgeNormal[Vertex].y,EdgeNormal[Vertex].z);
+     glVertex3f(EdgeVertex[Vertex].x,EdgeVertex[Vertex].y,EdgeVertex[Vertex].z);
+//   FaceIndices[Corner]:=PutVertex(EdgeVertex[Vertex],EdgeNormal[Vertex]);
+    end;
+//  PutFace(FaceIndices[0],FaceIndices[1],FaceIndices[2]);
+   end;
+  end;
+ const VertexOffset:array[0..7,0..2] of TKraftUInt8=((0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1),(1,0,1),(1,1,1),(0,1,1));
+ var Vertex,Tetrahedron,VertexInACube:TKraftInt32;
+     CubePosition:array[0..7] of TKraftVector3;
+     CubeValue:array[0..7] of TKraftScalar;
+     sX,sY,sZ,InvScale:TKraftScalar;
+ begin
+  InvScale:=1.0/Scale;
+  for Vertex:=0 to 7 do begin
+   sX:=fX+(VertexOffset[Vertex,0]*Scale);
+   sY:=fY+(VertexOffset[Vertex,1]*Scale);
+   sZ:=fZ+(VertexOffset[Vertex,2]*Scale);
+   CubePosition[Vertex].x:=sX;
+   CubePosition[Vertex].y:=sY;
+   CubePosition[Vertex].z:=sZ;
+   CubeValue[Vertex]:=GetLocalSignedDistance(Vector3(sX,sY,sZ))*InvScale;
+  end;
+  for Tetrahedron:=0 to 6 do begin
+   for Vertex:=0 to 3 do begin
+    VertexInACube:=TetrahedronsInACube[Tetrahedron,Vertex];
+    TetrahedronPosition[Vertex]:=@CubePosition[VertexInACube];
+    TetrahedronValue[Vertex]:=CubeValue[VertexInACube];
+   end;
+   FlushTetrahedron;
+  end;
+ end;
+var ModelViewMatrix:TKraftMatrix4x4;
+    IndexZ,IndexY,IndexX:TKraftInt32;
+    Time,MinT,MaxT,Scale:Double;
+    Position:TKraftVector3;
+begin
+
+ glPushMatrix;
+ glMatrixMode(GL_MODELVIEW);
+ ModelViewMatrix:=Matrix4x4TermMul(fInterpolatedWorldTransform,CameraMatrix);
+{$ifdef KraftUseDouble}
+ glLoadMatrixd(pointer(@ModelViewMatrix));
+{$else}
+ glLoadMatrixf(pointer(@ModelViewMatrix));
+{$endif}
+
+ if fDrawDisplayList=0 then begin
+  fDrawDisplayList:=glGenLists(1);
+  glNewList(fDrawDisplayList,GL_COMPILE);
+
+  MinT:=Min(fAABB.Min.x,Min(fAABB.Min.y,fAABB.Min.z));
+  MaxT:=Max(fAABB.Max.x,Max(fAABB.Max.y,fAABB.Max.z));
+
+  Scale:=(MaxT-MinT)/KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES;
+
+  glBegin(GL_TRIANGLES);
+
+  for IndexZ:=0 to KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES do begin
+
+   Time:=IndexZ/KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES;
+   Position.z:=(MinT*(1.0-Time))+(MaxT*Time);
+
+   for IndexY:=0 to KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES do begin
+
+    Time:=IndexY/KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES;
+    Position.y:=(MinT*(1.0-Time))+(MaxT*Time);
+
+    for IndexX:=0 to KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES do begin
+
+     Time:=IndexX/KRAFT_COUNT_SIGNED_DISTANCE_FIELD_VOLUME_AXIS_SAMPLES;
+     Position.x:=(MinT*(1.0-Time))+(MaxT*Time);
+
+     MarchTetrahedron(Position.x,Position.y,Position.z,Scale,0.5);
+
+    end;
+
+   end;
+
+  end;
+
+  glEnd;
+
+  glEndList;
+ end;
+
+ if fDrawDisplayList<>0 then begin
+  glCallList(fDrawDisplayList);
+ end;
+
+ glPopMatrix;
+end;
+{$endif}
+{$endif}
 
 procedure TKraftContactPair.GetSolverContactManifold(out SolverContactManifold:TKraftSolverContactManifold;const WorldTransformA,WorldTransformB:TKraftMatrix4x4;const ContactManifoldMode:TKraftContactPairContactManifoldMode);
-var ContactIndex:longint;
+var ContactIndex:TKraftInt32;
     Contact:PKraftContact;
     SolverContact:PKraftSolverContact;
     PointA,PointB,PlanePoint,ClipPoint,cA,cB:TKraftVector3;
@@ -22250,16 +26929,16 @@ begin
  end;
 end;
 
-procedure TKraftContactPair.DetectCollisions(const ContactManager:TKraftContactManager;const TriangleShape:TKraftShape=nil;const ThreadIndex:longint=0;const SpeculativeContacts:boolean=true;const DeltaTime:double=0.0);
-var OldManifoldCountContacts:longint;
+procedure TKraftContactPair.DetectCollisions(const ContactManager:TKraftContactManager;const TriangleShape:TKraftShape=nil;const ThreadIndex:TKraftInt32=0;const SpeculativeContacts:boolean=true;const DeltaTime:double=0.0);
+var OldManifoldCountContacts:TKraftInt32;
     OldContactManifoldType:TKraftContactManifoldType;
     ShapeTriangle:TKraftShapeTriangle;
- function CreateFeatureID(const ElementA,ElementB:longword):TKraftContactFeatureID; overload; {$ifdef caninline}inline;{$endif}
+ function CreateFeatureID(const ElementA,ElementB:TKraftUInt32):TKraftContactFeatureID; overload; {$ifdef caninline}inline;{$endif}
  begin
   result.ElementA:=ElementA;
   result.ElementB:=ElementB;
  end;
- function CreateFeatureID(const Key:int64):TKraftContactFeatureID; overload; {$ifdef caninline}inline;{$endif}
+ function CreateFeatureID(const Key:TKraftInt64):TKraftContactFeatureID; overload; {$ifdef caninline}inline;{$endif}
  begin
   result.Key:=Key;
  end;
@@ -22377,7 +27056,7 @@ var OldManifoldCountContacts:longint;
  var Alpha,HalfLength,Distance:TKraftScalar;
      CenterA,CenterB,Position,GeometryDirection:TKraftVector3;
  begin
-  GeometryDirection:=PKraftVector3(pointer(@ShapeB.fWorldTransform[1,0]))^;
+  GeometryDirection:=Vector3(PKraftRawVector3(pointer(@ShapeB.fWorldTransform[1,0]))^);
   CenterA:=Vector3TermMatrixMul(ShapeA.fLocalCentroid,ShapeA.fWorldTransform);
   CenterB:=Vector3TermMatrixMul(ShapeB.fLocalCentroid,ShapeB.fWorldTransform);
   Alpha:=(GeometryDirection.x*(CenterA.x-CenterB.x))+(GeometryDirection.y*(Centera.y-CenterB.y))+(GeometryDirection.z*(CenterA.z-CenterB.z));
@@ -22394,7 +27073,7 @@ var OldManifoldCountContacts:longint;
   end;
  end;
  procedure CollideSphereWithConvexHull(ShapeA:TKraftShapeSphere;ShapeB:TKraftShapeConvexHull); {$ifdef caninline}inline;{$endif}
- var FaceIndex,ClosestFaceIndex,VertexIndex,BestClosestFaceIndex:longint;
+ var FaceIndex,ClosestFaceIndex,VertexIndex,BestClosestFaceIndex:TKraftInt32;
      Distance,ClosestDistance,BestClosestPointDistance,d:TKraftScalar;
      Center,SphereCenter,Normal,ClosestPoint,BestClosestPointOnHull,BestClosestPointNormal,ab,ap,a,b,v,n:TKraftVector3;
      InsideSphere,InsidePolygon,HasBestClosestPoint:boolean;
@@ -22422,7 +27101,7 @@ var OldManifoldCountContacts:longint;
                              GJK.ClosestPoints[1],
                              ShapeA.fRadius,
                              0.0,
-                             CreateFeatureID(-2),  
+                             CreateFeatureID(-2),
                              false);
    end;
 
@@ -22526,16 +27205,19 @@ var OldManifoldCountContacts:longint;
   end;
  end;
  procedure CollideSphereWithBox(ShapeA:TKraftShapeSphere;ShapeB:TKraftShapeBox); {$ifdef caninline}inline;{$endif}
- //const ModuloThree:array[0..5] of longint=(0,1,2,0,1,2);
+ //const ModuloThree:array[0..5] of TKraftInt32=(0,1,2,0,1,2);
  var IntersectionDist,ContactDist,DistSqr,FaceDist,MinDist:TKraftScalar;
      Center,SphereRelativePosition,ClosestPoint,Normal:TKraftVector3;
-     Axis,AxisSign,BestFaceIndex:longint;
+     Axis,AxisSign,BestFaceIndex:TKraftInt32;
  begin
   Center:=Vector3TermMatrixMul(ShapeA.fLocalCentroid,ShapeA.fWorldTransform);
   SphereRelativePosition:=Vector3TermMatrixMulInverted(Center,ShapeB.fWorldTransform);
   ClosestPoint.x:=Min(Max(SphereRelativePosition.x,-ShapeB.fExtents.x),ShapeB.fExtents.x);
   ClosestPoint.y:=Min(Max(SphereRelativePosition.y,-ShapeB.fExtents.y),ShapeB.fExtents.y);
   ClosestPoint.z:=Min(Max(SphereRelativePosition.z,-ShapeB.fExtents.z),ShapeB.fExtents.z);
+{$ifdef SIMD}
+  ClosestPoint.w:=0.0;
+{$endif}
   Normal:=Vector3Sub(SphereRelativePosition,ClosestPoint);
   DistSqr:=Vector3LengthSquared(Normal);
   IntersectionDist:=ShapeA.fRadius;
@@ -22619,8 +27301,8 @@ var OldManifoldCountContacts:longint;
   end;
  end;
  procedure CollideSphereWithTriangle(ShapeA:TKraftShapeSphere;ShapeB:TKraftShapeTriangle); {$ifdef caninline}inline;{$endif}
- const ModuloThree:array[0..5] of longint=(0,1,2,0,1,2);
- var i:longint;
+ const ModuloThree:array[0..5] of TKraftInt32=(0,1,2,0,1,2);
+ var i:TKraftInt32;
      Radius,RadiusWithThreshold,DistanceFromPlane,ContactRadiusSqr,DistanceSqr:TKraftScalar;
      Center,SphereCenter,Normal,P0ToCenter,ContactPointOnTriangle,NearestOnEdge,ContactToCenter:TKraftVector3;
      IsInsideContactPlane,HasContact,IsEdge:boolean;
@@ -22686,8 +27368,13 @@ var OldManifoldCountContacts:longint;
   CenterA:=Vector3TermMatrixMul(ShapeA.fLocalCenterOfMass,ShapeA.fWorldTransform);
   CenterB:=Vector3TermMatrixMul(ShapeB.fLocalCenterOfMass,ShapeB.fWorldTransform);
 
+{$ifdef SIMD}
+  GeometryDirectionA:=Vector3(PKraftRawVector3(pointer(@ShapeA.fWorldTransform[1,0]))^);
+  GeometryDirectionB:=Vector3(PKraftRawVector3(pointer(@ShapeB.fWorldTransform[1,0]))^);
+{$else}
   GeometryDirectionA:=PKraftVector3(pointer(@ShapeA.fWorldTransform[1,0]))^;
   GeometryDirectionB:=PKraftVector3(pointer(@ShapeB.fWorldTransform[1,0]))^;
+{$endif}
 
   RadiusA:=ShapeA.fRadius;
   RadiusB:=ShapeB.fRadius;
@@ -22737,16 +27424,16 @@ var OldManifoldCountContacts:longint;
     if SquaredDistance<SquaredRadiiWithTolerance then begin
      AddImplicitContact(ClosestPointA,ClosestPointB,RadiusA,RadiusB,CreateFeatureID(1),false);
     end;
-    
+
    end;
 
   end;
 
 
  end;
- procedure CollideCapsuleWithConvexHull(ShapeA:TKraftShapeCapsule;ShapeB:TKraftShapeConvexHull); {$ifdef caninline}inline;{$endif}
+ procedure CollideCapsuleWithConvexHull(ShapeA:TKraftShapeCapsule;ShapeB:TKraftShapeConvexHull); // {$ifdef caninline}inline;{$endif}
  const Tolerance=0.005;
- var FaceIndex,VertexIndex,OtherVertexIndex,PointIndex,MaxFaceIndex,MaxEdgeIndex,EdgeIndex:longint;
+ var FaceIndex,VertexIndex,OtherVertexIndex,PointIndex,MaxFaceIndex,MaxEdgeIndex,EdgeIndex:TKraftInt32;
      CapsuleRadius,Distance,MaxFaceSeparation,MaxEdgeSeparation,Separation,L:TKraftScalar;
      CapsulePosition,CapsuleAxis,CapsulePointStart,CapsulePointEnd,Normal,FaceNormal,{MaxFaceSeparateAxis,}
      MaxEdgeSeparateAxis,CenterB,Ea,Eb,Ea_x_Eb:TKraftVector3;
@@ -22793,7 +27480,7 @@ var OldManifoldCountContacts:longint;
   GJK.UseRadii:=false;
 
   GJK.Run;
-                                
+
   if (GJK.Distance>0.0) and not GJK.Failed then begin
 
    // Shallow contact
@@ -22922,7 +27609,7 @@ var OldManifoldCountContacts:longint;
     end;
 
    end;
-         
+
    if (MaxEdgeIndex>=0) and (MaxEdgeSeparation>(MaxFaceSeparation+0.05)) then begin
     Edge:=@ShapeB.fConvexHull.fEdges[MaxEdgeIndex];
     if GetEdgeContact(ClosestPoints[0],
@@ -22979,7 +27666,7 @@ var OldManifoldCountContacts:longint;
 
  end;
  procedure CollideCapsuleWithTriangle(ShapeA:TKraftShapeCapsule;ShapeB:TKraftShapeTriangle); {$ifdef caninline}inline;{$endif}
- var Index,Count:longint;
+ var Index,Count:TKraftInt32;
      Radius,HalfLength,SquaredDistance,SquaredRadius,d:TKraftScalar;
      Center,GeometryDirection,HalfAxis,pa,pb,Normal:TKraftVector3;
      Segment:TKraftSegment;
@@ -22991,7 +27678,7 @@ var OldManifoldCountContacts:longint;
 
   Center:=Vector3TermMatrixMulInverted(Vector3TermMatrixMul(ShapeA.fLocalCentroid,ShapeA.fWorldTransform),ShapeB.fWorldTransform);
 
-  GeometryDirection:=Vector3TermMatrixMulTransposedBasis(PKraftVector3(pointer(@ShapeA.fWorldTransform[1,0]))^,ShapeB.fWorldTransform);
+  GeometryDirection:=Vector3TermMatrixMulTransposedBasis(Vector3(PKraftRawVector3(pointer(@ShapeA.fWorldTransform[1,0]))^),ShapeB.fWorldTransform);
 
   Triangle.Points[0]:=ShapeB.fConvexHull.fVertices[0].Position;
   Triangle.Points[1]:=ShapeB.fConvexHull.fVertices[1].Position;
@@ -23137,7 +27824,7 @@ var OldManifoldCountContacts:longint;
    end;
   end;
   procedure QueryFaceDirections(const HullA,HullB:TKraftShapeConvexHull;out OutFaceQuery:TKraftContactFaceQuery); {$ifdef caninline}inline;{$endif}
-  var MaxIndex,Index:longint;
+  var MaxIndex,Index:TKraftInt32;
       MaxSeparation,Separation:TKraftScalar;
       Plane:TKraftPlane;
       Transform:TKraftMatrix4x4;
@@ -23161,7 +27848,7 @@ var OldManifoldCountContacts:longint;
   end;
   procedure QueryEdgeDirections(const HullA,HullB:TKraftShapeConvexHull;out OutEdgeQuery:TKraftContactEdgeQuery); {$ifdef caninline}inline;{$endif}
   var EdgeA,EdgeB:PKraftConvexHullEdge;
-      IndexA,IndexB,MaxIndexA,MaxIndexB:longint;
+      IndexA,IndexB,MaxIndexA,MaxIndexB:TKraftInt32;
       MaxSeparation,Separation,L:TKraftScalar;
       CenterA,Pa,Qa,Ea,Ua,Va,Pb,Qb,Eb,Ub,Vb,Ea_x_Eb,Normal,MaxNormal:TKraftVector3;
       Transform:TKraftMatrix4x4;
@@ -23248,8 +27935,8 @@ var OldManifoldCountContacts:longint;
     result:=false;
    end;
   end;
-  function FindIncidentFaceIndex(const ReferenceHull:TKraftShapeConvexHull;const ReferenceFaceIndex:longint;const IncidentHull:TKraftShapeConvexHull):longint; {$ifdef caninline}inline;{$endif}
-  var i:longint;
+  function FindIncidentFaceIndex(const ReferenceHull:TKraftShapeConvexHull;const ReferenceFaceIndex:TKraftInt32;const IncidentHull:TKraftShapeConvexHull):TKraftInt32; {$ifdef caninline}inline;{$endif}
+  var i:TKraftInt32;
       MinDot,Dot:TKraftScalar;
       ReferenceNormal:TKraftVector3;
   begin
@@ -23266,9 +27953,12 @@ var OldManifoldCountContacts:longint;
     end;
    end;
   end;
-  procedure ClipFaceContactPoints(const ReferenceHull:TKraftShapeConvexHull;const ReferenceFaceIndex:longint;const IncidentHull:TKraftShapeConvexHull;const IncidentFaceIndex:longint;const Flip:boolean);
+  procedure ClipFaceContactPoints(const ReferenceHull:TKraftShapeConvexHull;const ReferenceFaceIndex:TKraftInt32;const IncidentHull:TKraftShapeConvexHull;const IncidentFaceIndex:TKraftInt32;const Flip:boolean);
   var Contact:PKraftContact;
-      ReferenceVertexIndex,OtherReferenceVertexIndex,IncidentVertexIndex,CliVertexIndex,ReferenceEdgeIndexOffset,IncidentEdgeIndexOffset:longint;
+      ReferenceVertexIndex,OtherReferenceVertexIndex,IncidentVertexIndex,CliVertexIndex,
+      ReferenceEdgeIndexOffset,IncidentEdgeIndexOffset{$ifdef DebugDraw},
+      DebugClipVertexListIndex{$endif}:TKraftInt32;
+      {$ifdef DebugDraw}DebugClipVertexListOK:boolean;{$endif}
       ReferenceFace,IncidentFace:PKraftConvexHullFace;
       ClipVertex,PreviousClipVertex,CurrentClipVertex:PKraftClipVertex;
       PreviousClipVertexDistance,CurrentClipVertexDistance,Distance:TKraftScalar;
@@ -23298,31 +27988,43 @@ var OldManifoldCountContacts:longint;
    end;
 
 {$ifdef DebugDraw}
-    if (ContactManager.fPhysics.SingleThreaded or (ContactManager.fPhysics.fCountThreads<2)) and (ContactManager.fCountDebugClipVertexLists<length(ContactManager.fDebugClipVertexLists)) then begin
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.r:=0.5;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.g:=1.0;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.b:=0.5;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.a:=1.0;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].Clear;
-     for CliVertexIndex:=0 to ClipVertices[0].Count-1 do begin
-      ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].Add(ClipVertices[0].Vertices[CliVertexIndex]);
+   if (ContactManager.fCountDebugClipVertexLists+1)<length(ContactManager.fDebugClipVertexLists) then begin
+    ContactManager.fDebugClipVertexListLock.Acquire;
+    try
+     DebugClipVertexListOK:=(ContactManager.fCountDebugClipVertexLists+1)<length(ContactManager.fDebugClipVertexLists);
+     if DebugClipVertexListOK then begin
+      DebugClipVertexListIndex:=InterlockedExchangeAdd(ContactManager.fCountDebugClipVertexLists,2);
      end;
-     inc(ContactManager.fCountDebugClipVertexLists);
+    finally
+     ContactManager.fDebugClipVertexListLock.Release;
     end;
-    if (ContactManager.fPhysics.SingleThreaded or (ContactManager.fPhysics.fCountThreads<2)) and (ContactManager.fCountDebugClipVertexLists<length(ContactManager.fDebugClipVertexLists)) then begin
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.r:=1.0;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.g:=0.5;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.b:=1.0;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.a:=1.0;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].Clear;
-     for ReferenceVertexIndex:=0 to ReferenceFace^.CountVertices-1 do begin
-      ReferencePoint:=Vector3TermMatrixMul(ReferenceHull.fConvexHull.fVertices[ReferenceFace^.Vertices[ReferenceVertexIndex]].Position,ReferenceHull.fWorldTransform);
-      FeatureID.ElementA:=ReferenceEdgeIndexOffset+ReferenceVertexIndex;
-      FeatureID.ElementB:=ReferenceEdgeIndexOffset+(ReferenceVertexIndex+1);
-      ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].Add(ReferencePoint,FeatureID);
+    if DebugClipVertexListOK then begin
+     begin
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.r:=0.5;
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.g:=1.0;
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.b:=0.5;
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.a:=1.0;
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].Clear;
+      for CliVertexIndex:=0 to ClipVertices[0].Count-1 do begin
+       ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].Add(ClipVertices[0].Vertices[CliVertexIndex]);
+      end;
      end;
-     inc(ContactManager.fCountDebugClipVertexLists);
+     inc(DebugClipVertexListIndex);
+     begin
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.r:=1.0;
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.g:=0.5;
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.b:=1.0;
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.a:=1.0;
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].Clear;
+      for ReferenceVertexIndex:=0 to ReferenceFace^.CountVertices-1 do begin
+       ReferencePoint:=Vector3TermMatrixMul(ReferenceHull.fConvexHull.fVertices[ReferenceFace^.Vertices[ReferenceVertexIndex]].Position,ReferenceHull.fWorldTransform);
+       FeatureID.ElementA:=ReferenceEdgeIndexOffset+ReferenceVertexIndex;
+       FeatureID.ElementB:=ReferenceEdgeIndexOffset+(ReferenceVertexIndex+1);
+       ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].Add(ReferencePoint,FeatureID);
+      end;
+     end;
     end;
+   end;
 {$endif}
 
    ClipVertices[1]:=ContactManager.fClipVertexLists[ThreadIndex,1];
@@ -23373,17 +28075,27 @@ var OldManifoldCountContacts:longint;
    end;
 
 {$ifdef DebugDraw}
-    if (ContactManager.fPhysics.SingleThreaded or (ContactManager.fPhysics.fCountThreads<2)) and (ContactManager.fCountDebugClipVertexLists<length(ContactManager.fDebugClipVertexLists)) then begin
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.r:=0.5;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.g:=0.5;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.b:=1.0;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].fColor.a:=1.0;
-     ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].Clear;
-     for CliVertexIndex:=0 to ClipVertices[0].Count-1 do begin
-      ContactManager.fDebugClipVertexLists[ContactManager.fCountDebugClipVertexLists].Add(ClipVertices[0].Vertices[CliVertexIndex]);
+   if ContactManager.fCountDebugClipVertexLists<length(ContactManager.fDebugClipVertexLists) then begin
+    ContactManager.fDebugClipVertexListLock.Acquire;
+    try
+     DebugClipVertexListOK:=ContactManager.fCountDebugClipVertexLists<length(ContactManager.fDebugClipVertexLists);
+     if DebugClipVertexListOK then begin
+      DebugClipVertexListIndex:=InterlockedExchangeAdd(ContactManager.fCountDebugClipVertexLists,1);
      end;
-     inc(ContactManager.fCountDebugClipVertexLists);
+    finally
+     ContactManager.fDebugClipVertexListLock.Release;
     end;
+    if DebugClipVertexListOK then begin
+     ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.r:=0.5;
+     ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.g:=0.5;
+     ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.b:=1.0;
+     ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].fColor.a:=1.0;
+     ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].Clear;
+     for CliVertexIndex:=0 to ClipVertices[0].Count-1 do begin
+      ContactManager.fDebugClipVertexLists[DebugClipVertexListIndex].Add(ClipVertices[0].Vertices[CliVertexIndex]);
+     end;
+    end;
+   end;
 {$endif}
 
    for CliVertexIndex:=0 to ClipVertices[0].Count-1 do begin
@@ -23422,7 +28134,7 @@ var OldManifoldCountContacts:longint;
   end;
  var Physics:TKraft;
      Contact:PKraftContact;
-     ReferenceFaceIndex,IncidentFaceIndex,Index,ValidContacts:longint;
+     ReferenceFaceIndex,IncidentFaceIndex,Index,ValidContacts:TKraftInt32;
      EdgeA,EdgeB:PKraftConvexHullEdge;
      PenetrationDepth:TKraftScalar;
      a0,a1,b0,b1,pa,pb,Normal:TKraftVector3;
@@ -23575,8 +28287,8 @@ var OldManifoldCountContacts:longint;
       Contact^.LocalPoints[0]:=Vector3TermMatrixMulInverted(pa,Shapes[0].fWorldTransform);
       Contact^.LocalPoints[1]:=Vector3TermMatrixMulInverted(pb,Shapes[1].fWorldTransform);
       Contact^.Penetration:=PenetrationDepth;
-      Contact^.FeatureID.ElementA:=longword(Manifold.EdgeQuery.IndexA) or longword($80000000);
-      Contact^.FeatureID.ElementB:=longword(Manifold.EdgeQuery.IndexB) or longword($80000000);
+      Contact^.FeatureID.ElementA:=TKraftUInt32(Manifold.EdgeQuery.IndexA) or TKraftUInt32($80000000);
+      Contact^.FeatureID.ElementB:=TKraftUInt32(Manifold.EdgeQuery.IndexB) or TKraftUInt32($80000000);
      end;
     end;
 
@@ -23620,10 +28332,10 @@ var OldManifoldCountContacts:longint;
   end;
 
  end;
- procedure CollideWithMPRAndPerturbation(ShapeA,ShapeB:TKraftShape);
+ procedure CollideWithMPROrSignedDistanceFieldAndPerturbation(ShapeA,ShapeB:TKraftShape);
  const PerturbationAngleLimit=pi*0.125;
        pi2=pi*2.0;
- var PerturbationIterations,PreturbIteration,ContactIndex:longint;
+ var PerturbationIterations,PreturbIteration,ContactIndex:TKraftInt32;
      Contact:PKraftContact;
      PenetrationDepth,RadiusA,RadiusB,PerturbationAngle,IterationAngle:TKraftScalar;
      Normal,pa,pb,tpa,tpb,tp,v0,v1,SeperateNormalWorldSpace:TKraftVector3;
@@ -23641,9 +28353,18 @@ var OldManifoldCountContacts:longint;
 
   Manifold.CountContacts:=0;
 
-  if MPRPenetration(ShapeA,ShapeB,ShapeA.fWorldTransform,ShapeB.fWorldTransform,pa,pb,Normal,PenetrationDepth) then begin
+  if (ShapeA.ShapeType=kstSignedDistanceField) or (ShapeB.ShapeType=kstSignedDistanceField) then begin
+   OK:=SignedDistanceFieldPenetration(ShapeA,ShapeB,ShapeA.fWorldTransform,ShapeB.fWorldTransform,pa,pb,Normal,PenetrationDepth);
+  end else begin
+   OK:=MPRPenetration(ShapeA,ShapeB,ShapeA.fWorldTransform,ShapeB.fWorldTransform,pa,pb,Normal,PenetrationDepth);
+  end;
+
+  if OK then begin
 
    Manifold.LocalNormal:=Vector3TermMatrixMulTransposedBasis(Vector3Neg(Normal),Shapes[1].fWorldTransform);
+   if Vector3LengthSquared(Manifold.LocalNormal)<EPSILON then begin
+    Manifold.LocalNormal:=Vector3YAxis;
+   end;
 
    SeperateNormalWorldSpace:=Normal;
    GetPlaneSpace(SeperateNormalWorldSpace,v0,v1);
@@ -23682,15 +28403,20 @@ var OldManifoldCountContacts:longint;
     PerturbationRotationQuaternion2:=QuaternionMul(QuaternionMul(QuaternionInverse(PerturbationRotationQuaternion1),PerturbationRotationQuaternion0),PerturbationRotationQuaternion1);
     PerturbatedTransform:=QuaternionToMatrix4x4(QuaternionMul(UnpreturbedQuaternion,PerturbationRotationQuaternion2));
     if PerturbationA then begin
-     PKraftVector3(pointer(@PerturbatedTransform[3,0]))^:=PKraftVector3(pointer(@ShapeA.fWorldTransform[3,0]))^;
+     PKraftVector3(pointer(@PerturbatedTransform[3,0]))^.xyz:=PKraftVector3(pointer(@ShapeA.fWorldTransform[3,0]))^.xyz;
      ShapeTransformMatrices[0]:=@PerturbatedTransform;
      ShapeTransformMatrices[1]:=@ShapeB.fWorldTransform;
     end else begin
-     PKraftVector3(pointer(@PerturbatedTransform[3,0]))^:=PKraftVector3(pointer(@ShapeB.fWorldTransform[3,0]))^;
+     PKraftVector3(pointer(@PerturbatedTransform[3,0]))^.xyz:=PKraftVector3(pointer(@ShapeB.fWorldTransform[3,0]))^.xyz;
      ShapeTransformMatrices[0]:=@ShapeA.fWorldTransform;
      ShapeTransformMatrices[1]:=@PerturbatedTransform;
     end;
-    if MPRPenetration(ShapeA,ShapeB,ShapeTransformMatrices[0]^,ShapeTransformMatrices[1]^,tpa,tpb,Normal,PenetrationDepth) then begin
+    if (ShapeA.ShapeType=kstSignedDistanceField) or (ShapeB.ShapeType=kstSignedDistanceField) then begin
+     OK:=SignedDistanceFieldPenetration(ShapeA,ShapeB,ShapeTransformMatrices[0]^,ShapeTransformMatrices[1]^,tpa,tpb,Normal,PenetrationDepth);
+    end else begin
+     OK:=MPRPenetration(ShapeA,ShapeB,ShapeTransformMatrices[0]^,ShapeTransformMatrices[1]^,tpa,tpb,Normal,PenetrationDepth);
+    end;
+    if OK then begin
      if PerturbationA then begin
       Vector3MatrixMul(tpa,Matrix4x4TermMul(Matrix4x4TermInverse(PerturbatedTransform),ShapeA.fWorldTransform));
      end else begin
@@ -23746,9 +28472,9 @@ var OldManifoldCountContacts:longint;
   end;
  end;
  procedure ProcessPersistentContactManifold(ShapeA,ShapeB:TKraftShape);
-  function FindReplacableContact(const NewContact:TKraftContact):longint;
-  const Indices:array[0..3,0..2] of longint=((1,2,3),(0,2,3),(0,1,3),(0,1,2));
-  var i,MaxPenetrationIndex:longint;
+  function FindReplacableContact(const NewContact:TKraftContact):TKraftInt32;
+  const Indices:array[0..3,0..2] of TKraftInt32=((1,2,3),(0,2,3),(0,1,3),(0,1,2));
+  var i,MaxPenetrationIndex:TKraftInt32;
       MaxPenetration,Area,BiggestArea:single;
       Contact:PKraftContact;
   begin
@@ -23786,6 +28512,9 @@ var OldManifoldCountContacts:longint;
    Center.x:=(ShapeTriangle.fConvexHull.fVertices[0].Position.x+ShapeTriangle.fConvexHull.fVertices[1].Position.x+ShapeTriangle.fConvexHull.fVertices[2].Position.x)/3.0;
    Center.y:=(ShapeTriangle.fConvexHull.fVertices[0].Position.y+ShapeTriangle.fConvexHull.fVertices[1].Position.y+ShapeTriangle.fConvexHull.fVertices[2].Position.y)/3.0;
    Center.z:=(ShapeTriangle.fConvexHull.fVertices[0].Position.z+ShapeTriangle.fConvexHull.fVertices[1].Position.z+ShapeTriangle.fConvexHull.fVertices[2].Position.z)/3.0;
+{$ifdef SIMD}
+   Center.w:=0.0;
+{$endif}
    ShapeTriangle.fConvexHull.fVertices[0].Position:=Vector3Sub(ShapeTriangle.fConvexHull.fVertices[0].Position,Center);
    ShapeTriangle.fConvexHull.fVertices[1].Position:=Vector3Sub(ShapeTriangle.fConvexHull.fVertices[1].Position,Center);
    ShapeTriangle.fConvexHull.fVertices[2].Position:=Vector3Sub(ShapeTriangle.fConvexHull.fVertices[2].Position,Center);
@@ -23799,23 +28528,35 @@ var OldManifoldCountContacts:longint;
  var WorldPositions,LocalPoints:array[0..1] of TKraftVector3;
      Normal,Point:TKraftVector3;
      PenetrationDepth,ShortestDistance,Distance:TKraftScalar;
-     Nearest,Index,SubIndex:longint;
+     Nearest,Index,SubIndex:TKraftInt32;
      Contact:PKraftContact;
      NewContact:TKraftContact;
+     OK:boolean;
  begin
 {$ifdef UseTriangleMeshFullPerturbation}
   if ShapeB=TriangleShape then begin
    PreprocessTriangle;
   end;
 {$endif}
-  if ((OldManifoldCountContacts=0) or ContactManager.fPhysics.fAlwaysPerturbating) and (ContactManager.fPhysics.fPerturbationIterations>0) then begin
-   CollideWithMPRAndPerturbation(ShapeA,ShapeB);
+  if ((OldManifoldCountContacts=0) or ContactManager.fPhysics.fAlwaysPerturbating) and
+     (ContactManager.fPhysics.fPerturbationIterations>0) then begin
+   CollideWithMPROrSignedDistanceFieldAndPerturbation(ShapeA,ShapeB);
   end else begin
 
    Manifold.CountContacts:=OldManifoldCountContacts;
    Manifold.Persistent:=true;
 
-   if MPRPenetration(ShapeA,ShapeB,ShapeA.fWorldTransform,ShapeB.fWorldTransform,WorldPositions[0],WorldPositions[1],Normal,PenetrationDepth) then begin
+   if (ShapeA.ShapeType=kstSignedDistanceField) or (ShapeB.ShapeType=kstSignedDistanceField) then begin
+    WorldPositions[0]:=Vector3Origin;
+    WorldPositions[1]:=Vector3Origin;
+    Normal:=Vector3Origin;
+    PenetrationDepth:=0.0;
+    OK:=false;
+   end else begin
+    OK:=MPRPenetration(ShapeA,ShapeB,ShapeA.fWorldTransform,ShapeB.fWorldTransform,WorldPositions[0],WorldPositions[1],Normal,PenetrationDepth);
+   end;
+
+   if OK then begin
 
     Point:=Vector3Avg(WorldPositions[0],WorldPositions[1]);
     WorldPositions[0]:=Point;
@@ -23825,6 +28566,9 @@ var OldManifoldCountContacts:longint;
     PenetrationDepth:=-PenetrationDepth;
 
     Manifold.LocalNormal:=Vector3TermMatrixMulTransposedBasis(Normal,Shapes[1].fWorldTransform);
+    if Vector3LengthSquared(Manifold.LocalNormal)<EPSILON then begin
+     Manifold.LocalNormal:=Vector3YAxis;
+    end;
 
 //  writeln(PenetrationDepth:1:8,' ',Vector3Dot(Manifold.Normal,Vector3Sub(WorldPositions[1],WorldPositions[0])):1:8);
 
@@ -23912,7 +28656,7 @@ var OldManifoldCountContacts:longint;
      end;
      dec(Manifold.CountContacts);
     end else begin
-     inc(Index);                                 
+     inc(Index);
     end;
    end;
 
@@ -23925,10 +28669,10 @@ var OldManifoldCountContacts:longint;
   end else begin
    Manifold.ContactManifoldType:=kcmtUnknown;
   end;
-  
+
  end;
  procedure FindSpeculativeContacts(ShapeA,ShapeB:TKraftShape);
- var Index:longint;
+ var Index:TKraftInt32;
      VelocityLength,t0,t1:TKraftScalar;
      Sweeps:array[0..1] of TKraftSweep;
      Transforms:array[0..1,0..1] of TKraftMatrix4x4;
@@ -23977,6 +28721,9 @@ var OldManifoldCountContacts:longint;
         Manifold.ContactManifoldType:=kcmtSpeculative;
         Manifold.CountContacts:=1;
         Manifold.LocalNormal:=Vector3SafeNorm(Vector3TermMatrixMulTransposedBasis(Vector3Neg(GJK.Normal),Shapes[1].fWorldTransform));
+        if Vector3LengthSquared(Manifold.LocalNormal)<EPSILON then begin
+         Manifold.LocalNormal:=Vector3YAxis;
+        end;
         Contact:=@Manifold.Contacts[0];
         Contact^.LocalPoints[0]:=Vector3TermMatrixMulInverted(GJK.ClosestPoints[0],Shapes[0].fWorldTransform);
         Contact^.LocalPoints[1]:=Vector3TermMatrixMulInverted(GJK.ClosestPoints[1],Shapes[1].fWorldTransform);
@@ -23989,7 +28736,7 @@ var OldManifoldCountContacts:longint;
    end;
   end;
  end;
-var Index,SubIndex:longint;
+var Index,SubIndex:TKraftInt32;
     ShapeA,ShapeB:TKraftShape;
     MeshShape:TKraftShapeMesh;
     HasContact:boolean;
@@ -24015,7 +28762,7 @@ begin
  ShapeB:=Shapes[1];
 
  if assigned(MeshContactPair) then begin
-  if (ElementIndex>=0) and assigned(TriangleShape) and (ShapeB is TKraftShapeMesh) then begin
+  if (ElementIndex>=0) and assigned(TriangleShape) and (ShapeB is TKraftShapeMesh) and (ElementIndex<TKraftShapeMesh(ShapeB).fMesh.fCountTriangles) then begin
    MeshShape:=TKraftShapeMesh(ShapeB);
    ShapeB:=TriangleShape;
    ShapeTriangle:=TKraftShapeTriangle(TriangleShape);
@@ -24037,7 +28784,9 @@ begin
     (ksfCollision in Shapes[0].fFlags) and
     (ksfCollision in Shapes[1].fFlags) then begin
 
-  if ContactManager.fPhysics.fPersistentContactManifold then begin
+  if ContactManager.fPhysics.fPersistentContactManifold or
+     ((ShapeA.fShapeType=kstSignedDistanceField) or
+      (ShapeB.fShapeType=kstSignedDistanceField)) then begin
 
    // Incremental persistent contact manifold
    ProcessPersistentContactManifold(ShapeA,ShapeB);
@@ -24067,6 +28816,8 @@ begin
       kstTriangle:begin
        CollideSphereWithTriangle(TKraftShapeSphere(ShapeA),TKraftShapeTriangle(ShapeB));
       end;
+      else begin
+      end;
      end;
     end;
     kstCapsule:begin
@@ -24083,6 +28834,8 @@ begin
       kstTriangle:begin
        CollideCapsuleWithTriangle(TKraftShapeCapsule(ShapeA),TKraftShapeTriangle(ShapeB));
       end;{}
+      else begin
+      end;
      end;
     end;
     kstConvexHull,kstBox,kstPlane,kstTriangle:begin
@@ -24090,7 +28843,11 @@ begin
       kstConvexHull,kstBox,kstPlane,kstTriangle:begin
        CollideConvexHullWithConvexHull(TKraftShapeConvexHull(ShapeA),TKraftShapeConvexHull(ShapeB));
       end;
+      else begin
+      end;
      end;
+    end;
+    else begin
     end;
    end;
 
@@ -24107,7 +28864,7 @@ begin
 
    Manifold.ContactManifoldType:=kcmtUnknown;
    Manifold.CountContacts:=0;
-    
+
   end else begin
 
    HasContact:=Manifold.CountContacts>0;
@@ -24157,7 +28914,7 @@ begin
     end;
    end;
 
-  end; 
+  end;
 
  end;
 
@@ -24355,7 +29112,7 @@ begin
 end;
 
 procedure TKraftMeshContactPair.Query;
-var SkipListNodeIndex,TriangleIndex:longint;
+var SkipListNodeIndex,TriangleIndex:TKraftInt32;
     SkipListNode:PKraftMeshSkipListNode;
     Triangle:PKraftMeshTriangle;
 begin
@@ -24363,13 +29120,13 @@ begin
  while SkipListNodeIndex<TKraftShapeMesh(fShapeMesh).fMesh.fCountSkipListNodes do begin
   SkipListNode:=@TKraftShapeMesh(fShapeMesh).fMesh.fSkipListNodes[SkipListNodeIndex];
   if AABBIntersect(SkipListNode^.AABB,fConvexAABBInMeshLocalSpace) then begin
-   TriangleIndex:=SkipListNode^.TriangleIndex;
-   while TriangleIndex>=0 do begin
-    Triangle:=@TKraftShapeMesh(fShapeMesh).fMesh.fTriangles[TriangleIndex];
-    if AABBIntersect(Triangle^.AABB,fConvexAABBInMeshLocalSpace) and not fContactManager.HasDuplicateContact(fRigidBodyConvex,fRigidBodyMesh,fShapeConvex,fShapeMesh,TriangleIndex) then begin
-     fContactManager.AddConvexContact(fRigidBodyConvex,fRigidBodyMesh,fShapeConvex,fShapeMesh,TriangleIndex,self);
+   if SkipListNode^.CountTriangles>0 then begin
+    for TriangleIndex:=SkipListNode^.FirstTriangleIndex to SkipListNode^.FirstTriangleIndex+(SkipListNode^.CountTriangles-1) do begin
+     Triangle:=@TKraftShapeMesh(fShapeMesh).fMesh.fTriangles[TriangleIndex];
+     if AABBIntersect(Triangle^.AABB,fConvexAABBInMeshLocalSpace) and not fContactManager.HasDuplicateContact(fRigidBodyConvex,fRigidBodyMesh,fShapeConvex,fShapeMesh,TriangleIndex) then begin
+      fContactManager.AddConvexContact(fRigidBodyConvex,fRigidBodyMesh,fShapeConvex,fShapeMesh,TriangleIndex,self);
+     end;
     end;
-    TriangleIndex:=Triangle^.Next;
    end;
    inc(SkipListNodeIndex);
   end else begin
@@ -24394,7 +29151,7 @@ begin
 end;
 
 constructor TKraftContactManager.Create(const APhysics:TKraft);
-var ThreadIndex:longint;
+var ThreadIndex:TKraftInt32;
 begin
  inherited Create;
 
@@ -24431,6 +29188,7 @@ begin
  for ThreadIndex:=0 to high(fDebugClipVertexLists) do begin
   fDebugClipVertexLists[ThreadIndex]:=TKraftClipVertexList.Create;
  end;
+ fDebugClipVertexListLock:={$ifdef KraftPasMP}TPasMPSlimReaderWriterLock{$else}TCriticalSection{$endif}.Create;
 {$endif}
 
  fActiveContactPairs:=nil;
@@ -24442,11 +29200,11 @@ begin
  FillChar(fConvexMeshTriangleContactPairHashTable,SizeOf(TKraftContactPairHashTable),AnsiChar(#0));
 
  FillChar(fMeshContactPairHashTable,SizeOf(TKraftMeshContactPairHashTable),AnsiChar(#0));
- 
+
 end;
 
 destructor TKraftContactManager.Destroy;
-var ThreadIndex:longint;
+var ThreadIndex:TKraftInt32;
     NextContactPair:PKraftContactPair;
 begin
 
@@ -24480,14 +29238,15 @@ begin
 
 {$ifdef DebugDraw}
  for ThreadIndex:=0 to high(fDebugClipVertexLists) do begin
-  fDebugClipVertexLists[ThreadIndex].Free;
+  FreeAndNil(fDebugClipVertexLists[ThreadIndex]);
  end;
+ FreeAndNil(fDebugClipVertexListLock);
 {$endif}
 
  inherited Destroy;
 end;
 
-function TKraftContactManager.HasDuplicateContact(const ARigidBodyA,ARigidBodyB:TKraftRigidBody;const AShapeA,AShapeB:TKraftShape;const AElementIndex:longint=-1):boolean;
+function TKraftContactManager.HasDuplicateContact(const ARigidBodyA,ARigidBodyB:TKraftRigidBody;const AShapeA,AShapeB:TKraftShape;const AElementIndex:TKraftInt32=-1):boolean;
 var HashTableBucket:PKraftContactPairHashTableBucket;
     ContactPair:PKraftContactPair;
 begin
@@ -24524,10 +29283,10 @@ begin
    ContactPair:=ContactPair^.Next;
   end;
  end;
-end;            
+end;
 
-procedure TKraftContactManager.AddConvexContact(const ARigidBodyA,ARigidBodyB:TKraftRigidBody;const AShapeA,AShapeB:TKraftShape;const AElementIndex:longint=-1;const AMeshContactPair:TKraftMeshContactPair=nil);
-var i:longint;
+procedure TKraftContactManager.AddConvexContact(const ARigidBodyA,ARigidBodyB:TKraftRigidBody;const AShapeA,AShapeB:TKraftShape;const AElementIndex:TKraftInt32=-1;const AMeshContactPair:TKraftMeshContactPair=nil);
+var i:TKraftInt32;
     ContactPair:PKraftContactPair;
     HashTableBucket:PKraftContactPairHashTableBucket;
 begin
@@ -24626,7 +29385,7 @@ begin
   ARigidBodyB.fContactPairEdgeLast^.Next:=@ContactPair^.Edges[1];
  end else begin
   ContactPair^.Edges[1].Previous:=nil;
-  ARigidBodyB.fContactPairEdgeFirst:=@ContactPair^.Edges[1];                                  
+  ARigidBodyB.fContactPairEdgeFirst:=@ContactPair^.Edges[1];
  end;
  ContactPair^.Edges[1].Next:=nil;
  ARigidBodyB.fContactPairEdgeLast:=@ContactPair^.Edges[1];
@@ -24688,7 +29447,9 @@ begin
  RigidBodyB:=AShapeB.fRigidBody;
 
  if (not RigidBodyA.CanCollideWith(RigidBodyB)) or
-    (assigned(fOnCanCollide) and not fOnCanCollide(AShapeA,AShapeB)) then begin
+    (assigned(fOnCanCollide) and not fOnCanCollide(AShapeA,AShapeB)) or
+    (assigned(AShapeA.fOnCanCollideWith) and not AShapeA.fOnCanCollideWith(AShapeB)) or
+    (assigned(AShapeB.fOnCanCollideWith) and not AShapeB.fOnCanCollideWith(AShapeA)) then begin
   exit;
  end;
 
@@ -24818,7 +29579,7 @@ begin
 end;
 
 procedure TKraftContactManager.DoBroadPhase;
-var StartTime:int64;
+var StartTime:TKraftInt64;
 begin
  StartTime:=fPhysics.fHighResolutionTimer.GetTime;
  fPhysics.fBroadPhase.UpdatePairs;
@@ -24827,7 +29588,7 @@ end;
 
 procedure TKraftContactManager.DoMidPhase;
 var MeshContactPair:TKraftMeshContactPair;
-    StartTime:int64;
+    StartTime:TKraftInt64;
 begin
  StartTime:=fPhysics.fHighResolutionTimer.GetTime;
  MeshContactPair:=fMeshContactPairFirst;
@@ -24838,33 +29599,33 @@ begin
  inc(fPhysics.fMidPhaseTime,fPhysics.fHighResolutionTimer.GetTime-StartTime);
 end;
 
-procedure TKraftContactManager.ProcessContactPair(const ContactPair:PKraftContactPair;const ThreadIndex:longint=0);
+procedure TKraftContactManager.ProcessContactPair(const ContactPair:PKraftContactPair;const ThreadIndex:TKraftInt32=0);
 begin
  ContactPair^.DetectCollisions(self,fPhysics.fTriangleShapes[ThreadIndex],ThreadIndex,true,fPhysics.fWorldDeltaTime);
 end;
 
 {$ifdef KraftPasMP}
-procedure TKraftContactManager.ProcessContactPairParallelForFunction(const Job:PPasMPJob;const ThreadIndex:longint;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
-var Index:longint;
+procedure TKraftContactManager.ProcessContactPairParallelForFunction(const Job:PPasMPJob;const ThreadIndex:TKraftInt32;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
+var Index:TKraftInt32;
 begin
  for Index:=FromIndex to ToIndex do begin
   ProcessContactPair(fActiveContactPairs[Index],ThreadIndex);
  end;
 end;
 {$else}
-procedure TKraftContactManager.ProcessContactPairJob(const JobIndex,ThreadIndex:longint);
+procedure TKraftContactManager.ProcessContactPairJob(const JobIndex,ThreadIndex:TKraftInt32);
 begin
  ProcessContactPair(fActiveContactPairs[JobIndex],ThreadIndex);
 end;
 {$endif}
 
 procedure TKraftContactManager.DoNarrowPhase;
-var ActiveContactPairIndex:longint;
+var ActiveContactPairIndex:TKraftInt32;
     ContactPair,NextContactPair:PKraftContactPair;
     MeshContactPair,NextMeshContactPair:TKraftMeshContactPair;
     ShapeA,ShapeB:TKraftShape;
     RigidBodyA,RigidBodyB:TKraftRigidBody;
-    StartTime:int64;
+    StartTime:TKraftInt64;
     Flags:TKraftContactFlags;
 begin
 
@@ -24949,7 +29710,9 @@ begin
    continue;
   end;
 
-  if assigned(ContactPair^.MeshContactPair) and (ContactPair^.ElementIndex>=0) then begin
+  if assigned(ContactPair^.MeshContactPair) and
+     (ContactPair^.ElementIndex>=0) and
+     (ContactPair^.ElementIndex<TKraftShapeMesh(ContactPair^.MeshContactPair.fShapeMesh).fMesh.fCountTriangles) then begin
    if not AABBIntersect(TKraftShapeMesh(ContactPair^.MeshContactPair.fShapeMesh).fMesh.fTriangles[ContactPair^.ElementIndex].AABB,
                         ContactPair^.MeshContactPair.fConvexAABBInMeshLocalSpace) then begin
     if (ContactPair^.Flags*[kcfColliding,kcfWasColliding])<>[] then begin
@@ -25088,22 +29851,27 @@ end;
 
 {$ifdef DebugDraw}
 procedure TKraftContactManager.DebugDraw(const CameraMatrix:TKraftMatrix4x4);
-var i,j:longint;
+var i,j:TKraftInt32;
     ContactPair:PKraftContactPair;
     ContactManifold:PKraftContactManifold;
     Contact:PKraftContact;
     SolverContact:PKraftSolverContact;
     SolverContactManifold:TKraftSolverContactManifold;
     f:TKraftScalar;
+{$ifdef NoOpenGL}
+    c:TKraftVector4;
+{$endif}
 begin
-
+{$ifdef NoOpenGL}
+{$else}
  glPushMatrix;
  glMatrixMode(GL_MODELVIEW);
 
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
  glLoadMatrixd(pointer(@CameraMatrix));
 {$else}
  glLoadMatrixf(pointer(@CameraMatrix));
+{$endif}
 {$endif}
 
  ContactPair:=fContactPairFirst;
@@ -25113,7 +29881,7 @@ begin
   if kcfColliding in ContactPair^.Flags then begin
 
    ContactManifold:=@ContactPair^.Manifold;
-                                                              
+
    ContactPair^.GetSolverContactManifold(SolverContactManifold,ContactPair^.RigidBodies[0].fWorldTransform,ContactPair^.RigidBodies[1].fWorldTransform,kcpcmmBaumgarte);
 
    for i:=0 to ContactManifold^.CountContacts-1 do begin
@@ -25123,16 +29891,30 @@ begin
     Contact:=@ContactManifold.Contacts[i];
 
     f:=(1024-Min(Max(Contact^.WarmStartState,0),1024))/1024.0;
-                                                  
+
     if ContactPair^.Manifold.ContactManifoldType=kcmtSPECULATIVE then begin
 
      if krbfAwake in ContactPair^.Shapes[0].fRigidBody.fFlags then begin
+{$ifdef NoOpenGL}
+      c:=Vector4(0.0,f,1.0-f,1.0);
+{$else}
       glColor4f(0.0,f,1.0-f,1.0);
+{$endif}
      end else begin
+{$ifdef NoOpenGL}
+      c:=Vector4(0.0,1.0,0.0,1.0);
+{$else}
       glColor4f(0.0,1.0,0.0,1.0);
+{$endif}
      end;
+{$ifdef NoOpenGL}
+     if assigned(fPhysics.fDebugDrawLine) then begin
+      fPhysics.fDebugDrawLine(SolverContactManifold.Points[0],Vector3Add(SolverContactManifold.Points[0],Vector3(0.1,0.1,0.1)),c);
+      fPhysics.fDebugDrawLine(SolverContactManifold.Points[1],Vector3Add(SolverContactManifold.Points[1],Vector3(0.1,0.1,0.1)),c);
+     end;
+{$else}
      glBegin(GL_POINTS);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
      glVertex3fd(@SolverContactManifold.Points[0]);
      glVertex3fd(@SolverContactManifold.Points[1]);
 {$else}
@@ -25140,14 +29922,28 @@ begin
      glVertex3fv(@SolverContactManifold.Points[1]);
 {$endif}
      glEnd;
+{$endif}
 
      if krbfAwake in ContactPair^.Shapes[0].fRigidBody.fFlags then begin
+{$ifdef NoOpenGL}
+      c:=Vector4(1.0,1.0,1.0,1.0);
+{$else}
       glColor4f(1.0,1.0,1.0,1.0);
+{$endif}
      end else begin
+{$ifdef NoOpenGL}
+      c:=Vector4(0.2,0.2,0.2,1.0);
+{$else}
       glColor4f(0.2,0.2,0.2,1.0);
+{$endif}
      end;
+{$ifdef NoOpenGL}
+     if assigned(fPhysics.fDebugDrawLine) then begin
+      fPhysics.fDebugDrawLine(SolverContactManifold.Points[0],SolverContactManifold.Points[1],c);
+     end;
+{$else}
      glBegin(GL_LINES);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
      glVertex3fd(@SolverContactManifold.Points[0]);
      glVertex3fd(@SolverContactManifold.Points[1]);
 {$else}
@@ -25155,29 +29951,57 @@ begin
      glVertex3fv(@SolverContactManifold.Points[1]);
 {$endif}
      glEnd;
+{$endif}
 
     end else begin
 
      if krbfAwake in ContactPair^.Shapes[0].fRigidBody.fFlags then begin
+{$ifdef NoOpenGL}
+      c:=Vector4(1.0-f,f,f,1.0);
+{$else}
       glColor4f(1.0-f,f,f,1.0);
+{$endif}
      end else begin
+{$ifdef NoOpenGL}
+      c:=Vector4(1.0,1.0,0.0,1.0);
+{$else}
       glColor4f(1.0,1.0,0.0,1.0);
+{$endif}
      end;
+{$ifdef NoOpenGL}
+     if assigned(fPhysics.fDebugDrawLine) then begin
+      fPhysics.fDebugDrawLine(SolverContact^.Point,Vector3Add(SolverContact^.Point,Vector3(0.1,0.1,0.1)),c);
+     end;
+{$else}
      glBegin(GL_POINTS);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
      glVertex3dv(@SolverContact^.Point);
 {$else}
      glVertex3fv(@SolverContact^.Point);
 {$endif}
      glEnd;
+{$endif}
 
      if krbfAwake in ContactPair^.Shapes[0].fRigidBody.fFlags then begin
+{$ifdef NoOpenGL}
+      c:=Vector4(1.0,1.0,1.0,1.0);
+{$else}
       glColor4f(1.0,1.0,1.0,1.0);
+{$endif}
      end else begin
+{$ifdef NoOpenGL}
+      c:=Vector4(0.2,0.2,0.2,1.0);
+{$else}
       glColor4f(0.2,0.2,0.2,1.0);
+{$endif}
      end;
+{$ifdef NoOpenGL}
+     if assigned(fPhysics.fDebugDrawLine) then begin
+      fPhysics.fDebugDrawLine(SolverContact^.Point,Vector3Add(SolverContact^.Point,Vector3ScalarMul(SolverContactManifold.Normal,SolverContact^.Separation)),c);
+     end;
+{$else}
      glBegin(GL_LINES);
-{$ifdef UseDouble}
+{$ifdef KraftUseDouble}
      glVertex3dv(@SolverContact^.Point);
 {$else}
      glVertex3fv(@SolverContact^.Point);
@@ -25186,6 +30010,7 @@ begin
                 SolverContact^.Point.y+(SolverContactManifold.Normal.y*SolverContact^.Separation),
                 SolverContact^.Point.z+(SolverContactManifold.Normal.z*SolverContact^.Separation));
      glEnd;
+{$endif}
 
     end;
 
@@ -25197,10 +30022,26 @@ begin
 
  end;
 
+{$ifdef NoOpenGL}
+{$else}
  glLineWidth(2);
  glBegin(GL_LINES);
+{$endif}
  for i:=0 to fCountDebugClipVertexLists-1 do begin
-{$ifdef UseDouble}
+{$ifdef NoOpenGL}
+  c.x:=fDebugClipVertexLists[i].Color.r;
+  c.y:=fDebugClipVertexLists[i].Color.g;
+  c.z:=fDebugClipVertexLists[i].Color.b;
+  c.w:=fDebugClipVertexLists[i].Color.a;
+  for j:=0 to fDebugClipVertexLists[i].Count-1 do begin
+   if j=0 then begin
+    fPhysics.fDebugDrawLine(fDebugClipVertexLists[i].Vertices[fDebugClipVertexLists[i].Count-1].Position,fDebugClipVertexLists[i].Vertices[j].Position,c);
+   end else begin
+    fPhysics.fDebugDrawLine(fDebugClipVertexLists[i].Vertices[j-1].Position,fDebugClipVertexLists[i].Vertices[j].Position,c);
+   end;
+  end;
+{$else}
+{$ifdef KraftUseDouble}
   glColor4dv(@fDebugClipVertexLists[i].Color);
   for j:=0 to fDebugClipVertexLists[i].Count-1 do begin
    if j=0 then begin
@@ -25221,16 +30062,22 @@ begin
    glVertex3fv(@fDebugClipVertexLists[i].Vertices[j].Position);
   end;
 {$endif}
+{$endif}
  end;
+{$ifndef NoOpenGL}
  glEnd;
+{$endif}
 
+{$ifdef NoOpenGL}
+{$else}
  glPopMatrix;
+{$endif}
 
 end;
 {$endif}
 
-function TKraftContactManager.ReduceContacts(const AInputContacts:PKraftContacts;const ACountInputContacts:longint;const AOutputContacts:PKraftContacts):longint;
-var Index,MaxPenetrationIndex:longint;
+function TKraftContactManager.ReduceContacts(const AInputContacts:PKraftContacts;const ACountInputContacts:TKraftInt32;const AOutputContacts:PKraftContacts):TKraftInt32;
+var Index,MaxPenetrationIndex:TKraftInt32;
     MaxPenetration,MaxDistance,Distance,MaxArea,Area:TKraftScalar;
     Contact:PKraftContact;
     Contacts:array[0..MAX_CONTACTS-1] of PKraftContact;
@@ -25275,7 +30122,7 @@ begin
    end;
   end;
 
-  Contacts[2]:=nil;              
+  Contacts[2]:=nil;
   MaxArea:=0.0;
   for Index:=0 to ACountInputContacts-1 do begin
    Contact:=@AInputContacts^[Index];
@@ -25308,12 +30155,12 @@ begin
  end;
 end;
 
-function TKraftContactManager.GetMaximizedAreaReducedContactIndices(const AInputContactPositions:PPKraftVector3s;const ACountInputContactPositions:longint;var AOutputContactIndices:TKraftContactIndices):longint;
-var Index,StartIndex:longint;
+function TKraftContactManager.GetMaximizedAreaReducedContactIndices(const AInputContactPositions:PPKraftVector3s;const ACountInputContactPositions:TKraftInt32;var AOutputContactIndices:TKraftContactIndices):TKraftInt32;
+var Index,StartIndex:TKraftInt32;
     MaxDistance,Distance,MaxArea,Area:TKraftScalar;
     Position:PKraftVector3;
     Positions:array[0..MAX_CONTACTS-1] of PKraftVector3;
-    Contacts:array[0..MAX_CONTACTS-1] of longint;
+    Contacts:array[0..MAX_CONTACTS-1] of TKraftInt32;
 begin
  if ACountInputContactPositions<=0 then begin
 
@@ -25390,10 +30237,10 @@ begin
  end;
 end;
 
-constructor TKraftBroadPhaseMoveBuffer.Create(const aPhysics:TKraft);
+constructor TKraftBroadPhaseMoveBuffer.Create(const aAABBTree:TKraftDynamicAABBTree);
 begin
  inherited Create;
- fPhysics:=aPhysics;
+ fAABBTree:=aAABBTree;
  fItems:=nil;
  SetLength(fItems,64);
  fSize:=0;
@@ -25410,17 +30257,17 @@ begin
  fSize:=0;
 end;
 
-function TKraftBroadPhaseMoveBuffer.GetItem(const aIndex:longint):longint;
+function TKraftBroadPhaseMoveBuffer.GetItem(const aIndex:TKraftInt32):TKraftInt32;
 begin
  result:=fItems[aIndex];
 end;
 
-procedure TKraftBroadPhaseMoveBuffer.Add(const aProxyID:longint);
-var Index:longint;
+procedure TKraftBroadPhaseMoveBuffer.Add(const aProxyID:TKraftInt32);
+var Index:TKraftInt32;
     Node:PKraftDynamicAABBTreeNode;
 begin
- if (aProxyID>=0) and (aProxyID<fPhysics.fDynamicAABBTree.fNodeCount) then begin
-  Node:=@fPhysics.fDynamicAABBTree.fNodes^[aProxyID];
+ if (aProxyID>=0) and (aProxyID<fAABBTree.fNodeCount) then begin
+  Node:=@fAABBTree.fNodes^[aProxyID];
  end else begin
   Node:=nil;
  end;
@@ -25442,15 +30289,15 @@ begin
  end;
 end;
 
-procedure TKraftBroadPhaseMoveBuffer.Remove(const aProxyID:longint);
-var Index,SearchIndex:longint;
+procedure TKraftBroadPhaseMoveBuffer.Remove(const aProxyID:TKraftInt32);
+var Index,SearchIndex:TKraftInt32;
     Node:PKraftDynamicAABBTreeNode;
 begin
-  // The order of the items is irrelevant in this case, so that we can simply
+ // The order of the items is irrelevant in this case, so that we can simply
  // overwrite the to be removed item with the the last array item, while
  // decrementing the size of the array in the process at the same time.
- if (aProxyID>=0) and (aProxyID<fPhysics.fDynamicAABBTree.fNodeCount) then begin
-  Node:=@fPhysics.fDynamicAABBTree.fNodes^[aProxyID];
+ if (aProxyID>=0) and (aProxyID<fAABBTree.fNodeCount) then begin
+  Node:=@fAABBTree.fNodes^[aProxyID];
  end else begin
   Node:=nil;
  end;
@@ -25478,7 +30325,7 @@ begin
 end;
 
 constructor TKraftBroadPhase.Create(const APhysics:TKraft);
-var ThreadIndex,CountThreads:longint;
+var ThreadIndex,CountThreads:TKraftInt32;
 begin
  inherited Create;
 
@@ -25490,7 +30337,7 @@ begin
 
   if ThreadIndex<CountThreads then begin
    fStackCapacity[ThreadIndex]:=16;
-   GetMem(fStack[ThreadIndex],fStackCapacity[ThreadIndex]*SizeOf(longint));
+   GetMem(fStack[ThreadIndex],fStackCapacity[ThreadIndex]*SizeOf(TKraftInt32));
   end else begin
    fStack[ThreadIndex]:=nil;
    fStackCapacity[ThreadIndex]:=0;
@@ -25503,19 +30350,19 @@ begin
    SetLength(fContactPairs[ThreadIndex],0);
   end;
   fCountContactPairs[ThreadIndex]:=0;
-  
+
  end;
 
- fStaticMoveBuffer:=TKraftBroadPhaseMoveBuffer.Create(fPhysics);
+ fStaticMoveBuffer:=TKraftBroadPhaseMoveBuffer.Create(fPhysics.fStaticAABBTree);
 
- fDynamicMoveBuffer:=TKraftBroadPhaseMoveBuffer.Create(fPhysics);
+ fDynamicMoveBuffer:=TKraftBroadPhaseMoveBuffer.Create(fPhysics.fDynamicAABBTree);
 
- fKinematicMoveBuffer:=TKraftBroadPhaseMoveBuffer.Create(fPhysics);
+ fKinematicMoveBuffer:=TKraftBroadPhaseMoveBuffer.Create(fPhysics.fKinematicAABBTree);
 
 end;
 
 destructor TKraftBroadPhase.Destroy;
-var ThreadIndex:longint;
+var ThreadIndex:TKraftInt32;
 begin
  for ThreadIndex:=0 to MAX_THREADS-1 do begin
   if assigned(fStack[ThreadIndex]) then begin
@@ -25530,7 +30377,7 @@ begin
  inherited Destroy;
 end;
 
-function CompareContactPairs(const a,b:pointer):longint;
+function CompareContactPairs(const a,b:pointer):TKraftInt32;
 begin
  result:=PtrInt(PKraftBroadPhaseContactPair(a)^[0])-PtrInt(PKraftBroadPhaseContactPair(b)^[0]);
  if result=0 then begin
@@ -25538,9 +30385,9 @@ begin
  end;
 end;
 
-procedure TKraftBroadPhase.AddPair(const ThreadIndex:longint;ShapeA,ShapeB:TKraftShape); {$ifdef caninline}inline;{$endif}
+procedure TKraftBroadPhase.AddPair(const ThreadIndex:TKraftInt32;ShapeA,ShapeB:TKraftShape); {$ifdef caninline}inline;{$endif}
 var TempShape:TKraftShape;
-    Index:longint;
+    Index:TKraftInt32;
     ContactPair:PKraftBroadPhaseContactPair;
 begin
  if (ShapeA<>ShapeB) and (ShapeA.RigidBody<>ShapeB.RigidBody) then begin
@@ -25560,11 +30407,35 @@ begin
  end;
 end;
 
-procedure TKraftBroadPhase.QueryShapeWithTree(const ThreadIndex:longint;const Shape:TKraftShape;const AABBTree:TKraftDynamicAABBTree);
+{$ifndef KraftSingleThreadedUsage}
+procedure TKraftBroadPhase.ProcessNode(const Data:PKraftBroadPhaseData;NodeID:TKraftInt32);
+var Node:PKraftDynamicAABBTreeNode;
+    OtherShape:TKraftShape;
+begin
+ while NodeID>=0 do begin
+  Node:=@Data^.AABBTree.fNodes[NodeID];
+  if AABBIntersect(Node^.AABB,Data^.ShapeAABB^) then begin
+   if Node^.Children[0]<0 then begin
+    OtherShape:=Node^.UserData;
+    if assigned(OtherShape) and (Data^.Shape<>OtherShape) then begin
+     AddPair(Data^.ThreadIndex,Data^.Shape,OtherShape);
+    end;
+   end else begin
+    ProcessNode(Data,Node^.Children[0]);
+    NodeID:=Node^.Children[1];
+    continue;
+   end;
+  end;
+  break;
+ end;
+end;
+{$endif}
+
+procedure TKraftBroadPhase.QueryShapeWithTree(const ThreadIndex:TKraftInt32;const Shape:TKraftShape;const AABBTree:TKraftDynamicAABBTree);
 {$ifdef KraftSingleThreadedUsage}
 var ShapeAABB:PKraftAABB;
     LocalStack:PKraftDynamicAABBTreeLongintArray;
-    LocalStackPointer,NodeID:longint;
+    LocalStackPointer,NodeID:TKraftInt32;
     Node:PKraftDynamicAABBTreeNode;
     OtherShape:TKraftShape;
 begin
@@ -25588,7 +30459,7 @@ begin
       end else begin
        if fStackCapacity[ThreadIndex]<=(LocalStackPointer+2) then begin
         fStackCapacity[ThreadIndex]:=RoundUpToPowerOfTwo(LocalStackPointer+2);
-        ReallocMem(fStack[ThreadIndex],fStackCapacity[ThreadIndex]*SizeOf(longint));
+        ReallocMem(fStack[ThreadIndex],fStackCapacity[ThreadIndex]*SizeOf(TKraftInt32));
         LocalStack:=fStack[ThreadIndex];
        end;
        LocalStack^[LocalStackPointer+0]:=Node^.Children[0];
@@ -25602,42 +30473,24 @@ begin
  end;
 end;
 {$else}
-var ShapeAABB:PKraftAABB;
- procedure ProcessNode(const NodeID:longint);
- var Node:PKraftDynamicAABBTreeNode;
-     OtherShape:TKraftShape;
- begin
-  if NodeID>=0 then begin
-   Node:=@AABBTree.fNodes[NodeID];
-   if AABBIntersect(Node^.AABB,ShapeAABB^) then begin
-    if Node^.Children[0]<0 then begin
-     OtherShape:=Node^.UserData;
-     if assigned(OtherShape) and (Shape<>OtherShape) then begin
-      AddPair(ThreadIndex,Shape,OtherShape);
-     end;
-    end else begin
-     ProcessNode(Node^.Children[0]);
-     ProcessNode(Node^.Children[1]);
-    end;
-   end;
-  end;
- end;
+var Data:TKraftBroadPhaseData;
 begin
- if assigned(Shape) and assigned(AABBTree) then begin
-  ShapeAABB:=Shape.ProxyFatWorldAABB;
-  if AABBTree.fRoot>=0 then begin
-   ProcessNode(AABBTree.fRoot);
-  end;
+ if assigned(Shape) and assigned(AABBTree) and (AABBTree.fRoot>=0) then begin
+  Data.ThreadIndex:=ThreadIndex;
+  Data.Shape:=Shape;
+  Data.AABBTree:=AABBTree;
+  Data.ShapeAABB:=Shape.ProxyFatWorldAABB;
+  ProcessNode(@Data,AABBTree.fRoot);
  end;
 end;
 {$endif}
 
 {$ifdef KraftPasMP}
-procedure TKraftBroadPhase.ProcessMoveBufferItemParallelForFunction(const Job:PPasMPJob;const ThreadIndex:longint;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
+procedure TKraftBroadPhase.ProcessMoveBufferItemParallelForFunction(const Job:PPasMPJob;const ThreadIndex:TKraftInt32;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
 {$else}
-procedure TKraftBroadPhase.ProcessMoveBufferItem(const JobIndex,ThreadIndex:longint);
+procedure TKraftBroadPhase.ProcessMoveBufferItem(const JobIndex,ThreadIndex:TKraftInt32);
 {$endif}
-var {$ifdef KraftPasMP}JobIndex,{$endif}Index,MoveBufferIndex:longint;
+var {$ifdef KraftPasMP}JobIndex,{$endif}Index,MoveBufferIndex:TKraftInt32;
     Shape:TKraftShape;
 begin
 {$ifdef KraftPasMP}for JobIndex:=FromIndex to ToIndex do{$endif}begin
@@ -25678,7 +30531,7 @@ begin
 end;
 
 procedure TKraftBroadPhase.UpdatePairs;
-var ThreadIndex,Count,Index:longint;
+var ThreadIndex,Count,Index:TKraftInt32;
     ContactPair,OtherContactPair:PKraftBroadPhaseContactPair;
 begin
 
@@ -25814,15 +30667,25 @@ begin
 
  fWorldTransform:=Matrix4x4Identity;
 
+ fGravityMode:=kgmNORMAL;
+
+ fGravitySpeed:=9.83;
+
  fGravity.x:=0.0;
  fGravity.y:=-9.83;
  fGravity.z:=0.0;
+{$ifdef SIMD}
+ fGravity.w:=0.0;
+{$endif}
 
  fGravityProperty:=TKraftVector3Property.Create(@fGravity);
 
  fLinearFactor.x:=1.0;
  fLinearFactor.y:=1.0;
  fLinearFactor.z:=1.0;
+{$ifdef SIMD}
+ fLinearFactor.w:=0.0;
+{$endif}
 
  fUserData:=nil;
 
@@ -25858,7 +30721,7 @@ begin
  fAngularVelocityAdditionalDamp:=0.01;
  fLinearVelocityAdditionalDampThresholdSqr:=0.01;
  fAngularVelocityAdditionalDampThresholdSqr:=0.01;
- 
+
  fForce:=Vector3Origin;
  fTorque:=Vector3Origin;
 
@@ -26153,6 +31016,7 @@ end;
 procedure TKraftRigidBody.StoreWorldTransform;
 var Shape:TKraftShape;
 begin
+ fLastWorldTransform:=fWorldTransform;
  Shape:=fShapeFirst;
  while assigned(Shape) do begin
   Shape.StoreWorldTransform;
@@ -26163,6 +31027,7 @@ end;
 procedure TKraftRigidBody.InterpolateWorldTransform(const Alpha:TKraftScalar);
 var Shape:TKraftShape;
 begin
+ fInterpolatedWorldTransform:=Matrix4x4Slerp(fLastWorldTransform,fWorldTransform,Alpha);
  Shape:=fShapeFirst;
  while assigned(Shape) do begin
   Shape.InterpolateWorldTransform(Alpha);
@@ -26210,6 +31075,9 @@ procedure TKraftRigidBody.Finish;
    fSweep.c0.x:=fWorldTransform[3,0];
    fSweep.c0.y:=fWorldTransform[3,1];
    fSweep.c0.z:=fWorldTransform[3,2];
+{$ifdef SIMD}
+   fSweep.c0.w:=0.0;
+{$endif}
    fSweep.c:=fSweep.c0;
 
   end else begin
@@ -26223,7 +31091,7 @@ procedure TKraftRigidBody.Finish;
     end else if Shape is TKraftShapeTriangle then begin
      raise EKraftShapeTypeOnlyForStaticRigidBody.Create('Triangle shapes are allowed only at static rigidbodies');
     end else if Shape is TKraftShapeMesh then begin
-    raise EKraftShapeTypeOnlyForStaticRigidBody.Create('Mesh shapes are allowed only at static rigidbodies');
+     raise EKraftShapeTypeOnlyForStaticRigidBody.Create('Mesh shapes are allowed only at static rigidbodies');
     end;
     if (ksfMass in Shape.fFlags) and (Shape.fDensity>EPSILON) then begin
      fMass:=fMass+Shape.fMassData.Mass;
@@ -26241,6 +31109,9 @@ procedure TKraftRigidBody.Finish;
      TempLocalCenter.x:=TempLocalCenter.x/fMass;
      TempLocalCenter.y:=TempLocalCenter.y/fMass;
      TempLocalCenter.z:=TempLocalCenter.z/fMass;
+{$ifdef SIMD}
+     TempLocalCenter.w:=0.0;
+{$endif}
     end;
 
     Matrix3x3Sub(fBodyInertiaTensor,InertiaTensorParallelAxisTheorem(TempLocalCenter,fMass));
@@ -26273,6 +31144,10 @@ procedure TKraftRigidBody.Finish;
     end else begin
      fLinearFactor.z:=1.0;
     end;
+
+{$ifdef SIMD}
+    fLinearFactor.w:=0.0;
+{$endif}
 
     Matrix3x3Inverse(fBodyInverseInertiaTensor,fBodyInertiaTensor);
 
@@ -26379,7 +31254,7 @@ begin
     ) then begin
   ConstraintEdge:=fConstraintEdgeFirst;
   while assigned(ConstraintEdge) do begin
-   Constraint:=ConstraintEdge^.Constraint;     
+   Constraint:=ConstraintEdge^.Constraint;
    if (assigned(Constraint) and not (kcfCollideConnected in Constraint.fFlags)) and (ConstraintEdge^.OtherRigidBody=OtherRigidBody) then begin
     result:=false;
     exit;
@@ -26553,6 +31428,28 @@ begin
  if fRigidBodyType=krbtDynamic then begin
   AddWorldForce(AForce,AForceMode,false);
   AddWorldTorque(Vector3Cross(Vector3Sub(APosition,fSweep.c),AForce),AForceMode,false);
+  if aWake and not (krbfAwake in fFlags) then begin
+   SetToAwake;
+  end;
+ end;
+end;
+
+procedure TKraftRigidBody.SetForceAtRelativePosition(const AForce,ARelativePosition:TKraftVector3;const AForceMode:TKraftForceMode=kfmForce;const aWake:boolean=true);
+begin
+ if fRigidBodyType=krbtDynamic then begin
+  SetWorldForce(AForce,AForceMode,false);
+  SetWorldTorque(Vector3Cross(ARelativePosition,AForce),AForceMode,false);
+  if aWake and not (krbfAwake in fFlags) then begin
+   SetToAwake;
+  end;
+ end;
+end;
+
+procedure TKraftRigidBody.AddForceAtRelativePosition(const AForce,ARelativePosition:TKraftVector3;const AForceMode:TKraftForceMode=kfmForce;const aWake:boolean=true);
+begin
+ if fRigidBodyType=krbtDynamic then begin
+  AddWorldForce(AForce,AForceMode,false);
+  AddWorldTorque(Vector3Cross(ARelativePosition,AForce),AForceMode,false);
   if aWake and not (krbfAwake in fFlags) then begin
    SetToAwake;
   end;
@@ -26748,8 +31645,25 @@ begin
  result:=Vector3TermQuaternionRotate(Vector3Add(fLinearVelocity,Vector3Cross(fAngularVelocity,Vector3Sub(WorldPoint,fSweep.c))),QuaternionInverse(fSweep.q));
 end;}
 
+function TKraftRigidBody.ComputeImpulseDenominator(const aPosition,aNormal:TKraftVector3):TKraftScalar;
+var RelativePositionToCenterMassPosition:TKraftVector3;
+begin
+ RelativePositionToCenterMassPosition:=Vector3Sub(aPosition,fSweep.c);
+ result:=fInverseMass+
+         Vector3Dot(aNormal,
+                    Vector3Cross(Vector3TermMatrixMul(Vector3Cross(RelativePositionToCenterMassPosition,
+                                                                   aNormal),
+                                                      fWorldInverseInertiaTensor),
+                                 RelativePositionToCenterMassPosition));
+end;
+
+function TKraftRigidBody.ComputeAngularImpulseDenominator(const aAxis:TKraftVector3):TKraftScalar;
+begin
+ result:=Vector3Dot(aAxis,Vector3TermMatrixMul(aAxis,fWorldInverseInertiaTensor));
+end;
+
 constructor TKraftConstraint.Create(const APhysics:TKraft);
-var RigidBodyIndex:longint;
+var RigidBodyIndex:TKraftInt32;
     RigidBody:TKraftRigidBody;
     ConstraintEdge:PKraftConstraintEdge;
     ContactPairEdge:PKraftContactPairEdge;
@@ -26843,7 +31757,7 @@ begin
 end;
 
 destructor TKraftConstraint.Destroy;
-var RigidBodyIndex,ConstraintIndex:longint;
+var RigidBodyIndex,ConstraintIndex:TKraftInt32;
     RigidBody:TKraftRigidBody;
     Constraint:TKraftConstraint;
     ConstraintEdge:PKraftConstraintEdge;
@@ -27308,7 +32222,7 @@ begin
  AbsolutePosition:=Vector3Add(cA^,fRelativePosition);
 
  fWorldPoint:=Vector3Add(AbsolutePosition,Vector3ScalarMul(fWorldPlane.Normal,-PlaneVectorDistance(fWorldPlane,AbsolutePosition)));
-                         
+
  if fDoubleSidedWorldPlane then begin
 
   fmU:=Vector3Sub(fWorldPoint,AbsolutePosition);
@@ -27479,7 +32393,7 @@ begin
   end else begin
    fAccumulatedImpulse:=fAccumulatedImpulse+Impulse;
   end;
-  
+
   P:=Vector3ScalarMul(fmU,Impulse);
 
   Vector3DirectSub(vA^,Vector3Mul(P,Vector3ScalarMul(fSolverLinearFactor^,fInverseMass)));
@@ -27546,7 +32460,7 @@ function TKraftConstraintJointWorldPlaneDistance.GetAnchor:TKraftVector3;
 begin
  result:=Vector3TermMatrixMul(fLocalAnchor,fRigidBodies[0].fWorldTransform);
 end;
-                                         
+
 function TKraftConstraintJointWorldPlaneDistance.GetReactionForce(const InverseDeltaTime:TKraftScalar):TKraftVector3;
 begin
  result:=Vector3ScalarMul(fmU,fAccumulatedImpulse*InverseDeltaTime);
@@ -27955,7 +32869,7 @@ begin
    fAccumulatedImpulse:=0.0;
 
   end;
- 
+
  end else begin
 
   fmU:=Vector3Origin;
@@ -28411,7 +33325,7 @@ destructor TKraftConstraintJointBallSocket.Destroy;
 begin
  inherited Destroy;
 end;
-                                                   
+
 procedure TKraftConstraintJointBallSocket.InitializeConstraintsAndWarmStart(const Island:TKraftIsland;const TimeStep:TKraftTimeStep);
 var cA,vA,wA,cB,vB,wB:PKraftVector3;
     qA,qB:PKraftQuaternion;
@@ -28896,6 +33810,9 @@ begin
   RotationError.x:=qError.x*2.0;
   RotationError.y:=qError.y*2.0;
   RotationError.z:=qError.z*2.0;
+{$ifdef SIMD}
+  RotationError.w:=0.0;
+{$endif}
 
   result:=result and (Vector3Length(RotationError)<fPhysics.fAngularSlop);
 
@@ -29019,10 +33936,10 @@ begin
 
  // Extract cos(theta/2) and |sin(theta/2)|
  CosHalfAngle:=RelativeRotation.w;
- SinHalfAngleAbs:=Vector3Length(PKraftVector3(pointer(@RelativeRotation))^);
+ SinHalfAngleAbs:=Vector3Length(Vector3(PKraftVector3(pointer(@RelativeRotation))^.RawVector));
 
  // Compute the dot product of the relative rotation axis and the hinge axis
- DotProduct:=Vector3Dot(PKraftVector3(pointer(@RelativeRotation))^,PKraftVector3(pointer(@fA1))^);
+ DotProduct:=Vector3Dot(Vector3(PKraftVector3(pointer(@RelativeRotation))^.RawVector),Vector3(PKraftVector3(pointer(@fA1))^.RawVector));
 
  // If the relative rotation axis and the hinge axis are pointing the same direction
  if DotProduct>=0.0 then begin
@@ -29254,7 +34171,7 @@ begin
  Vector3DirectAdd(wB^,Vector3TermMatrixMul(Vector3Cross(fRelativePositions[1],Impulse),fWorldInverseInertiaTensors[1]));
 
  (**** Rotation ****)
-       
+
  JvRotation.x:=(Vector3Dot(fB2CrossA1,wB^)-Vector3Dot(fB2CrossA1,wA^))+fBiasRotation.x;
  JvRotation.y:=(Vector3Dot(fC2CrossA1,wB^)-Vector3Dot(fC2CrossA1,wA^))+fBiasRotation.y;
 
@@ -29424,7 +34341,7 @@ begin
   QuaternionDirectSpin(qB^,Vector3TermMatrixMul(Impulse,fWorldInverseInertiaTensors[1]),1.0);
 
   (**** Limits ****)
- 
+
   if fLimitState then begin
    if fIsLowerLimitViolated then begin
     ImpulseLower:=fInverseMassMatrixLimitMotor*(-LowerLimitError);
@@ -29445,7 +34362,7 @@ begin
  end else begin
 
   result:=true;
-  
+
  end;
 
 end;
@@ -30028,6 +34945,9 @@ begin
   RotationError.x:=qError.x*2.0;
   RotationError.y:=qError.y*2.0;
   RotationError.z:=qError.z*2.0;
+{$ifdef SIMD}
+  RotationError.w:=0.0;
+{$endif}
 
   RotationImpulse:=Vector3TermMatrixMul(Vector3Neg(RotationError),fInverseMassMatrixRotationConstraint);
 
@@ -30079,7 +34999,7 @@ begin
   result:=true;
 
  end;
- 
+
 end;
 
 function TKraftConstraintJointSlider.GetAnchorA:TKraftVector3;
@@ -30261,7 +35181,7 @@ begin
 end;
 
 procedure TKraftSolver.Store;
-var ContactPairIndex,ContactIndex:longint;
+var ContactPairIndex,ContactIndex:TKraftInt32;
     VelocityState:PKraftSolverVelocityState;
     PositionState:PKraftSolverPositionState;
     ContactPair:PKraftContactPair;
@@ -30338,7 +35258,7 @@ begin
 
   VelocityState^.LostSpeculativeBounce:=ContactPair^.Manifold.LostSpeculativeBounce;
   ContactPair^.Manifold.LostSpeculativeBounce:=0;
-    
+
   for ContactIndex:=0 to ContactPair^.Manifold.CountContacts-1 do begin
 
    Contact:=@ContactPair^.Manifold.Contacts[ContactIndex];
@@ -30397,7 +35317,7 @@ begin
 end;
 
 procedure TKraftSolver.InitializeConstraints;
-var ContactPairIndex,ContactIndex,TangentIndex,IndexA,IndexB:longint;
+var ContactPairIndex,ContactIndex,TangentIndex,IndexA,IndexB:TKraftInt32;
     VelocityState:PKraftSolverVelocityState;
     PositionState:PKraftSolverPositionState;
     ContactPoint:PKraftSolverVelocityStateContactPoint;
@@ -30496,7 +35416,7 @@ begin
      ContactPoint^.TangentMass[TangentIndex]:=1.0/TangentMass;
     end else begin
      ContactPoint^.TangentMass[TangentIndex]:=0.0;
-    end;    
+    end;
    end;
 
    if fPositionCorrectionMode=kpcmBaumgarte then begin
@@ -30532,7 +35452,7 @@ begin
   IndexB:=SpeculativeContactState^.Indices[1];
 
   iA:=@SpeculativeContactState^.WorldInverseInertiaTensors[0];
-  iB:=@SpeculativeContactState^.WorldInverseInertiaTensors[1];            
+  iB:=@SpeculativeContactState^.WorldInverseInertiaTensors[1];
 
   mA:=SpeculativeContactState^.InverseMasses[0];
   mB:=SpeculativeContactState^.InverseMasses[1];
@@ -30616,7 +35536,7 @@ begin
 end;
 
 procedure TKraftSolver.WarmStart;
-var ContactPairIndex,ContactIndex,IndexA,IndexB,CountPoints:longint;
+var ContactPairIndex,ContactIndex,IndexA,IndexB,CountPoints:TKraftInt32;
     VelocityState:PKraftSolverVelocityState;
     ContactPoint:PKraftSolverVelocityStateContactPoint;
     iA,iB:PKraftMatrix3x3;
@@ -30740,7 +35660,7 @@ begin
 end;
 
 procedure TKraftSolver.SolveVelocityConstraints;
-var ContactPairIndex,ContactIndex,TangentIndex,IndexA,IndexB,CountPoints:longint;
+var ContactPairIndex,ContactIndex,TangentIndex,IndexA,IndexB,CountPoints:TKraftInt32;
     VelocityState:PKraftSolverVelocityState;
     ContactPoint:PKraftSolverVelocityStateContactPoint;
     iA,iB:PKraftMatrix3x3;
@@ -30834,7 +35754,7 @@ begin
 end;
 
 function TKraftSolver.SolvePositionConstraints:boolean;
-var ContactPairIndex,ContactIndex,IndexA,IndexB:longint;
+var ContactPairIndex,ContactIndex,IndexA,IndexB:TKraftInt32;
     PositionState:PKraftSolverPositionState;
     SolverContact:PKraftSolverContact;
     iA,iB:PKraftMatrix3x3;
@@ -30905,7 +35825,7 @@ begin
     K:=mA+mB+Vector3Dot(rnA,Vector3TermMatrixMul(rnA,iA^))+Vector3Dot(rnB,Vector3TermMatrixMul(rnB,iB^));
 
     if K>0.0 then begin
-     Impulse:=-(C/K);   
+     Impulse:=-(C/K);
     end else begin
      Impulse:=0.0;
     end;
@@ -30938,8 +35858,8 @@ begin
 
 end;
 
-function TKraftSolver.SolveTimeOfImpactConstraints(IndexA,IndexB:longint):boolean;
-var ContactPairIndex,ContactIndex,CurrentIndexA,CurrentIndexB:longint;
+function TKraftSolver.SolveTimeOfImpactConstraints(IndexA,IndexB:TKraftInt32):boolean;
+var ContactPairIndex,ContactIndex,CurrentIndexA,CurrentIndexB:TKraftInt32;
     PositionState:PKraftSolverPositionState;
     SolverContact:PKraftSolverContact;
     iA,iB:PKraftMatrix3x3;
@@ -31049,13 +35969,13 @@ begin
  end else begin
 
   result:=true;
-  
+
  end;
 
 end;
 
 procedure TKraftSolver.SolveSpeculativeContactConstraints;
-var ContactPairIndex,TangentIndex,IndexA,IndexB:longint;
+var ContactPairIndex,TangentIndex,IndexA,IndexB:TKraftInt32;
     SpeculativeContactState:PKraftSolverSpeculativeContactState;
     iA,iB:PKraftMatrix3x3;
     mA,mB,Friction,Lambda,MaxLambda,vn,Old:TKraftScalar;
@@ -31141,7 +36061,7 @@ begin
 end;
 
 procedure TKraftSolver.StoreImpulses;
-var i,j:longint;
+var i,j:TKraftInt32;
     VelocityState:PKraftSolverVelocityState;
     ContactPair:PKraftContactPair;
     Contact:PKraftContact;
@@ -31171,7 +36091,259 @@ begin
  end;
 end;
 
-constructor TKraftIsland.Create(const APhysics:TKraft;const AIndex:longint);
+constructor TKraftParticleColor.Create(const aR,aG,aB,aA:TKraftUInt8);
+begin
+ r:=aR;
+ g:=aG;
+ b:=aB;
+ a:=aA;
+end;
+
+function TKraftParticleColor.IsZero:boolean;
+begin
+ result:=Value=0;
+end;
+
+procedure TKraftParticleColor.SetColor(const aR,aG,aB,aA:TKraftUInt8);
+begin
+ r:=aR;
+ g:=aG;
+ b:=aB;
+ a:=aA;
+end;
+
+procedure TKraftParticleColor.MulFloat(const aValue:TKraftScalar);
+begin
+ r:=Min(Max(trunc(r*aValue),0),255);
+ g:=Min(Max(trunc(g*aValue),0),255);
+ b:=Min(Max(trunc(b*aValue),0),255);
+ a:=Min(Max(trunc(a*aValue),0),255);
+end;
+
+procedure TKraftParticleColor.MulUInt(const aValue:TKraftUInt8);
+begin
+ r:=Min(Max((r*(aValue+1)) shr 8,0),255);
+ g:=Min(Max((g*(aValue+1)) shr 8,0),255);
+ b:=Min(Max((b*(aValue+1)) shr 8,0),255);
+ a:=Min(Max((a*(aValue+1)) shr 8,0),255);
+end;
+
+procedure TKraftParticleColor.Add(const aColor:TKraftParticleColor);
+begin
+ r:=Min(r+aColor.r,255);
+ g:=Min(g+aColor.g,255);
+ b:=Min(b+aColor.b,255);
+ a:=Min(a+aColor.a,255);
+end;
+
+function TKraftParticleColor.Equals(const aColor:TKraftParticleColor):boolean;
+begin
+ result:=Value=aColor.Value;
+end;
+
+class procedure TKraftParticleColor.MixColors(var aColor0,aColor1:TKraftParticleColor;const aStrength:TKraftInt32);
+var dr,dg,db,da:TKraftUInt8;
+begin
+ dr:=((aColor1.r-aColor0.r)*aStrength) shr 8;
+ dg:=((aColor1.g-aColor0.g)*aStrength) shr 8;
+ db:=((aColor1.b-aColor0.b)*aStrength) shr 8;
+ da:=((aColor1.a-aColor0.a)*aStrength) shr 8;
+ aColor0.r:=aColor0.r+dr;
+ aColor0.g:=aColor0.g+dg;
+ aColor0.b:=aColor0.b+db;
+ aColor0.a:=aColor0.a+da;
+ aColor1.r:=aColor1.r-dr;
+ aColor1.g:=aColor1.g-dg;
+ aColor1.b:=aColor1.b-db;
+ aColor1.a:=aColor1.a-da;
+end;
+
+procedure TKraftParticleColor.Mix(const aColor:TKraftParticleColor;const aStrength:TKraftInt32);
+var dr,dg,db,da:TKraftUInt8;
+begin
+ dr:=((aColor.r-r)*aStrength) shr 8;
+ dg:=((aColor.g-g)*aStrength) shr 8;
+ db:=((aColor.b-b)*aStrength) shr 8;
+ da:=((aColor.a-a)*aStrength) shr 8;
+ r:=r+dr;
+ g:=g+dg;
+ b:=b+db;
+ a:=a+da;
+end;
+
+class function TKraftParticle.Create:TKraftParticle;
+begin
+ FillChar(result,SizeOf(TKraftParticle),#0);
+end;
+
+constructor TKraftParticleSpatialHashTable.Create(const aParticleSystem:TKraftParticleSystem;const aCellSize:TKraftScalar;const aHashBits:TKraftUInt32);
+var Index:TKraftSizeInt;
+begin
+ inherited Create;
+ fParticleSystem:=aParticleSystem;
+ fCellSize:=aCellSize;
+ fCellOffset:=aCellSize*0.5;
+ fHashBits:=aHashBits;
+ fHashSize:=1 shl fHashBits;
+ fHashMask:=fHashSize-1;
+ fBuckets:=nil;
+ fBucketLocks:=nil;
+ SetLength(fBuckets,fHashSize);
+ for Index:=0 to TKraftSizeInt(fHashSize)-1 do begin
+  fBuckets[Index].Count:=0;
+ end;
+ SetLength(fBucketLocks,fHashSize);
+ FillChar(fBucketLocks[0],fHashSize*SizeOf(TKraftParticleSpatialHashTableBucketLock),#0);
+ SetLength(fBucketGenerations,fHashSize);
+ FillChar(fBucketGenerations[0],fHashSize*SizeOf(TKraftParticleSpatialHashTableBucketGeneration),#0);
+ fGeneration:=0;
+end;
+
+destructor TKraftParticleSpatialHashTable.Destroy;
+begin
+ fBuckets:=nil;
+ fBucketLocks:=nil;
+ inherited Destroy;
+end;
+
+procedure TKraftParticleSpatialHashTable.Update;
+var Index:TKraftSizeInt;
+    Particle:PKraftParticle;
+    x,y,z:TKraftInt32;
+    BucketIndex:TKraftUInt32;
+    Bucket:PKraftParticleSpatialHashTableBucket;
+begin
+ inc(fGeneration);
+ for Index:=0 to fParticleSystem.fParticles.Count-1 do begin
+  Particle:=@fParticleSystem.fParticles.Items[Index];
+  x:=Floor((Particle^.Position.x-fCellOffset)/fCellSize);
+  y:=Floor((Particle^.Position.y-fCellOffset)/fCellSize);
+  z:=Floor((Particle^.Position.z-fCellOffset)/fCellSize);
+  BucketIndex:=SpatialHashVector(x,y,z) and fHashMask;
+  Bucket:=@fBuckets[BucketIndex];
+  if fBucketGenerations[BucketIndex]<>fGeneration then begin
+   fBucketGenerations[BucketIndex]:=fGeneration;
+   Bucket^.Count:=0;
+  end;
+  if length(Bucket^.Items)<=Bucket^.Count then begin
+   SetLength(Bucket^.Items,(Bucket^.Count+1)+((Bucket^.Count+1) shr 1));
+  end;
+  Bucket^.Items[Bucket^.Count]:=Index;
+  inc(Bucket^.Count);
+ end;
+end;
+
+procedure TKraftParticleSpatialHashTable.LookUp(var aItemList:TKraftParticleSpatialHashTableItemList;const aPosition:TKraftVector3);
+var x,y,z,rx,ry,rz:TKraftInt32;
+    BucketIndex:TKraftUInt32;
+    Bucket:PKraftParticleSpatialHashTableBucket;
+begin
+ x:=Floor((aPosition.x-fCellOffset)/fCellSize);
+ y:=Floor((aPosition.y-fCellOffset)/fCellSize);
+ z:=Floor((aPosition.z-fCellOffset)/fCellSize);
+ aItemList.Count:=0;
+ for rz:=-1 to 1 do begin
+  for ry:=-1 to 1 do begin
+   for rx:=-1 to 1 do begin
+    BucketIndex:=SpatialHashVector(x+rx,y+ry,z+rz) and fHashMask;
+    Bucket:=@fBuckets[BucketIndex];
+    if (fBucketGenerations[BucketIndex]=fGeneration) and (Bucket^.Count>0) then begin
+     if length(aItemList.Items)<=(aItemList.Count+Bucket^.Count) then begin
+      SetLength(aItemList.Items,(aItemList.Count+Bucket^.Count)+((aItemList.Count+Bucket^.Count) shr 1));
+     end;
+     Move(Bucket^.Items[0],aItemList.Items[aItemList.Count],Bucket^.Count*SizeOf(TKraftParticleSpatialHashTableItem));
+     inc(aItemList.Count,Bucket^.Count);
+    end;
+   end;
+  end;
+ end;
+end;
+
+constructor TKraftParticleSystem.Create(const aPhysics:TKraft;const aParticleRadius:TKraftScalar);
+begin
+
+ inherited Create;
+
+ fPhysics:=aPhysics;
+
+ fParticleRadius:=aParticleRadius;
+
+ fParticles.Items:=nil;
+ fParticles.Count:=0;
+
+ fSpatialHashTable:=TKraftParticleSpatialHashTable.Create(self,fParticleRadius*2.0);
+
+ fStrictContactCheck:=false;
+ fDensity:=1.0;
+ fGravityScale:=1.0;
+ fMaxCount:=0;
+
+ fPressureStrength:=0.05;
+ fDampingStrength:=1.0;
+ fElasticStrength:=0.25;
+ fSpringStrength:=0.25;
+ fViscousStrength:=0.25;
+ fSurfaceTensionPressureStrength:=0.2;
+ fSurfaceTensionNormalStrength:=0.2;
+ fRepulsiveStrength:=1.0;
+ fPowderStrength:=0.5;
+ fEjectionStrength:=0.5;
+ fStaticPressureStrength:=0.2;
+ fStaticPressureRelaxation:=0.2;
+ fStaticPressureIterations:=8;
+ fColorMixingStrength:=0.5;
+ fDestroyByAge:=true;
+ fLifetimeGranularity:=1.0/60.0;
+
+end;
+
+destructor TKraftParticleSystem.Destroy;
+begin
+ FreeAndNil(fSpatialHashTable);
+ fParticles.Items:=nil;
+ inherited Destroy;
+end;
+
+function TKraftParticleSystem.CreateParticle:TKraftSizeInt;
+begin
+ result:=fParticles.Count;
+ inc(fParticles.Count);
+ if length(fParticles.Items)<fParticles.Count then begin
+  SetLength(fParticles.Items,fParticles.Count+(fParticles.Count shr 1));
+ end;
+ fParticles.Items[result]:=TKraftParticle.Create;
+end;
+
+procedure TKraftParticleSystem.DestroyParticle(const aIndex:TKraftSizeInt);
+begin
+ if (aIndex>=0) and (aIndex<fParticles.Count) then begin
+  dec(fParticles.Count);
+  if aIndex<fParticles.Count then begin
+   fParticles.Items[aIndex]:=fParticles.Items[fParticles.Count];
+  end;
+ end;
+end;
+
+procedure TKraftParticleSystem.Step(const aDeltaTime:TKraftScalar=0);
+begin
+
+ // Broadphase
+ begin
+  fSpatialHashTable.Update;
+ end;
+
+ // Narrowphase
+ begin
+ end;
+
+ // Solver
+ begin
+
+ end;
+
+end;
+
+constructor TKraftIsland.Create(const APhysics:TKraft;const AIndex:TKraftInt32);
 begin
  inherited Create;
 
@@ -31223,7 +36395,7 @@ begin
  fCountSpeculativeContactPairs:=0;
 end;
 
-function TKraftIsland.AddRigidBody(RigidBody:TKraftRigidBody):longint;
+function TKraftIsland.AddRigidBody(RigidBody:TKraftRigidBody):TKraftInt32;
 begin
  RigidBody.fIsland:=self;
  if (fCountRigidBodies+1)>length(fRigidBodies) then begin
@@ -31277,7 +36449,7 @@ begin
 end;
 
 procedure TKraftIsland.MergeContactPairs;
-var NewCountContactPairs:longint;
+var NewCountContactPairs:TKraftInt32;
 begin
  NewCountContactPairs:=fCountContactPairs+fCountStaticContactPairs;
  if length(fContactPairs)<NewCountContactPairs then begin
@@ -31290,7 +36462,7 @@ begin
 end;
 
 procedure TKraftIsland.Solve(const TimeStep:TKraftTimeStep);
-var Iteration,Index:longint;
+var Iteration,Index:TKraftInt32;
     RigidBody:TKraftRigidBody;
     Constraint:TKraftConstraint;
     MinSleepTime,s:TKraftScalar;
@@ -31318,9 +36490,23 @@ begin
 
    // Apply gravity force
    if krbfHasOwnGravity in RigidBody.fFlags then begin
-    RigidBody.fForce:=Vector3Add(RigidBody.fForce,Vector3ScalarMul(RigidBody.fGravity,RigidBody.fMass*RigidBody.fGravityScale));
+    case RigidBody.fGravityMode of
+     kgmMIDPOINT:begin
+      RigidBody.fForce:=Vector3Add(RigidBody.fForce,Vector3ScalarMul(Vector3Norm(Vector3Sub(RigidBody.fGravity,Position)),RigidBody.fGravitySpeed*RigidBody.fMass*RigidBody.fGravityScale));
+     end;
+     else begin
+      RigidBody.fForce:=Vector3Add(RigidBody.fForce,Vector3ScalarMul(RigidBody.fGravity,RigidBody.fMass*RigidBody.fGravityScale));
+     end;
+    end;
    end else begin
-    RigidBody.fForce:=Vector3Add(RigidBody.fForce,Vector3ScalarMul(fPhysics.fGravity,RigidBody.fMass*RigidBody.fGravityScale));
+    case fPhysics.fGravityMode of
+     kgmMIDPOINT:begin
+      RigidBody.fForce:=Vector3Add(RigidBody.fForce,Vector3ScalarMul(Vector3Norm(Vector3Sub(fPhysics.fGravity,Position)),fPhysics.fGravitySpeed*RigidBody.fMass*RigidBody.fGravityScale));
+     end;
+     else begin
+      RigidBody.fForce:=Vector3Add(RigidBody.fForce,Vector3ScalarMul(fPhysics.fGravity,RigidBody.fMass*RigidBody.fGravityScale));
+     end;
+    end;
    end;
 
    // Calculate world space inertia tensor
@@ -31344,7 +36530,7 @@ begin
      Vector3Scale(GyroscopicForce,RigidBody.fMaximalGyroscopicForce/Vector3Length(GyroscopicForce));
     end;
     RigidBody.fTorque:=Vector3Add(RigidBody.fTorque,GyroscopicForce);
-   end;       
+   end;
 
    // Integrate linear velocity
    RigidBody.fLinearVelocity:=Vector3Add(RigidBody.fLinearVelocity,Vector3Mul(RigidBody.fForce,Vector3ScalarMul(RigidBody.fLinearFactor,RigidBody.InverseMass*TimeStep.DeltaTime)));
@@ -31586,8 +36772,8 @@ begin
 
 end;
 
-procedure TKraftIsland.SolveTimeOfImpact(const TimeStep:TKraftTimeStep;const IndexA,IndexB:longint);
-var Iteration,Index:longint;
+procedure TKraftIsland.SolveTimeOfImpact(const TimeStep:TKraftTimeStep;const IndexA,IndexB:TKraftInt32);
+var Iteration,Index:TKraftInt32;
     RigidBody:TKraftRigidBody;
     SolverVelocity:PKraftSolverVelocity;
     SolverPosition:PKraftSolverPosition;
@@ -31637,7 +36823,7 @@ begin
 
  // Don't store the TOI contact forces for warm starting
  // because they can be quite large.
-                       
+
  for Index:=0 to fCountRigidBodies-1 do begin
 
   RigidBody:=fRigidBodies[Index];
@@ -31694,7 +36880,7 @@ begin
 end;
 
 {$ifndef KraftPasMP}
-constructor TKraftJobThread.Create(const APhysics:TKraft;const AJobManager:TKraftJobManager;const AThreadNumber:longint);
+constructor TKraftJobThread.Create(const APhysics:TKraft;const AJobManager:TKraftJobManager;const AThreadNumber:TKraftInt32);
 begin
 //{$ifdef memdebug}ScanMemoryPoolForCorruptions;{$endif}
  fPhysics:=APhysics;
@@ -31716,7 +36902,7 @@ begin
 end;
 
 procedure TKraftJobThread.Execute;
-var JobIndex:longint;
+var JobIndex:TKraftInt32;
 begin
  SetPrecisionMode(PhysicsFPUPrecisionMode);
  SetExceptionMask(PhysicsFPUExceptionMask);
@@ -31744,7 +36930,7 @@ begin
 end;
 
 constructor TKraftJobManager.Create(const APhysics:TKraft);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  inherited Create;
  fPhysics:=APhysics;
@@ -31762,7 +36948,7 @@ begin
 end;
 
 destructor TKraftJobManager.Destroy;
-var Index:longint;
+var Index:TKraftInt32;
 begin
  fThreadsTerminated:=true;
  for Index:=0 to fCountThreads-1 do begin
@@ -31776,7 +36962,7 @@ begin
 end;
 
 procedure TKraftJobManager.WakeUp;
-var Index:longint;
+var Index:TKraftInt32;
 begin
  for Index:=0 to fCountThreads-1 do begin
   fThreads[Index].fEvent.SetEvent;
@@ -31784,7 +36970,7 @@ begin
 end;
 
 procedure TKraftJobManager.WaitFor;
-var Index:longint;
+var Index:TKraftInt32;
 begin
  for Index:=0 to fCountThreads-1 do begin
   fThreads[Index].fDoneEvent.WaitFor(INFINITE);
@@ -31801,18 +36987,18 @@ end;
 {$ifdef KraftPasMP}
 constructor TKraft.Create(const APasMP:TPasMP);
 {$else}
-constructor TKraft.Create(const ACountThreads:longint=-1);
+constructor TKraft.Create(const ACountThreads:TKraftInt32=-1);
 {$endif}
 const TriangleVertex0:TKraftVector3=(x:0.0;y:0.0;z:0.0{$ifdef SIMD};w:0.0{$endif});
       TriangleVertex1:TKraftVector3=(x:1.0;y:0.0;z:0.01{$ifdef SIMD};w:0.0{$endif});
       TriangleVertex2:TKraftVector3=(x:0.0;y:1.0;z:0.02{$ifdef SIMD};w:0.0{$endif});
-var Index:longint;
+var Index:TKraftInt32;
 {$ifndef KraftPasMP}
 {$ifdef win32}
-    i,j:longint;
+    i,j:TKraftInt32;
     sinfo:SYSTEM_INFO;
     dwProcessAffinityMask,dwSystemAffinityMask:ptruint;
- function GetRealCountOfCPUCores:longint; {$ifdef caninline}inline;{$endif}
+ function GetRealCountOfCPUCores:TKraftInt32; {$ifdef caninline}inline;{$endif}
  const RelationProcessorCore=0;
        RelationNumaNode=1;
        RelationCache=2;
@@ -31826,10 +37012,10 @@ var Index:longint;
  type TLogicalProcessorRelationship=dword;
       TProcessorCacheType=dword;
       TCacheDescriptor=packed record
-       Level:byte;
-       Associativity:byte;
-       LineSize:word;
-       Size:dword;
+       Level:TKraftUInt8;
+       Associativity:TKraftUInt8;
+       LineSize:TKraftUInt16;
+       Size:TKraftUInt32;
        pcType:TProcessorCacheType;
       end;
       PSystemLogicalProcessorInformation=^TSystemLogicalProcessorInformation;
@@ -31837,7 +37023,7 @@ var Index:longint;
        ProcessorMask:ptruint;
        case Relationship:TLogicalProcessorRelationship of
         0:(
-         Flags:byte;
+         Flags:TKraftUInt8;
         );
         1:(
          NodeNumber:dword;
@@ -31846,14 +37032,14 @@ var Index:longint;
          Cache:TCacheDescriptor;
         );
         3:(
-         Reserved:array[0..1] of int64;
+         Reserved:array[0..1] of TKraftInt64;
         );
       end;
-      TGetLogicalProcessorInformation=function(Buffer:PSystemLogicalProcessorInformation;out ReturnLength:DWORD):BOOL; stdcall;
+      TGetLogicalProcessorInformation=function(Buffer:PSystemLogicalProcessorInformation;out ReturnLength:dword):BOOL; stdcall;
  var GetLogicalProcessorInformation:TGetLogicalProcessorInformation;
      Buffer:array of TSystemLogicalProcessorInformation;
      ReturnLength:dword;
-     Index,Count:longint;
+     Index,Count:TKraftInt32;
  begin
   result:=-1;
   Buffer:=nil;
@@ -31990,9 +37176,16 @@ begin
 
  fAllowedPenetration:=0.0;
 
+ fGravityMode:=kgmNORMAL;
+
+ fGravitySpeed:=9.83;
+
  fGravity.x:=0.0;
  fGravity.y:=-9.83;
  fGravity.z:=0.0;
+{$ifdef SIMD}
+ fGravity.w:=0.0;
+{$endif}
 
  fGravityProperty:=TKraftVector3Property.Create(@fGravity);
 
@@ -32063,6 +37256,8 @@ begin
 
  fContactBreakingThreshold:=0.02;
 
+ fDebugDrawLine:=nil;
+
  fTriangleShapes:=nil;
  SetLength(fTriangleShapes,Max(1,fCountThreads));
  for Index:=0 to length(fTriangleShapes)-1 do begin
@@ -32084,7 +37279,7 @@ begin
 end;
 
 destructor TKraft.Destroy;
-var Index:longint;
+var Index:TKraftInt32;
 begin
 
 {$ifndef KraftPasMP}
@@ -32207,7 +37402,7 @@ begin
 end;
 
 procedure TKraft.BuildIslands;
-var IslandIndex,LastCount,SubIndex:longint;
+var IslandIndex,LastCount,SubIndex:TKraftInt32;
     SeedRigidBody,SeedRigidBodyStack,CurrentRigidBody,OtherRigidBody,StaticRigidBodiesList:TKraftRigidBody;
     CurrentConstraintEdge:PKraftConstraintEdge;
     CurrentConstraint:TKraftConstraint;
@@ -32289,7 +37484,7 @@ begin
    Island.AddRigidBody(CurrentRigidBody);
 
    // Awaken all bodies connected to the island
-   CurrentRigidBody.SetToAwake;  
+   CurrentRigidBody.SetToAwake;
 
    // Do not search across static bodies to keep island formations as small as possible, however the static
    // body itself should be apart of the island in order to properly represent a full contact
@@ -32371,22 +37566,22 @@ begin
 end;
 
 {$ifdef KraftPasMP}
-procedure TKraft.ProcessSolveIslandParallelForFunction(const Job:PPasMPJob;const ThreadIndex:longint;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
-var Index:longint;
+procedure TKraft.ProcessSolveIslandParallelForFunction(const Job:PPasMPJob;const ThreadIndex:TKraftInt32;const Data:pointer;const FromIndex,ToIndex:TPasMPNativeInt);
+var Index:TKraftInt32;
 begin
  for Index:=FromIndex to ToIndex do begin
   fIslands[Index].Solve(fJobTimeStep);
  end;
 end;
 {$else}
-procedure TKraft.ProcessSolveIslandJob(const JobIndex,ThreadIndex:longint);
+procedure TKraft.ProcessSolveIslandJob(const JobIndex,ThreadIndex:TKraftInt32);
 begin
  fIslands[JobIndex].Solve(fJobTimeStep);
 end;
 {$endif}
 
 procedure TKraft.SolveIslands(const TimeStep:TKraftTimeStep);
-var Index:longint;
+var Index:TKraftInt32;
 begin
  fJobTimeStep:=TimeStep;
  fIsSolving:=true;
@@ -32409,9 +37604,9 @@ begin
 end;
 
 // Conservative advancement
-function TKraft.GetConservativeAdvancementTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:longint;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:longint;var Beta:TKraftScalar):boolean;
+function TKraft.GetConservativeAdvancementTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:TKraftInt32;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:TKraftInt32;var Beta:TKraftScalar):boolean;
 const Radius=1e-3;
-var Tries:longint;
+var Tries:TKraftInt32;
     BoundingRadiusA,BoundingRadiusB,MaximumAngularProjectedVelocity,RelativeLinearVelocityLength,Lambda,LastLambda,
     ProjectedLinearVelocity,DistanceLambda,Distance,ContinuousMinimumRadiusScaleFactor:TKraftScalar;
     MeshShape:TKraftShapeMesh;
@@ -32431,15 +37626,19 @@ begin
 
  if (ShapeBTriangleIndex>=0) and (ShapeB is TKraftShapeMesh) then begin
   MeshShape:=TKraftShapeMesh(ShapeB);
-  ShapeTriangle:=TKraftShapeTriangle(fTriangleShapes[ThreadIndex]);
-  Shapes[1]:=ShapeTriangle;
-  MeshTriangle:=@MeshShape.fMesh.fTriangles[ShapeBTriangleIndex];
-  ShapeTriangle.fLocalTransform:=MeshShape.fLocalTransform;
-  ShapeTriangle.fWorldTransform:=MeshShape.fWorldTransform;
-  ShapeTriangle.fConvexHull.fVertices[0].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[0]];
-  ShapeTriangle.fConvexHull.fVertices[1].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[1]];
-  ShapeTriangle.fConvexHull.fVertices[2].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[2]];
-  ShapeTriangle.UpdateData;
+  if ShapeBTriangleIndex<=MeshShape.fMesh.fCountTriangles then begin
+   ShapeTriangle:=TKraftShapeTriangle(fTriangleShapes[ThreadIndex]);
+   Shapes[1]:=ShapeTriangle;
+   MeshTriangle:=@MeshShape.fMesh.fTriangles[ShapeBTriangleIndex];
+   ShapeTriangle.fLocalTransform:=MeshShape.fLocalTransform;
+   ShapeTriangle.fWorldTransform:=MeshShape.fWorldTransform;
+   ShapeTriangle.fConvexHull.fVertices[0].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[0]];
+   ShapeTriangle.fConvexHull.fVertices[1].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[1]];
+   ShapeTriangle.fConvexHull.fVertices[2].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[2]];
+   ShapeTriangle.UpdateData;
+  end else begin
+   exit;
+  end;
  end else begin
   Shapes[1]:=ShapeB;
  end;
@@ -32472,7 +37671,7 @@ begin
  LastLambda:=Lambda;
 
  GJKCachedSimplex.Count:=0;
- 
+
  GJK.CachedSimplex:=@GJKCachedSimplex;
  GJK.Simplex.Count:=0;
  GJK.Shapes[0]:=Shapes[0];
@@ -32537,9 +37736,9 @@ begin
  end;
 
 end;
-  
+
 // Bilateral advancement
-function TKraft.GetBilateralAdvancementTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:longint;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:longint;var Beta:TKraftScalar):boolean;
+function TKraft.GetBilateralAdvancementTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:TKraftInt32;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:TKraftInt32;var Beta:TKraftScalar):boolean;
 const sfmNONE=0;
       sfmVERTICES=1;
       sfmEDGEA=2;
@@ -32547,7 +37746,7 @@ const sfmNONE=0;
       sfmFACEA=4;
       sfmFACEB=5;
       sfmEDGES=6;
-var Iteration,TryIteration,RootIteration,SeparationFunctionMode:longint;
+var Iteration,TryIteration,RootIteration,SeparationFunctionMode:TKraftInt32;
     //Unprocessed,Overlapping:boolean;
     t0,t1,s0,s1,a0,a1,t,s,{tS,tT0,tT1,}TotalRadius,Target,Tolerance,{Distance,CurrentDistance,L,}
     ContinuousMinimumRadiusScaleFactor:TKraftScalar;
@@ -32561,9 +37760,9 @@ var Iteration,TryIteration,RootIteration,SeparationFunctionMode:longint;
     WitnessPoints:array[0..1] of TKraftVector3;
     Transforms:array[0..1] of TKraftMatrix4x4;
     //LinearVelocities,AngularVelocities:array[0..1] of TKraftVector3;
-    UniqueGJKVertexIndices:array[0..1,0..2] of longint;
+    UniqueGJKVertexIndices:array[0..1,0..2] of TKraftInt32;
     UniqueGJKVertices:array[0..1,0..2] of TKraftVector3;
-    CountUniqueGJKVertices:array[0..1] of longint;
+    CountUniqueGJKVertices:array[0..1] of TKraftInt32;
     GJKCachedSimplex:TKraftGJKCachedSimplex;
  function Evaluate:TKraftScalar; //{$ifdef caninline}inline;{$endif}
  begin
@@ -32609,15 +37808,19 @@ begin
 
  if (ShapeBTriangleIndex>=0) and (ShapeB is TKraftShapeMesh) then begin
   MeshShape:=TKraftShapeMesh(ShapeB);
-  ShapeTriangle:=TKraftShapeTriangle(fTriangleShapes[ThreadIndex]);
-  Shapes[1]:=ShapeTriangle;
-  MeshTriangle:=@MeshShape.fMesh.fTriangles[ShapeBTriangleIndex];
-  ShapeTriangle.fLocalTransform:=MeshShape.fLocalTransform;
-  ShapeTriangle.fWorldTransform:=MeshShape.fWorldTransform;
-  ShapeTriangle.fConvexHull.fVertices[0].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[0]];
-  ShapeTriangle.fConvexHull.fVertices[1].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[1]];
-  ShapeTriangle.fConvexHull.fVertices[2].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[2]];
-  ShapeTriangle.UpdateData;
+  if ShapeBTriangleIndex<=MeshShape.fMesh.fCountTriangles then begin
+   ShapeTriangle:=TKraftShapeTriangle(fTriangleShapes[ThreadIndex]);
+   Shapes[1]:=ShapeTriangle;
+   MeshTriangle:=@MeshShape.fMesh.fTriangles[ShapeBTriangleIndex];
+   ShapeTriangle.fLocalTransform:=MeshShape.fLocalTransform;
+   ShapeTriangle.fWorldTransform:=MeshShape.fWorldTransform;
+   ShapeTriangle.fConvexHull.fVertices[0].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[0]];
+   ShapeTriangle.fConvexHull.fVertices[1].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[1]];
+   ShapeTriangle.fConvexHull.fVertices[2].Position:=MeshShape.fMesh.fVertices[MeshTriangle^.Vertices[2]];
+   ShapeTriangle.UpdateData;
+  end else begin
+   exit;
+  end;
  end else begin
   Shapes[1]:=ShapeB;
  end;
@@ -32633,7 +37836,7 @@ begin
  Target:=Max(fLinearSlop,TotalRadius-(3.0*fLinearSlop));
 
  Tolerance:=fLinearSlop*0.25;
- 
+
  GJKCachedSimplex.Count:=0;
 
  GJK.CachedSimplex:=@GJKCachedSimplex;
@@ -33049,7 +38252,7 @@ begin
 
 end;
 
-function TKraft.GetTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:longint;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:longint;var Beta:TKraftScalar):boolean;
+function TKraft.GetTimeOfImpact(const ShapeA:TKraftShape;const SweepA:TKraftSweep;const ShapeB:TKraftShape;const ShapeBTriangleIndex:TKraftInt32;const SweepB:TKraftSweep;const TimeStep:TKraftTimeStep;const ThreadIndex:TKraftInt32;var Beta:TKraftScalar):boolean;
 begin
  case fTimeOfImpactAlgorithm of
   ktoiaConservativeAdvancement:begin
@@ -33190,7 +38393,7 @@ end;
 procedure TKraft.SolveContinuousTimeOfImpactSubSteps(const TimeStep:TKraftTimeStep);
 const FLAG_VISITED=1 shl 0;
       FLAG_STATIC=1 shl 1;
-var TryIndex,Index,SubIndex,LastCount,Count,IndexA,IndexB{,c{}:longint;
+var TryIndex,Index,SubIndex,LastCount,Count,IndexA,IndexB{,c{}:TKraftInt32;
     NeedUpdate:boolean;
     RigidBody,CurrentRigidBody,OtherRigidBody:TKraftRigidBody;
     ContactPair,MinimumContactPair:PKraftContactPair;
@@ -33490,13 +38693,18 @@ begin
  end;
 end;
 
+procedure TKraft.InvalidateShapes;
+begin
+ fNewShapes:=true;
+end;
+
 procedure TKraft.Step(const ADeltaTime:TKraftScalar=0);
 var RigidBody:TKraftRigidBody;
     Constraint,NextConstraint:TKraftConstraint;
     OldFPUPrecisionMode:TFPUPrecisionMode;
     OldFPUExceptionMask:TFPUExceptionMask;
-    OldSIMDFlags:longword;
-    StartTime:int64;
+    OldSIMDFlags:TKraftUInt32;
+    StartTime:TKraftInt64;
     TimeStep:TKraftTimeStep;
 begin
 
@@ -33516,7 +38724,7 @@ begin
   TimeStep.InverseDeltaTime:=1.0;
  end else begin
   TimeStep.InverseDeltaTime:=1.0/TimeStep.DeltaTime;
- end;                     
+ end;
  TimeStep.DeltaTimeRatio:=fLastInverseDeltaTime*TimeStep.DeltaTime;
  TimeStep.WarmStarting:=fWarmStarting;
 
@@ -33619,12 +38827,44 @@ begin
 
 end;
 
+{$ifndef KraftSingleThreadedUsage}
+type TKraftTestPointProcessNodeData=record
+      Hit:TKraftShape;
+      AABBTree:TKraftDynamicAABBTree;
+      Point:PKraftVector3;
+     end;
+     PKraftTestPointProcessNodeData=^TKraftTestPointProcessNodeData;
+
+procedure TKraftTestPointProcessNode(const Data:PKraftTestPointProcessNodeData;NodeID:TKraftInt32);
+var Node:PKraftDynamicAABBTreeNode;
+    CurrentShape:TKraftShape;
+begin
+ while (NodeID>=0) and not assigned(Data^.Hit) do begin
+  Node:=@Data^.AABBTree.fNodes[NodeID];
+  if AABBContains(Node^.AABB,Data^.Point^) then begin
+   if Node^.Children[0]<0 then begin
+    CurrentShape:=Node^.UserData;
+    if assigned(CurrentShape) and CurrentShape.TestPoint(Data.Point^) then begin
+     Data^.Hit:=CurrentShape;
+     exit;
+    end;
+   end else begin
+    TKraftTestPointProcessNode(Data,Node^.Children[0]);
+    NodeID:=Node^.Children[1];
+    continue;
+   end;
+  end;
+  break;
+ end;
+end;
+{$endif}
+
 function TKraft.TestPoint(const Point:TKraftVector3):TKraftShape;
-var Hit:TKraftShape;
 {$ifdef KraftSingleThreadedUsage}
+var Hit:TKraftShape;
  procedure QueryTree(AABBTree:TKraftDynamicAABBTree);
  var LocalStack:PKraftDynamicAABBTreeLongintArray;
-     LocalStackPointer,NodeID:longint;
+     LocalStackPointer,NodeID:TKraftInt32;
      Node:PKraftDynamicAABBTreeNode;
      CurrentShape:TKraftShape;
  begin
@@ -33648,7 +38888,7 @@ var Hit:TKraftShape;
        end else begin
         if AABBTree.fStackCapacity<=(LocalStackPointer+2) then begin
          AABBTree.fStackCapacity:=RoundUpToPowerOfTwo(LocalStackPointer+2);
-         ReallocMem(AABBTree.fStack,AABBTree.fStackCapacity*SizeOf(longint));
+         ReallocMem(AABBTree.fStack,AABBTree.fStackCapacity*SizeOf(TKraftInt32));
          LocalStack:=AABBTree.fStack;
         end;
         LocalStack^[LocalStackPointer+0]:=Node^.Children[0];
@@ -33661,32 +38901,6 @@ var Hit:TKraftShape;
    end;
   end;
  end;
-{$else}
- procedure QueryTree(AABBTree:TKraftDynamicAABBTree);
-  procedure ProcessNode(NodeID:longint);
-  var Node:PKraftDynamicAABBTreeNode;
-      CurrentShape:TKraftShape;
-  begin
-   if (NodeID>=0) and not assigned(Hit) then begin
-    Node:=@AABBTree.fNodes[NodeID];
-    if AABBContains(Node^.AABB,Point) then begin
-     if Node^.Children[0]<0 then begin
-      CurrentShape:=Node^.UserData;
-      if assigned(CurrentShape) and CurrentShape.TestPoint(Point) then begin
-       Hit:=CurrentShape;
-       exit;
-      end;
-     end else begin
-      ProcessNode(Node^.Children[0]);
-      ProcessNode(Node^.Children[1]);
-     end;
-    end;
-   end;
-  end;
- begin
-  ProcessNode(AABBTree.fRoot);
- end;
-{$endif}
 begin
  Hit:=nil;
  QueryTree(fStaticAABBTree);
@@ -33701,13 +38915,85 @@ begin
  end;
  result:=Hit;
 end;
+{$else}
+var Data:TKraftTestPointProcessNodeData;
+begin
+ Data.Hit:=nil;
+ Data.Point:=@Point;
+ begin
+  Data.AABBTree:=fStaticAABBTree;
+  TKraftTestPointProcessNode(@Data,fStaticAABBTree.fRoot);
+ end;
+ if not assigned(Data.Hit) then begin
+  Data.AABBTree:=fSleepingAABBTree;
+  TKraftTestPointProcessNode(@Data,fSleepingAABBTree.fRoot);
+ end;
+ if not assigned(Data.Hit) then begin
+  Data.AABBTree:=fDynamicAABBTree;
+  TKraftTestPointProcessNode(@Data,fDynamicAABBTree.fRoot);
+ end;
+ if not assigned(Data.Hit) then begin
+  Data.AABBTree:=fKinematicAABBTree;
+  TKraftTestPointProcessNode(@Data,fKinematicAABBTree.fRoot);
+ end;
+ result:=Data.Hit;
+end;
+{$endif}
+
+{$ifndef KraftSingleThreadedUsage}
+type TKraftRayCastProcessNodeData=record
+      CollisionGroups:TKraftRigidBodyCollisionGroups;
+      Point:TKraftVector3;
+      Normal:TKraftVector3;
+      MaxTime:TKraftScalar;
+      Time:TKraftScalar;
+      OnRayCastFilterHook:TKraftOnRayCastFilterHook;
+      AABBTree:TKraftDynamicAABBTree;
+      Shape:TKraftShape;
+      Hit:boolean;
+      RayCastData:TKraftRayCastData;
+     end;
+     PKraftRayCastProcessNodeData=^TKraftRayCastProcessNodeData;
+
+procedure TKraftRayCastProcessNode(const Data:PKraftRayCastProcessNodeData;NodeID:TKraftInt32);
+var Node:PKraftDynamicAABBTreeNode;
+    CurrentShape:TKraftShape;
+begin
+ while NodeID>=0 do begin
+  Node:=@Data.AABBTree.fNodes[NodeID];
+  if AABBRayIntersect(Node^.AABB,Data^.RayCastData.Origin,Data^.RayCastData.Direction) then begin
+   if Node^.Children[0]<0 then begin
+    CurrentShape:=Node^.UserData;
+    Data^.RayCastData.MaxTime:=Data^.MaxTime;
+    if (assigned(CurrentShape) and (assigned(CurrentShape.fRigidBody) and ((CurrentShape.fRigidBody.fCollisionGroups*Data^.CollisionGroups)<>[]))) and CurrentShape.RayCast(Data^.RayCastData) then begin
+     if (assigned(Data^.OnRayCastFilterHook) and Data^.OnRayCastFilterHook(Data^.RayCastData.Point,Data^.RayCastData.Normal,Data^.RayCastData.TimeOfImpact,CurrentShape)) or not assigned(Data^.OnRayCastFilterHook) then begin
+      if (Data^.Hit and (Data^.RayCastData.TimeOfImpact<Data^.Time)) or not Data^.Hit then begin
+       Data^.Hit:=true;
+       Data^.Time:=Data^.RayCastData.TimeOfImpact;
+       Data^.Point:=Data^.RayCastData.Point;
+       Data^.Normal:=Data^.RayCastData.Normal;
+       Data^.Shape:=CurrentShape;
+      end;
+     end;
+    end;
+   end else begin
+    TKraftRayCastProcessNode(Data,Node^.Children[0]);
+    NodeID:=Node^.Children[1];
+    continue;
+   end;
+  end;
+  break;
+ end;
+end;
+
+{$endif}
 
 function TKraft.RayCast(const Origin,Direction:TKraftVector3;const MaxTime:TKraftScalar;var Shape:TKraftShape;var Time:TKraftScalar;var Point,Normal:TKraftVector3;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const aOnRayCastFilterHook:TKraftOnRayCastFilterHook=nil):boolean;
-var Hit:boolean;
 {$ifdef KraftSingleThreadedUsage}
+var Hit:boolean;
  procedure QueryTree(AABBTree:TKraftDynamicAABBTree);
  var LocalStack:PKraftDynamicAABBTreeLongintArray;
-     LocalStackPointer,NodeID:longint;
+     LocalStackPointer,NodeID:TKraftInt32;
      Node:PKraftDynamicAABBTreeNode;
      CurrentShape:TKraftShape;
      RayCastData:TKraftRaycastData;
@@ -33742,7 +39028,7 @@ var Hit:boolean;
        end else begin
         if AABBTree.fStackCapacity<=(LocalStackPointer+2) then begin
          AABBTree.fStackCapacity:=RoundUpToPowerOfTwo(LocalStackPointer+2);
-         ReallocMem(AABBTree.fStack,AABBTree.fStackCapacity*SizeOf(longint));
+         ReallocMem(AABBTree.fStack,AABBTree.fStackCapacity*SizeOf(TKraftInt32));
          LocalStack:=AABBTree.fStack;
         end;
         LocalStack^[LocalStackPointer+0]:=Node^.Children[0];
@@ -33755,43 +39041,6 @@ var Hit:boolean;
    end;
   end;
  end;
-{$else}
- procedure QueryTree(AABBTree:TKraftDynamicAABBTree);
-  procedure ProcessNode(NodeID:longint);
-  var Node:PKraftDynamicAABBTreeNode;
-      CurrentShape:TKraftShape;
-      RayCastData:TKraftRayCastData;
-  begin
-   if NodeID>=0 then begin
-    Node:=@AABBTree.fNodes[NodeID];
-    if AABBRayIntersect(Node^.AABB,Origin,Direction) then begin
-     if Node^.Children[0]<0 then begin
-      CurrentShape:=Node^.UserData;
-      RayCastData.Origin:=Origin;
-      RayCastData.Direction:=Direction;
-      RayCastData.MaxTime:=MaxTime;
-      if (assigned(CurrentShape) and (assigned(CurrentShape.fRigidBody) and ((CurrentShape.fRigidBody.fCollisionGroups*CollisionGroups)<>[]))) and CurrentShape.RayCast(RayCastData) then begin
-       if (assigned(aOnRayCastFilterHook) and aOnRayCastFilterHook(RayCastData.Point,RayCastData.Normal,RayCastData.TimeOfImpact,CurrentShape)) or not assigned(aOnRayCastFilterHook) then begin
-        if (Hit and (RayCastData.TimeOfImpact<Time)) or not Hit then begin
-         Hit:=true;
-         Time:=RayCastData.TimeOfImpact;
-         Point:=RayCastData.Point;
-         Normal:=RayCastData.Normal;
-         Shape:=CurrentShape;
-        end;
-       end;
-      end;
-     end else begin
-      ProcessNode(Node^.Children[0]);
-      ProcessNode(Node^.Children[1]);
-     end;
-    end;
-   end;
-  end;
- begin
-  ProcessNode(AABBTree.fRoot);
- end;
-{$endif}
 begin
  Hit:=false;
  Time:=MaxTime;
@@ -33801,13 +39050,110 @@ begin
  QueryTree(fKinematicAABBTree);
  result:=Hit;
 end;
+{$else}
+var Data:TKraftRayCastProcessNodeData;
+begin
+ Data.CollisionGroups:=CollisionGroups;
+ Data.RayCastData.Origin:=Origin;
+ Data.RayCastData.Direction:=Direction;
+ Data.Point:=Vector3Origin;
+ Data.Normal:=Vector3Origin;
+ Data.MaxTime:=MaxTime;
+ Data.Time:=MaxTime;
+ Data.OnRayCastFilterHook:=aOnRayCastFilterHook;
+ Data.AABBTree:=nil;
+ Data.Shape:=nil;
+ Data.Hit:=false;
+ begin
+  Data.AABBTree:=fStaticAABBTree;
+  TKraftRayCastProcessNode(@Data,fStaticAABBTree.fRoot);
+ end;
+ begin
+  Data.AABBTree:=fSleepingAABBTree;
+  TKraftRayCastProcessNode(@Data,fSleepingAABBTree.fRoot);
+ end;
+ begin
+  Data.AABBTree:=fDynamicAABBTree;
+  TKraftRayCastProcessNode(@Data,fDynamicAABBTree.fRoot);
+ end;
+ begin
+  Data.AABBTree:=fKinematicAABBTree;
+  TKraftRayCastProcessNode(@Data,fKinematicAABBTree.fRoot);
+ end;
+ result:=Data.Hit;
+ if result then begin
+  Shape:=Data.Shape;
+  Time:=Data.Time;
+  Point:=Data.Point;
+  Normal:=Data.Normal;
+ end;
+end;
+{$endif}
+
+function TKraft.RayCast(const Source,Target:TKraftVector3;var Shape:TKraftShape;var Time:TKraftScalar;var Point,Normal:TKraftVector3;const CollisionGroups:TKraftRigidBodyCollisionGroups;const aOnRayCastFilterHook:TKraftOnRayCastFilterHook):boolean;
+var Len:TKraftScalar;
+begin
+ Len:=Vector3Dist(Source,Target);
+ result:=RayCast(Source,Vector3Norm(Vector3Sub(Target,Source)),Len,Shape,Time,Point,Normal,CollisionGroups,aOnRayCastFilterHook);
+ if result then begin
+  Time:=Time/Len;
+ end;
+end;
+
+{$ifndef KraftSingleThreadedUsage}
+type TKraftSphereCastProcessNodeData=record
+      CollisionGroups:TKraftRigidBodyCollisionGroups;
+      Point:TKraftVector3;
+      Normal:TKraftVector3;
+      MaxTime:TKraftScalar;
+      Time:TKraftScalar;
+      OnSphereCastFilterHook:TKraftOnSphereCastFilterHook;
+      AABBTree:TKraftDynamicAABBTree;
+      Shape:TKraftShape;
+      Hit:boolean;
+      SphereCastData:TKraftSphereCastData;
+     end;
+     PKraftSphereCastProcessNodeData=^TKraftSphereCastProcessNodeData;
+
+procedure TKraftSphereCastProcessNode(const Data:PKraftSphereCastProcessNodeData;NodeID:TKraftInt32);
+var Node:PKraftDynamicAABBTreeNode;
+    CurrentShape:TKraftShape;
+begin
+ while NodeID>=0 do begin
+  Node:=@Data.AABBTree.fNodes[NodeID];
+  if AABBRayIntersect(Node^.AABB,Data^.SphereCastData.Origin,Data^.SphereCastData.Direction) then begin
+   if Node^.Children[0]<0 then begin
+    CurrentShape:=Node^.UserData;
+    Data^.SphereCastData.MaxTime:=Data^.MaxTime;
+    if (assigned(CurrentShape) and (assigned(CurrentShape.fRigidBody) and ((CurrentShape.fRigidBody.fCollisionGroups*Data^.CollisionGroups)<>[]))) and CurrentShape.SphereCast(Data^.SphereCastData) then begin
+     if (assigned(Data^.OnSphereCastFilterHook) and Data^.OnSphereCastFilterHook(Data^.SphereCastData.Point,Data^.SphereCastData.Normal,Data^.SphereCastData.TimeOfImpact,CurrentShape)) or not assigned(Data^.OnSphereCastFilterHook) then begin
+      if (Data^.Hit and (Data^.SphereCastData.TimeOfImpact<Data^.Time)) or not Data^.Hit then begin
+       Data^.Hit:=true;
+       Data^.Time:=Data^.SphereCastData.TimeOfImpact;
+       Data^.Point:=Data^.SphereCastData.Point;
+       Data^.Normal:=Data^.SphereCastData.Normal;
+       Data^.Shape:=CurrentShape;
+      end;
+     end;
+    end;
+   end else begin
+    TKraftSphereCastProcessNode(Data,Node^.Children[0]);
+    NodeID:=Node^.Children[1];
+    continue;
+   end;
+  end;
+  break;
+ end;
+end;
+
+{$endif}
 
 function TKraft.SphereCast(const Origin:TKraftVector3;const Radius:TKraftScalar;const Direction:TKraftVector3;const MaxTime:TKraftScalar;var Shape:TKraftShape;var Time:TKraftScalar;var Point,Normal:TKraftVector3;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const aOnSphereCastFilterHook:TKraftOnSphereCastFilterHook=nil):boolean;
-var Hit:boolean;
 {$ifdef KraftSingleThreadedUsage}
+var Hit:boolean;
  procedure QueryTree(AABBTree:TKraftDynamicAABBTree);
  var LocalStack:PKraftDynamicAABBTreeLongintArSphere;
-     LocalStackPointer,NodeID:longint;
+     LocalStackPointer,NodeID:TKraftInt32;
      Node:PKraftDynamicAABBTreeNode;
      CurrentShape:TKraftShape;
      SphereCastData:TKraftSpherecastData;
@@ -33843,7 +39189,7 @@ var Hit:boolean;
        end else begin
         if AABBTree.fStackCapacity<=(LocalStackPointer+2) then begin
          AABBTree.fStackCapacity:=RoundUpToPowerOfTwo(LocalStackPointer+2);
-         ReallocMem(AABBTree.fStack,AABBTree.fStackCapacity*SizeOf(longint));
+         ReallocMem(AABBTree.fStack,AABBTree.fStackCapacity*SizeOf(TKraftInt32));
          LocalStack:=AABBTree.fStack;
         end;
         LocalStack^[LocalStackPointer+0]:=Node^.Children[0];
@@ -33856,44 +39202,6 @@ var Hit:boolean;
    end;
   end;
  end;
-{$else}
- procedure QueryTree(AABBTree:TKraftDynamicAABBTree);
-  procedure ProcessNode(NodeID:longint);
-  var Node:PKraftDynamicAABBTreeNode;
-      CurrentShape:TKraftShape;
-      SphereCastData:TKraftSphereCastData;
-  begin
-   if NodeID>=0 then begin
-    Node:=@AABBTree.fNodes[NodeID];
-    if SphereCastAABB(Origin,Radius,Direction,Node^.AABB) then begin
-     if Node^.Children[0]<0 then begin
-      CurrentShape:=Node^.UserData;
-      SphereCastData.Origin:=Origin;
-      SphereCastData.Radius:=Radius;
-      SphereCastData.Direction:=Direction;
-      SphereCastData.MaxTime:=MaxTime;
-      if (assigned(CurrentShape) and (assigned(CurrentShape.fRigidBody) and ((CurrentShape.fRigidBody.fCollisionGroups*CollisionGroups)<>[]))) and CurrentShape.SphereCast(SphereCastData) then begin
-       if (assigned(aOnSphereCastFilterHook) and aOnSphereCastFilterHook(SphereCastData.Point,SphereCastData.Normal,SphereCastData.TimeOfImpact,CurrentShape)) or not assigned(aOnSphereCastFilterHook) then begin
-        if (Hit and (SphereCastData.TimeOfImpact<Time)) or not Hit then begin
-         Hit:=true;
-         Time:=SphereCastData.TimeOfImpact;
-         Point:=SphereCastData.Point;
-         Normal:=SphereCastData.Normal;
-         Shape:=CurrentShape;
-        end;
-       end;
-      end;
-     end else begin
-      ProcessNode(Node^.Children[0]);
-      ProcessNode(Node^.Children[1]);
-     end;
-    end;
-   end;
-  end;
- begin
-  ProcessNode(AABBTree.fRoot);
- end;
-{$endif}
 begin
  Hit:=false;
  Time:=MaxTime;
@@ -33903,14 +39211,79 @@ begin
  QueryTree(fKinematicAABBTree);
  result:=Hit;
 end;
+{$else}
+var Data:TKraftSphereCastProcessNodeData;
+begin
+ Data.CollisionGroups:=CollisionGroups;
+ Data.SphereCastData.Origin:=Origin;
+ Data.SphereCastData.Direction:=Direction;
+ Data.SphereCastData.Radius:=Radius;
+ Data.Point:=Vector3Origin;
+ Data.Normal:=Vector3Origin;
+ Data.MaxTime:=MaxTime;
+ Data.Time:=MaxTime;
+ Data.OnSphereCastFilterHook:=aOnSphereCastFilterHook;
+ Data.AABBTree:=nil;
+ Data.Shape:=nil;
+ Data.Hit:=false;
+ begin
+  Data.AABBTree:=fStaticAABBTree;
+  TKraftSphereCastProcessNode(@Data,fStaticAABBTree.fRoot);
+ end;
+ begin
+  Data.AABBTree:=fSleepingAABBTree;
+  TKraftSphereCastProcessNode(@Data,fSleepingAABBTree.fRoot);
+ end;
+ begin
+  Data.AABBTree:=fDynamicAABBTree;
+  TKraftSphereCastProcessNode(@Data,fDynamicAABBTree.fRoot);
+ end;
+ begin
+  Data.AABBTree:=fKinematicAABBTree;
+  TKraftSphereCastProcessNode(@Data,fKinematicAABBTree.fRoot);
+ end;
+ result:=Data.Hit;
+ if result then begin
+  Shape:=Data.Shape;
+  Time:=Data.Time;
+  Point:=Data.Point;
+  Normal:=Data.Normal;
+ end;
+end;
+{$endif}
 
-function TKraft.PushSphere(var Center:TKraftVector3;const Radius:TKraftScalar;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const TryIterations:longint=4;const OnPushSphereShapeContactHook:TKraftOnPushSphereShapeContactHook=nil):boolean;
+function TKraft.SphereCast(const Source:TKraftVector3;const Radius:TKraftScalar;const Target:TKraftVector3;var Shape:TKraftShape;var Time:TKraftScalar;var Point,Normal:TKraftVector3;const CollisionGroups:TKraftRigidBodyCollisionGroups;const aOnSphereCastFilterHook:TKraftOnSphereCastFilterHook):boolean;
+var Len:TKraftScalar;
+begin
+ Len:=Vector3Dist(Source,Target);
+ result:=SphereCast(Source,Radius,Vector3Norm(Vector3Sub(Target,Source)),Vector3Dist(Source,Target),Shape,Time,Point,Normal,CollisionGroups,aOnSphereCastFilterHook);
+ if result then begin
+  Time:=Time/Len;
+ end;
+end;
+
+function TKraft.PushSphere(var Center:TKraftVector3;const Radius:TKraftScalar;const CollisionGroups:TKraftRigidBodyCollisionGroups=[low(TKraftRigidBodyCollisionGroup)..high(TKraftRigidBodyCollisionGroup)];const TryIterations:TKraftInt32=4;const OnPushSphereShapeContactHook:TKraftOnPushSphereShapeContactHook=nil):boolean;
 var Hit:boolean;
     AABB:TKraftAABB;
     Sphere:TKraftSphere;
     SumMinimumTranslationVector:TKraftVector3;
-    Count:longint;
- procedure CollideSphereWithSphere(Shape:TKraftShapeSphere); {$ifdef caninline}inline;{$endif}
+    Count:TKraftInt32;
+ procedure CollideSphereWithSignedDistanceField(Shape:TKraftShapeSignedDistanceField);
+ var SphereCenter,Direction:TKraftVector3;
+     Radius,Distance:TKraftScalar;
+ begin
+  SphereCenter:=Vector3TermMatrixMulInverted(Sphere.Center,Shape.fWorldTransform);
+  Radius:=Sphere.Radius;
+  Distance:=Shape.GetLocalSignedDistanceAndDirection(SphereCenter,Direction);
+  if Distance<Radius then begin
+   SumMinimumTranslationVector:=Vector3Add(SumMinimumTranslationVector,Vector3ScalarMul(Direction,Radius-Distance));
+   inc(Count);
+   if assigned(OnPushSphereShapeContactHook) then begin
+    OnPushSphereShapeContactHook(Shape);
+   end;
+  end;
+ end;
+ procedure CollideSphereWithSphere(Shape:TKraftShapeSphere);
  var Position,Normal:TKraftVector3;
      Depth:TKraftScalar;
  begin
@@ -33926,7 +39299,7 @@ var Hit:boolean;
    end;
   end;
  end;
- procedure CollideSphereWithCapsule(Shape:TKraftShapeCapsule); {$ifdef caninline}inline;{$endif}
+ procedure CollideSphereWithCapsule(Shape:TKraftShapeCapsule);
  var Alpha,HalfLength,r1,r2,d,d1:TKraftScalar;
      Center,Position,Normal,GeometryDirection:TKraftVector3;
  begin
@@ -33960,8 +39333,8 @@ var Hit:boolean;
    end;
   end;
  end;
- procedure CollideSphereWithConvexHull(Shape:TKraftShapeConvexHull); {$ifdef caninline}inline;{$endif}
- var FaceIndex,ClosestFaceIndex,VertexIndex:longint;
+ procedure CollideSphereWithConvexHull(Shape:TKraftShapeConvexHull);
+ var FaceIndex,ClosestFaceIndex,VertexIndex:TKraftInt32;
      Distance,ClosestDistance,BestClosestPointDistance,d:TKraftScalar;
      SphereCenter,Normal,ClosestPoint,{BestClosestPoint,}BestClosestPointNormal,ab,ap,a,b,v,n:TKraftVector3;
      InsideSphere,InsidePolygon,HasBestClosestPoint:boolean;
@@ -34036,8 +39409,10 @@ var Hit:boolean;
   end;
   if InsideSphere and (ClosestFaceIndex>=0) then begin
    // the sphere center is inside the convex hull . . .
-   Normal:=Vector3SafeNorm(Vector3TermMatrixMulBasis(Shape.fConvexHull.fFaces[ClosestFaceIndex].Plane.Normal,Shape.fWorldTransform));
-   SumMinimumTranslationVector:=Vector3Sub(SumMinimumTranslationVector,Vector3ScalarMul(Normal,ClosestDistance-Sphere.Radius));
+   Face:=@Shape.fConvexHull.fFaces[ClosestFaceIndex];
+   Distance:=PlaneVectorDistance(Face^.Plane,SphereCenter);
+   Normal:=Vector3SafeNorm(Vector3TermMatrixMulBasis(Face^.Plane.Normal,Shape.fWorldTransform));
+   SumMinimumTranslationVector:=Vector3Add(SumMinimumTranslationVector,Vector3ScalarMul(Normal,Sphere.Radius-Distance));
    inc(Count);
    Hit:=true;
    if assigned(OnPushSphereShapeContactHook) then begin
@@ -34052,16 +39427,19 @@ var Hit:boolean;
    end;
   end;
  end;
- procedure CollideSphereWithBox(Shape:TKraftShapeBox); {$ifdef caninline}inline;{$endif}
- //const ModuloThree:array[0..5] of longint=(0,1,2,0,1,2);
+ procedure CollideSphereWithBox(Shape:TKraftShapeBox);
+ //const ModuloThree:array[0..5] of TKraftInt32=(0,1,2,0,1,2);
  var IntersectionDist,ContactDist,DistSqr,Distance,FaceDist,MinDist:TKraftScalar;
      SphereRelativePosition,ClosestPoint,Normal:TKraftVector3;
-     Axis,AxisSign:longint;
+     Axis,AxisSign:TKraftInt32;
  begin
   SphereRelativePosition:=Vector3TermMatrixMulInverted(Sphere.Center,Shape.fWorldTransform);
   ClosestPoint.x:=Min(Max(SphereRelativePosition.x,-Shape.fExtents.x),Shape.fExtents.x);
   ClosestPoint.y:=Min(Max(SphereRelativePosition.y,-Shape.fExtents.y),Shape.fExtents.y);
   ClosestPoint.z:=Min(Max(SphereRelativePosition.z,-Shape.fExtents.z),Shape.fExtents.z);
+{$ifdef SIMD}
+  ClosestPoint.w:=0.0;
+{$endif}
   Normal:=Vector3Sub(SphereRelativePosition,ClosestPoint);
   DistSqr:=Vector3LengthSquared(Normal);
   IntersectionDist:=Sphere.Radius;
@@ -34130,7 +39508,7 @@ var Hit:boolean;
    end;
   end;
  end;
- procedure CollideSphereWithPlane(Shape:TKraftShapePlane); {$ifdef caninline}inline;{$endif}
+ procedure CollideSphereWithPlane(Shape:TKraftShapePlane);
  var Distance:TKraftScalar;
      SphereCenter:TKraftVector3;
  begin
@@ -34146,8 +39524,8 @@ var Hit:boolean;
   end;
  end;
  procedure CollideSphereWithTriangle(Shape:TKraftShapeTriangle);
- const ModuloThree:array[0..5] of longint=(0,1,2,0,1,2);
- var i:longint;
+ const ModuloThree:array[0..5] of TKraftInt32=(0,1,2,0,1,2);
+ var i:TKraftInt32;
      Radius,RadiusWithThreshold,DistanceFromPlane,ContactRadiusSqr,DistanceSqr:TKraftScalar;
      SphereCenter,Normal,P0ToCenter,ContactPoint,NearestOnEdge,ContactToCenter:TKraftVector3;
      IsInsideContactPlane,HasContact:boolean;
@@ -34201,9 +39579,9 @@ var Hit:boolean;
    end;
   end;
  end;
- procedure CollideSphereWithMesh(Shape:TKraftShapeMesh); {$ifdef caninline}inline;{$endif}
- const ModuloThree:array[0..5] of longint=(0,1,2,0,1,2);
- var i,SkipListNodeIndex,TriangleIndex:longint;
+ procedure CollideSphereWithMesh(Shape:TKraftShapeMesh);
+ const ModuloThree:array[0..5] of TKraftInt32=(0,1,2,0,1,2);
+ var i,SkipListNodeIndex,TriangleIndex:TKraftInt32;
      Radius,RadiusWithThreshold,DistanceFromPlane,ContactRadiusSqr,DistanceSqr:TKraftScalar;
      SphereCenter,Normal,P0ToCenter,ContactPoint,NearestOnEdge,ContactToCenter:TKraftVector3;
      IsInsideContactPlane,HasContact:boolean;
@@ -34220,60 +39598,66 @@ var Hit:boolean;
   AABB.Min.x:=SphereCenter.x-RadiusWithThreshold;
   AABB.Min.y:=SphereCenter.y-RadiusWithThreshold;
   AABB.Min.z:=SphereCenter.z-RadiusWithThreshold;
+{$ifdef SIMD}
+  AABB.Min.w:=0.0;
+{$endif}
   AABB.Max.x:=SphereCenter.x+RadiusWithThreshold;
   AABB.Max.y:=SphereCenter.y+RadiusWithThreshold;
   AABB.Max.z:=SphereCenter.z+RadiusWithThreshold;
+{$ifdef SIMD}
+  AABB.Max.w:=0.0;
+{$endif}
   RadiusWithThreshold:=Radius+EPSILON;
   SkipListNodeIndex:=0;
   while SkipListNodeIndex<Shape.fMesh.fCountSkipListNodes do begin
    SkipListNode:=@Shape.fMesh.fSkipListNodes[SkipListNodeIndex];
    if AABBIntersect(SkipListNode^.AABB,AABB) then begin
-    TriangleIndex:=SkipListNode^.TriangleIndex;
-    while TriangleIndex>=0 do begin
-     Triangle:=@Shape.fMesh.fTriangles[TriangleIndex];
-     Vertices[0]:=@Shape.fMesh.fVertices[Triangle^.Vertices[0]];
-     Vertices[1]:=@Shape.fMesh.fVertices[Triangle^.Vertices[1]];
-     Vertices[2]:=@Shape.fMesh.fVertices[Triangle^.Vertices[2]];
-     Normal:=Vector3SafeNorm(Vector3Cross(Vector3Sub(Vertices[1]^,Vertices[0]^),Vector3Sub(Vertices[2]^,Vertices[0]^)));
-     P0ToCenter:=Vector3Sub(SphereCenter,Vertices[0]^);
-     DistanceFromPlane:=Vector3Dot(P0ToCenter,Normal);
-     if DistanceFromPlane<0.0 then begin
-      DistanceFromPlane:=-DistanceFromPlane;
-      Normal:=Vector3Neg(Normal);
-     end;
-     IsInsideContactPlane:=DistanceFromPlane<RadiusWithThreshold;
-     HasContact:=false;
-     ContactPoint:=Vector3Origin;
-     ContactRadiusSqr:=sqr(RadiusWithThreshold);
-     if IsInsideContactPlane then begin
-      if PointInTriangle(Vertices[0]^,Vertices[1]^,Vertices[2]^,Normal,SphereCenter) then begin
-       HasContact:=true;
-       ContactPoint:=Vector3Sub(SphereCenter,Vector3ScalarMul(Normal,DistanceFromPlane));
-      end else begin
-       for i:=0 to 2 do begin
-        DistanceSqr:=SegmentSqrDistance(Vertices[i]^,Vertices[ModuloThree[i+1]]^,SphereCenter,@NearestOnEdge);
-        if DistanceSqr<ContactRadiusSqr then begin
-         HasContact:=true;
-         ContactPoint:=NearestOnEdge;
+    if SkipListNode^.CountTriangles>0 then begin
+     for TriangleIndex:=SkipListNode^.FirstTriangleIndex to SkipListNode^.FirstTriangleIndex+(SkipListNode^.CountTriangles-1) do begin
+      Triangle:=@Shape.fMesh.fTriangles[TriangleIndex];
+      Vertices[0]:=@Shape.fMesh.fVertices[Triangle^.Vertices[0]];
+      Vertices[1]:=@Shape.fMesh.fVertices[Triangle^.Vertices[1]];
+      Vertices[2]:=@Shape.fMesh.fVertices[Triangle^.Vertices[2]];
+      Normal:=Vector3SafeNorm(Vector3Cross(Vector3Sub(Vertices[1]^,Vertices[0]^),Vector3Sub(Vertices[2]^,Vertices[0]^)));
+      P0ToCenter:=Vector3Sub(SphereCenter,Vertices[0]^);
+      DistanceFromPlane:=Vector3Dot(P0ToCenter,Normal);
+      if DistanceFromPlane<0.0 then begin
+       DistanceFromPlane:=-DistanceFromPlane;
+       Normal:=Vector3Neg(Normal);
+      end;
+      IsInsideContactPlane:=DistanceFromPlane<RadiusWithThreshold;
+      HasContact:=false;
+      ContactPoint:=Vector3Origin;
+      ContactRadiusSqr:=sqr(RadiusWithThreshold);
+      if IsInsideContactPlane then begin
+       if PointInTriangle(Vertices[0]^,Vertices[1]^,Vertices[2]^,Normal,SphereCenter) then begin
+        HasContact:=true;
+        ContactPoint:=Vector3Sub(SphereCenter,Vector3ScalarMul(Normal,DistanceFromPlane));
+       end else begin
+        for i:=0 to 2 do begin
+         DistanceSqr:=SegmentSqrDistance(Vertices[i]^,Vertices[ModuloThree[i+1]]^,SphereCenter,@NearestOnEdge);
+         if DistanceSqr<ContactRadiusSqr then begin
+          HasContact:=true;
+          ContactPoint:=NearestOnEdge;
+         end;
         end;
        end;
       end;
-     end;
-     if HasContact then begin
-      ContactToCenter:=Vector3Sub(SphereCenter,ContactPoint);
-      DistanceSqr:=Vector3LengthSquared(ContactToCenter);
-      if DistanceSqr<ContactRadiusSqr then begin
-       if DistanceSqr>EPSILON then begin
-        SumMinimumTranslationVector:=Vector3Add(SumMinimumTranslationVector,Vector3ScalarMul(Vector3SafeNorm(Vector3TermMatrixMulBasis(ContactToCenter,Shape.fWorldTransform)),Radius-sqrt(DistanceSqr)));
-       end else begin
-        SumMinimumTranslationVector:=Vector3Add(SumMinimumTranslationVector,Vector3ScalarMul(Vector3SafeNorm(Vector3TermMatrixMulBasis(Normal,Shape.fWorldTransform)),Radius));
+      if HasContact then begin
+       ContactToCenter:=Vector3Sub(SphereCenter,ContactPoint);
+       DistanceSqr:=Vector3LengthSquared(ContactToCenter);
+       if DistanceSqr<ContactRadiusSqr then begin
+        if DistanceSqr>EPSILON then begin
+         SumMinimumTranslationVector:=Vector3Add(SumMinimumTranslationVector,Vector3ScalarMul(Vector3SafeNorm(Vector3TermMatrixMulBasis(ContactToCenter,Shape.fWorldTransform)),Radius-sqrt(DistanceSqr)));
+        end else begin
+         SumMinimumTranslationVector:=Vector3Add(SumMinimumTranslationVector,Vector3ScalarMul(Vector3SafeNorm(Vector3TermMatrixMulBasis(Normal,Shape.fWorldTransform)),Radius));
+        end;
+        inc(Count);
+        Hit:=true;
+        WasHit:=true;
        end;
-       inc(Count);
-       Hit:=true;
-       WasHit:=true;
       end;
      end;
-     TriangleIndex:=Triangle^.Next;
     end;
     inc(SkipListNodeIndex);
    end else begin
@@ -34289,7 +39673,7 @@ var Hit:boolean;
 {$ifdef KraftSingleThreadedUsage}
  procedure QueryTree(AABBTree:TKraftDynamicAABBTree);
  var LocalStack:PKraftDynamicAABBTreeLongintArray;
-     LocalStackPointer,NodeID:longint;
+     LocalStackPointer,NodeID:TKraftInt32;
      Node:PKraftDynamicAABBTreeNode;
      CurrentShape:TKraftShape;
  begin
@@ -34308,6 +39692,9 @@ var Hit:boolean;
         CurrentShape:=Node^.UserData;
         if assigned(CurrentShape) and (assigned(CurrentShape.fRigidBody) and ((CurrentShape.fRigidBody.fCollisionGroups*CollisionGroups)<>[])) then begin
          case CurrentShape.fShapeType of
+          kstSignedDistanceField:begin
+           CollideSphereWithSignedDistanceField(TKraftShapeSignedDistanceField(CurrentShape));
+          end;
           kstSphere:begin
            CollideSphereWithSphere(TKraftShapeSphere(CurrentShape));
           end;
@@ -34329,12 +39716,14 @@ var Hit:boolean;
           kstMesh:begin
            CollideSphereWithMesh(TKraftShapeMesh(CurrentShape));
           end;
+          else begin
+          end;
          end;
         end;
        end else begin
         if AABBTree.fStackCapacity<=(LocalStackPointer+2) then begin
          AABBTree.fStackCapacity:=RoundUpToPowerOfTwo(LocalStackPointer+2);
-         ReallocMem(AABBTree.fStack,AABBTree.fStackCapacity*SizeOf(longint));
+         ReallocMem(AABBTree.fStack,AABBTree.fStackCapacity*SizeOf(TKraftInt32));
          LocalStack:=AABBTree.fStack;
         end;
         LocalStack^[LocalStackPointer+0]:=Node^.Children[0];
@@ -34349,17 +39738,20 @@ var Hit:boolean;
  end;
 {$else}
  procedure QueryTree(AABBTree:TKraftDynamicAABBTree);
-  procedure ProcessNode(NodeID:longint);
+  procedure ProcessNode(NodeID:TKraftInt32);
   var Node:PKraftDynamicAABBTreeNode;
       CurrentShape:TKraftShape;
   begin
-   if NodeID>=0 then begin
+   while NodeID>=0 do begin
     Node:=@AABBTree.fNodes[NodeID];
     if AABBIntersect(Node^.AABB,AABB) then begin
      if Node^.Children[0]<0 then begin
       CurrentShape:=Node^.UserData;
       if assigned(CurrentShape) and (assigned(CurrentShape.fRigidBody) and ((CurrentShape.fRigidBody.fCollisionGroups*CollisionGroups)<>[])) then begin
        case CurrentShape.fShapeType of
+        kstSignedDistanceField:begin
+         CollideSphereWithSignedDistanceField(TKraftShapeSignedDistanceField(CurrentShape));
+        end;
         kstSphere:begin
          CollideSphereWithSphere(TKraftShapeSphere(CurrentShape));
         end;
@@ -34375,26 +39767,30 @@ var Hit:boolean;
         kstPlane:begin
          CollideSphereWithPlane(TKraftShapePlane(CurrentShape));
         end;
-        kstTriangle:begin
+                kstTriangle:begin
          CollideSphereWithTriangle(TKraftShapeTriangle(CurrentShape));
         end;
         kstMesh:begin
          CollideSphereWithMesh(TKraftShapeMesh(CurrentShape));
         end;
+        else begin
+        end;
        end;
       end;
      end else begin
       ProcessNode(Node^.Children[0]);
-      ProcessNode(Node^.Children[1]);
+      NodeID:=Node^.Children[1];
+      continue;
      end;
     end;
+    break;
    end;
   end;
  begin
   ProcessNode(AABBTree.fRoot);
  end;
 {$endif}
-var TryCounter:longint;
+var TryCounter:TKraftInt32;
 begin
  result:=false;
  for TryCounter:=1 to TryIterations do begin
@@ -34402,9 +39798,15 @@ begin
   AABB.Min.x:=Center.x-Radius;
   AABB.Min.y:=Center.y-Radius;
   AABB.Min.z:=Center.z-Radius;
+{$ifdef SIMD}
+  AABB.Min.w:=0.0;
+{$endif}
   AABB.Max.x:=Center.x+Radius;
   AABB.Max.y:=Center.y+Radius;
   AABB.Max.z:=Center.z+Radius;
+{$ifdef SIMD}
+  AABB.Max.w:=0.0;
+{$endif}
   Sphere.Center:=Center;
   Sphere.Radius:=Radius;
   SumMinimumTranslationVector:=Vector3Origin;
@@ -34418,6 +39820,9 @@ begin
    Center.x:=Center.x+(SumMinimumTranslationVector.x/Count);
    Center.y:=Center.y+(SumMinimumTranslationVector.y/Count);
    Center.z:=Center.z+(SumMinimumTranslationVector.z/Count);
+{$ifdef SIMD}
+   Center.w:=0.0;
+{$endif}
   end else begin
    break;
   end;
