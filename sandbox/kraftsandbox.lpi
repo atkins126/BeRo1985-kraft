@@ -114,9 +114,16 @@
       <Version Value="2"/>
     </PublishOptions>
     <RunParams>
+      <local>
+        <LaunchingApplication PathPlusParams=""/>
+      </local>
       <FormatVersion Value="2"/>
       <Modes Count="1">
-        <Mode0 Name="default"/>
+        <Mode0 Name="default">
+          <local>
+            <LaunchingApplication PathPlusParams=""/>
+          </local>
+        </Mode0>
       </Modes>
     </RunParams>
     <RequiredPackages Count="3">
@@ -130,7 +137,7 @@
         <PackageName Value="LCL"/>
       </Item3>
     </RequiredPackages>
-    <Units Count="26">
+    <Units Count="27">
       <Unit0>
         <Filename Value="kraftsandbox.lpr"/>
         <IsPartOfProject Value="True"/>
@@ -238,14 +245,18 @@
         <Filename Value="UnitDemoSceneRaycastVehicle.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit25>
+      <Unit26>
+        <Filename Value="UnitDemoSceneSignedDistanceField.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit26>
     </Units>
   </ProjectOptions>
   <CompilerOptions>
     <Version Value="11"/>
     <PathDelim Value="\"/>
     <SearchPaths>
-      <IncludeFiles Value="..\src;..\..\..\PASMP.github\trunk\src;$(ProjOutDir)"/>
-      <OtherUnitFiles Value="..\src;..\..\..\PASMP.github\trunk\src"/>
+      <IncludeFiles Value="..\src;..\..\pasmp\src;$(ProjOutDir)"/>
+      <OtherUnitFiles Value="..\src;..\..\pasmp\src"/>
     </SearchPaths>
     <Parsing>
       <SyntaxOptions>
